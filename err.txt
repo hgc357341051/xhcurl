@@ -1,16 +1,16 @@
+Linux (PHP 8.2, Ubuntu 22.04)
+
+Run echo "=== 开始编译 XHCurl 扩展 ==="
 === 开始编译 XHCurl 扩展 ===
-PHP 版本: PHP 8.0.30 (cli) (built: May 14 2026 15:57:25) ( NTS )
+PHP 版本: PHP 8.2.31 (cli) (built: Jun 17 2026 02:29:11) (NTS)
 Configuring for:
-PHP Api Version:         20200930
-Zend Module Api No:      20200930
-Zend Extension Api No:   420200930
-configure.ac:22: warning: $as_echo is obsolete; use AS_ECHO(["message"]) instead
-build/php.m4:2072: PHP_CONFIG_NICE is expanded from...
-configure.ac:22: the top level
-configure.ac:165: warning: The macro `AC_PROG_LIBTOOL' is obsolete.
-configure.ac:165: You should run autoupdate.
+PHP Api Version:         20220829
+Zend Module Api No:      20220829
+Zend Extension Api No:   420220829
+configure.ac:162: warning: The macro `AC_PROG_LIBTOOL' is obsolete.
+configure.ac:162: You should run autoupdate.
 build/libtool.m4:99: AC_PROG_LIBTOOL is expanded from...
-configure.ac:165: the top level
+configure.ac:162: the top level
 checking for grep that handles long lines and -e... /usr/bin/grep
 checking for egrep... /usr/bin/grep -E
 checking for a sed that does not truncate output... /usr/bin/sed
@@ -34,9 +34,9 @@ checking build system type... x86_64-pc-linux-gnu
 checking host system type... x86_64-pc-linux-gnu
 checking target system type... x86_64-pc-linux-gnu
 checking for PHP prefix... /usr
-checking for PHP includes... -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib
-checking for PHP extension directory... /usr/lib/php/20200930
-checking for PHP installed headers prefix... /usr/include/php/20200930
+checking for PHP includes... -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib
+checking for PHP extension directory... /usr/lib/php/20220829
+checking for PHP installed headers prefix... /usr/include/php/20220829
 checking if debug is enabled... no
 checking if zts is enabled... no
 checking for gawk... gawk
@@ -99,90 +99,49 @@ configure: patching config.h.in
 configure: creating ./config.status
 config.status: creating config.h
 config.status: executing libtool commands
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c -o xhcurl.lo 
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c -o xhcurl_buffer.lo 
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c -o xhcurl_response.lo 
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c -o xhcurl_request.lo 
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c  -fPIC -DPIC -o .libs/xhcurl_buffer.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c  -fPIC -DPIC -o .libs/xhcurl.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c  -fPIC -DPIC -o .libs/xhcurl_response.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20200930 -I/usr/include/php/20200930/main -I/usr/include/php/20200930/TSRM -I/usr/include/php/20200930/Zend -I/usr/include/php/20200930/ext -I/usr/include/php/20200930/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c  -fPIC -DPIC -o .libs/xhcurl_request.o
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:151:5: error: unknown type name ‘GHashTable’
-  151 |     GHashTable                 *ctx_map;         /* 映射：CURL* -> xhcurl_req_context_t* */
-      |     ^~~~~~~~~~
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_request.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:151:5: error: unknown type name ‘GHashTable’
-  151 |     GHashTable                 *ctx_map;         /* 映射：CURL* -> xhcurl_req_context_t* */
-      |     ^~~~~~~~~~
+/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c -o xhcurl.lo  -MMD -MF xhcurl.dep -MT xhcurl.lo
+/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c -o xhcurl_buffer.lo  -MMD -MF xhcurl_buffer.dep -MT xhcurl_buffer.lo
+/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c -o xhcurl_response.lo  -MMD -MF xhcurl_response.dep -MT xhcurl_response.lo
+/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c -o xhcurl_request.lo  -MMD -MF xhcurl_request.dep -MT xhcurl_request.lo
+libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c -MMD -MF xhcurl.dep -MT xhcurl.lo  -fPIC -DPIC -o .libs/xhcurl.o
+libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c -MMD -MF xhcurl_response.dep -MT xhcurl_response.lo  -fPIC -DPIC -o .libs/xhcurl_response.o
+libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c -MMD -MF xhcurl_buffer.dep -MT xhcurl_buffer.lo  -fPIC -DPIC -o .libs/xhcurl_buffer.o
+libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c -MMD -MF xhcurl_request.dep -MT xhcurl_request.lo  -fPIC -DPIC -o .libs/xhcurl_request.o
 In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_response.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:151:5: error: unknown type name ‘GHashTable’
-  151 |     GHashTable                 *ctx_map;         /* 映射：CURL* -> xhcurl_req_context_t* */
-      |     ^~~~~~~~~~
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:151:5: error: unknown type name ‘GHashTable’
-  151 |     GHashTable                 *ctx_map;         /* 映射：CURL* -> xhcurl_req_context_t* */
-      |     ^~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c: In function ‘zim_XHRequest_setJsonBody’:
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:262:5: warning: implicit declaration of function ‘php_json_encode’ [-Wimplicit-function-declaration]
-  262 |     php_json_encode(&json_str, data, PHP_JSON_UNESCAPED_UNICODE);
-      |     ^~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_response.c: In function ‘zim_XHResponse_toJsonArray’:
-/home/runner/work/xhcurl/xhcurl/xhcurl_response.c:325:5: warning: implicit declaration of function ‘php_json_decode’ [-Wimplicit-function-declaration]
-  325 |     php_json_decode(&json_zv, json_str, obj->body->size, 1, PHP_JSON_PARSER_DEFAULT_DEPTH);
-      |     ^~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl.c: In function ‘zim_XHCurl_exec’:
-/home/runner/work/xhcurl/xhcurl/xhcurl.c:360:9: warning: implicit declaration of function ‘zend_throw_exception’; did you mean ‘zend_throw_error’? [-Wimplicit-function-declaration]
-  360 |         zend_throw_exception(xhcurl_exception_ce, "Failed to create request context", 0);
-      |         ^~~~~~~~~~~~~~~~~~~~
-      |         zend_throw_error
-/home/runner/work/xhcurl/xhcurl/xhcurl.c: In function ‘zm_startup_xhcurl_class’:
-/home/runner/work/xhcurl/xhcurl/xhcurl.c:523:74: error: ‘zend_ce_exception’ undeclared (first use in this function)
-  523 |     xhcurl_exception_ce = zend_register_internal_class_ex(&exception_ce, zend_ce_exception);
-      |                                                                          ^~~~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl.c:523:74: note: each undeclared identifier is reported only once for each function it appears in
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:262:38: error: ‘PHP_JSON_UNESCAPED_UNICODE’ undeclared (first use in this function)
-  262 |     php_json_encode(&json_str, data, PHP_JSON_UNESCAPED_UNICODE);
-      |                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:262:38: note: each undeclared identifier is reported only once for each function it appears in
-/home/runner/work/xhcurl/xhcurl/xhcurl_response.c:325:61: error: ‘PHP_JSON_PARSER_DEFAULT_DEPTH’ undeclared (first use in this function)
-  325 |     php_json_decode(&json_zv, json_str, obj->body->size, 1, PHP_JSON_PARSER_DEFAULT_DEPTH);
-      |                                                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_response.c:325:61: note: each undeclared identifier is reported only once for each function it appears in
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:263:5: warning: implicit declaration of function ‘smart_str_0’ [-Wimplicit-function-declaration]
-  263 |     smart_str_0(&json_str);
-      |     ^~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c: In function ‘xhcurl_context_create’:
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:538:17: warning: implicit declaration of function ‘smart_str_appendl’ [-Wimplicit-function-declaration]
-  538 |                 smart_str_appendl(&cookie_str, "; ", 2);
-      |                 ^~~~~~~~~~~~~~~~~
-make: *** [Makefile:209: xhcurl.lo] Error 1
+/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
+   19 | #include "smart_str.h"
+      |          ^~~~~~~~~~~~~
+compilation terminated.
+make: *** [Makefile:216: xhcurl_response.lo] Error 1
 make: *** Waiting for unfinished jobs....
-/home/runner/work/xhcurl/xhcurl/xhcurl_response.c:333:9: warning: implicit declaration of function ‘zend_clear_exception’ [-Wimplicit-function-declaration]
-  333 |         zend_clear_exception();
-      |         ^~~~~~~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:267:9: warning: implicit declaration of function ‘zend_throw_exception’; did you mean ‘zend_throw_error’? [-Wimplicit-function-declaration]
-  267 |         zend_throw_exception(xhcurl_exception_ce, "Failed to encode JSON", 0);
-      |         ^~~~~~~~~~~~~~~~~~~~
-      |         zend_throw_error
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:541:13: warning: implicit declaration of function ‘smart_str_appendc’ [-Wimplicit-function-declaration]
-  541 |             smart_str_appendc(&cookie_str, '=');
-      |             ^~~~~~~~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_request.c:281:5: warning: implicit declaration of function ‘smart_str_free’ [-Wimplicit-function-declaration]
-  281 |     smart_str_free(&json_str);
-      |     ^~~~~~~~~~~~~~
-make: *** [Makefile:213: xhcurl_response.lo] Error 1
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:545:9: warning: implicit declaration of function ‘smart_str_0’ [-Wimplicit-function-declaration]
-  545 |         smart_str_0(&cookie_str);
-      |         ^~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:548:13: warning: implicit declaration of function ‘smart_str_free’ [-Wimplicit-function-declaration]
-  548 |             smart_str_free(&cookie_str);
-      |             ^~~~~~~~~~~~~~
-make: *** [Makefile:215: xhcurl_request.lo] Error 1
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c: In function ‘xhcurl_is_cli_mode’:
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:750:13: error: ‘sapi_module’ undeclared (first use in this function)
-  750 |     return (sapi_module.name != NULL && strcmp(sapi_module.name, "cli") == 0);
-      |             ^~~~~~~~~~~
-/home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:750:13: note: each undeclared identifier is reported only once for each function it appears in
-make: *** [Makefile:211: xhcurl_buffer.lo] Error 1
+In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_request.c:8:
+/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
+   19 | #include "smart_str.h"
+      |          ^~~~~~~~~~~~~
+compilation terminated.
+make: *** [Makefile:219: xhcurl_request.lo] Error 1
+In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:8:
+/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
+   19 | #include "smart_str.h"
+      |          ^~~~~~~~~~~~~
+compilation terminated.
+In file included from /home/runner/work/xhcurl/xhcurl/xhcurl.c:8:
+/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
+   19 | #include "smart_str.h"
+      |          ^~~~~~~~~~~~~
+compilation terminated.
+make: *** [Makefile:213: xhcurl_buffer.lo] Error 1
+make: *** [Makefile:210: xhcurl.lo] Error 1
 Error: Process completed with exit code 2.
+
+
+
+Windows (PHP 8.2, nts)
+Run $phpVersion = "8.2"
+Downloading PHP Devel Pack: https://windows.php.net/downloads/php-devel/php-devel-pack-8.2-nts-vs16-x64.zip
+Invoke-WebRequest: D:\a\_temp\5467660e-3fcf-4c6b-b6fb-ad5710bcd385.ps1:11
+Line |
+  11 |  Invoke-WebRequest -Uri $develUrl -OutFile "php-devel.zip"
+     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Response status code does not indicate success: 404 (Not Found).
+Error: Process completed with exit code 1.

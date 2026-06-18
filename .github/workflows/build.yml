@@ -232,12 +232,13 @@ jobs:
 
   # =====================================================================
   # Job 3: Windows 平台编译（Windows Server 2022）
-  # 使用 PHP SDK 进行交叉编译
-  # 支持 PHP 8.0 ~ 8.3 (NTS)
+  # 暂时禁用：Windows 下 PHP 扩展编译需要完整的 PHP SDK 和源码树，
+  # 后续将通过 php-sdk-binary-tools 重新实现
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
     runs-on: windows-2022
+    if: false  # 暂时禁用，待修复
     strategy:
       fail-fast: false
       matrix:
@@ -386,7 +387,7 @@ jobs:
   # =====================================================================
   release:
     name: "Create Release"
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

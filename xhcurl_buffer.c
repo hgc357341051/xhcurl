@@ -530,22 +530,30 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
 
     /* 设置请求级 Cookie（通过 Cookie 头部） */
     if (req_obj->cookies != NULL) {
-        /* 构建 Cookie 头部字符串 */
-        smart_str cookie_str = {0};
+        /* 使用 zend_string 构建 Cookie 头部字符串（替代 smart_str） */
+        zend_string *cookie_str = NULL;
         xhcurl_cookie_t *cookie = req_obj->cookies;
         while (cookie != NULL) {
-            if (cookie_str.s != NULL) {
-                smart_str_appendl(&cookie_str, "; ", 2);
+            /* 计算当前 Cookie 片段长度：name=value */
+            size_t seg_len = strlen(cookie->name) + 1 + strlen(cookie->value);
+            if (cookie_str == NULL) {
+                /* 第一个 Cookie，直接创建 */
+                cookie_str = zend_string_alloc(seg_len, 0);
+                snprintf(ZSTR_VAL(cookie_str), seg_len + 1, "%s=%s", cookie->name, cookie->value);
+            } else {
+                /* 后续 Cookie，追加 "; name=value" */
+                size_t old_len = ZSTR_LEN(cookie_str);
+                size_t new_len = old_len + 2 + seg_len; /* 2 = "; " */
+                cookie_str = zend_string_extend(cookie_str, new_len, 0);
+                /* 在末尾追加 "; name=value" */
+                snprintf(ZSTR_VAL(cookie_str) + old_len, 3 + seg_len, "; %s=%s", cookie->name, cookie->value);
             }
-            smart_str_appendl(&cookie_str, cookie->name, strlen(cookie->name));
-            smart_str_appendc(&cookie_str, '=');
-            smart_str_appendl(&cookie_str, cookie->value, strlen(cookie->value));
             cookie = cookie->next;
         }
-        smart_str_0(&cookie_str);
-        if (cookie_str.s != NULL) {
-            curl_easy_setopt(ctx->easy, CURLOPT_COOKIE, ZSTR_VAL(cookie_str.s));
-            smart_str_free(&cookie_str);
+        /* 设置 curl Cookie 选项 */
+        if (cookie_str != NULL) {
+            curl_easy_setopt(ctx->easy, CURLOPT_COOKIE, ZSTR_VAL(cookie_str));
+            zend_string_release(cookie_str);
         }
     }
 

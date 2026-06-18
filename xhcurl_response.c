@@ -320,22 +320,46 @@ PHP_METHOD(XHResponse, toJsonArray)
     memcpy(json_str, obj->body->data, obj->body->size);
     json_str[obj->body->size] = '\0';
 
-    /* 使用 PHP 内置函数解析 JSON */
-    zval json_zv;
-    php_json_decode(&json_zv, json_str, obj->body->size, 1, PHP_JSON_PARSER_DEFAULT_DEPTH);
+    /* 调用 PHP 内置函数 json_decode 进行解析（避免直接依赖 php_json.h） */
+    zval json_ret;       /* json_decode 返回值 */
+    zval json_args[4];   /* json_decode 参数：json, assoc, depth, flags */
+    ZVAL_UNDEF(&json_ret);
+    /* 参数1：JSON 字符串 */
+    ZVAL_STRING(&json_args[0], json_str);
+    /* 参数2：assoc=true，返回数组而非对象 */
+    ZVAL_TRUE(&json_args[1]);
+    /* 参数3：递归深度，使用默认值 512 */
+    ZVAL_LONG(&json_args[2], 512);
+    /* 参数4：flags=0 */
+    ZVAL_LONG(&json_args[3], 0);
 
     /* 释放临时 JSON 字符串 */
     efree(json_str);
 
-    /* 检查解析是否成功 */
-    if (EG(exception) != NULL) {
+    /* 构造函数名字符串 "json_decode" */
+    zend_string *func_name = zend_string_init(ZEND_STRL("json_decode"), 0);
+    /* 调用用户空间 json_decode 函数 */
+    int call_result = call_user_function(EG(function_table), NULL, &json_ret,
+                                          func_name, 4, json_args);
+    /* 释放函数名字符串 */
+    zend_string_release(func_name);
+    /* 释放参数 */
+    zval_ptr_dtor(&json_args[0]);
+
+    /* 检查调用是否成功 */
+    if (call_result != SUCCESS || EG(exception) != NULL) {
         /* JSON 解析失败，清除异常并返回 null */
-        zend_clear_exception();
+        if (EG(exception) != NULL) {
+            zend_clear_exception();
+        }
+        if (Z_TYPE(json_ret) != IS_UNDEF) {
+            zval_ptr_dtor(&json_ret);
+        }
         RETURN_NULL();
     }
 
     /* 返回解析后的数组 */
-    RETURN_ZVAL(&json_zv, 0, 0);
+    RETURN_ZVAL(&json_ret, 0, 0);
 }
 
 /**

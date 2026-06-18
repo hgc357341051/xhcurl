@@ -15,10 +15,6 @@
 
 /* 引入 PHP 异常处理相关头文件（zend_throw_exception / zend_ce_exception） */
 #include "zend_exceptions.h"
-/* 引入 PHP smart_str 智能字符串头文件（smart_str_appendl / smart_str_0 等） */
-#include "smart_str.h"
-/* 引入 PHP JSON 扩展头文件（php_json_encode / php_json_decode） */
-#include "ext/json/php_json.h"
 /* 引入 PHP SAPI 头文件（sapi_module 全局变量） */
 #include "SAPI.h"
 

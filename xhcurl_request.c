@@ -248,6 +248,8 @@ PHP_METHOD(XHRequest, setBody)
 PHP_METHOD(XHRequest, setJsonBody)
 {
     zval *data;         /* 数组数据参数 */
+    zval json_ret;      /* json_encode 返回值 */
+    zval json_args[1];  /* json_encode 参数数组 */
 
     /* 解析参数 */
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -257,13 +259,25 @@ PHP_METHOD(XHRequest, setJsonBody)
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 将 PHP 数组编码为 JSON 字符串 */
-    smart_str json_str = {0};
-    php_json_encode(&json_str, data, PHP_JSON_UNESCAPED_UNICODE);
-    smart_str_0(&json_str);
+    /* 调用 PHP 内置函数 json_encode 进行编码（避免直接依赖 php_json.h） */
+    ZVAL_COPY(&json_args[0], data);
+    ZVAL_UNDEF(&json_ret);
+    /* 构造函数名字符串 "json_encode" */
+    zend_string *func_name = zend_string_init(ZEND_STRL("json_encode"), 0);
+    /* 调用用户空间 json_encode 函数 */
+    int call_result = call_user_function(EG(function_table), NULL, &json_ret, 
+                                          func_name, 1, json_args);
+    /* 释放函数名字符串 */
+    zend_string_release(func_name);
+    /* 释放参数 */
+    zval_ptr_dtor(&json_args[0]);
 
-    if (json_str.s == NULL) {
+    /* 检查调用是否成功以及返回值是否为字符串 */
+    if (call_result != SUCCESS || Z_TYPE(json_ret) != IS_STRING) {
         /* JSON 编码失败 */
+        if (Z_TYPE(json_ret) != IS_UNDEF) {
+            zval_ptr_dtor(&json_ret);
+        }
         zend_throw_exception(xhcurl_exception_ce, "Failed to encode JSON", 0);
         return;
     }
@@ -274,11 +288,11 @@ PHP_METHOD(XHRequest, setJsonBody)
     }
 
     /* 复制 JSON 字符串作为请求体 */
-    obj->body = estrndup(ZSTR_VAL(json_str.s), ZSTR_LEN(json_str.s));
-    obj->body_len = ZSTR_LEN(json_str.s);
+    obj->body = estrndup(Z_STRVAL(json_ret), Z_STRLEN(json_ret));
+    obj->body_len = Z_STRLEN(json_ret);
 
-    /* 释放 smart_str */
-    smart_str_free(&json_str);
+    /* 释放 json_encode 返回值 */
+    zval_ptr_dtor(&json_ret);
 
     /* 自动设置 Content-Type 为 application/json */
     xhcurl_header_add(&obj->headers, "Content-Type", "application/json");
