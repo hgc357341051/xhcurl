@@ -56,9 +56,24 @@ if test "$PHP_XHCURL" != "no"; then
   PHP_SUBST(XHCURL_SHARED_LIBADD)
 
   dnl 声明扩展的源文件列表
+  dnl 模块划分（遵循单一职责原则）：
+  dnl   xhcurl.c           - 模块入口 + XHCurl 全局管理器类
+  dnl   xhcurl_buffer.c    - 响应缓冲区管理（init/write/read/free）
+  dnl   xhcurl_header.c    - HTTP 头部链表操作（add/find/free/parse）
+  dnl   xhcurl_cookie.c    - Cookie 链表操作（add/free）
+  dnl   xhcurl_context.c   - 请求执行上下文 + curl 回调函数
+  dnl   xhcurl_utils.c     - 辅助工具函数（SAPI 判断、字符串处理）
+  dnl   xhcurl_response.c  - XHResponse 懒加载响应类
+  dnl   xhcurl_request.c   - XHRequest 请求构建器类
+  dnl   xhcurl_multi.c     - XHMulti 批量异步执行器类
+  dnl   xhcurl_threadpool.c - XHThreadPool CLI 线程池类
   PHP_NEW_EXTENSION(xhcurl,
     xhcurl.c \
     xhcurl_buffer.c \
+    xhcurl_header.c \
+    xhcurl_cookie.c \
+    xhcurl_context.c \
+    xhcurl_utils.c \
     xhcurl_response.c \
     xhcurl_request.c \
     xhcurl_multi.c \

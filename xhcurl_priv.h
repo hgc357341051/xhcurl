@@ -12,6 +12,7 @@
 #include <curl/curl.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>  /* tolower（Windows 下 strcasestr 兼容实现需要） */
 
 /* 引入 PHP 异常处理相关头文件（zend_throw_exception / zend_ce_exception） */
 #include "zend_exceptions.h"
@@ -31,6 +32,76 @@
 /* Unix/Linux 平台线程相关头文件 */
 # include <pthread.h>
 #endif
+
+/* +----------------------------------------------------------------------+
+ * | 跨平台字符串函数兼容层                                                |
+ * | Windows 下缺少 memmem 和 strcasestr，提供内联实现                    |
+ * +----------------------------------------------------------------------+
+ */
+
+#ifdef PHP_WIN32
+/**
+ * Windows 下 memmem 的兼容实现
+ * 在内存块中查找子内存块
+ * @param haystack    主内存块
+ * @param haystacklen 主内存块长度
+ * @param needle      要查找的子内存块
+ * @param needlelen   子内存块长度
+ * @return 找到的位置指针，未找到返回 NULL
+ */
+static inline void *xhcurl_memmem(const void *haystack, size_t haystacklen,
+                                   const void *needle, size_t needlelen)
+{
+    /* 子串比主串长，不可能找到 */
+    if (needlelen > haystacklen) return NULL;
+    /* 空子串匹配起始位置 */
+    if (needlelen == 0) return (void *)haystack;
+
+    /* 逐位置检查是否匹配 */
+    const char *h = (const char *)haystack;
+    const char *n = (const char *)needle;
+    /* 可选起始位置数 */
+    size_t max_pos = haystacklen - needlelen;
+    for (size_t i = 0; i <= max_pos; i++) {
+        if (memcmp(h + i, n, needlelen) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Windows 下 strcasestr 的兼容实现
+ * 不区分大小写地查找子串
+ * @param haystack 主字符串
+ * @param needle   要查找的子串
+ * @return 找到的位置指针，未找到返回 NULL
+ */
+static inline char *xhcurl_strcasestr(const char *haystack, const char *needle)
+{
+    /* 空子串匹配起始位置 */
+    if (*needle == '\0') return (char *)haystack;
+
+    /* 逐起始位置检查 */
+    for (const char *h = haystack; *h != '\0'; h++) {
+        const char *p = h;
+        const char *n = needle;
+        /* 不区分大小写逐字符比较 */
+        while (*p && *n && tolower((unsigned char)*p) == tolower((unsigned char)*n)) {
+            p++;
+            n++;
+        }
+        /* 完整匹配子串 */
+        if (*n == '\0') return (char *)h;
+    }
+    return NULL;
+}
+
+/* 用宏将标准函数名重定向到兼容实现 */
+#define memmem(h, hl, n, nl) xhcurl_memmem((h), (hl), (n), (nl))
+#define strcasestr(h, n)     xhcurl_strcasestr((h), (n))
+
+#endif /* PHP_WIN32 */
 
 /* +----------------------------------------------------------------------+
  * | 响应缓冲区数据结构                                                    |
