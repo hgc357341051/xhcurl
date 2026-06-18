@@ -116,6 +116,9 @@ static zend_object *xhcurl_create_obj(zend_class_entry *class_type)
     obj->user_agent = NULL;                             /* 无自定义 User-Agent */
     obj->proxy = NULL;                                  /* 无代理 */
     obj->max_response_size = XHCURL_DEFAULT_MAX_RESPONSE_SIZE; /* 默认最大 10MB */
+    obj->http2_enabled = 1;                             /* 默认启用 HTTP/2 */
+    obj->retry_count = 0;                               /* 默认不重试 */
+    obj->retry_delay_ms = 100;                          /* 默认重试间隔 100ms */
 
     /* 设置对象释放函数 */
     obj->std.handlers = zend_get_std_object_handlers();
@@ -348,6 +351,64 @@ PHP_METHOD(XHCurl, setMaxResponseSize)
 }
 
 /**
+ * 设置是否启用 HTTP/2
+ * XHCurl::setHttp2(bool $enabled): static
+ * 启用后对支持 HTTP/2 的服务器自动升级协议，提升并发性能
+ */
+PHP_METHOD(XHCurl, setHttp2)
+{
+    zend_bool enabled;  /* 是否启用 HTTP/2 */
+
+    /* 解析参数 */
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 获取当前对象 */
+    xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 设置 HTTP/2 启用状态 */
+    obj->http2_enabled = enabled;
+}
+
+/**
+ * 设置失败重试机制
+ * XHCurl::setRetry(int $count, int $delayMs = 100): static
+ * @param count   重试次数（0 表示不重试）
+ * @param delayMs 重试间隔（毫秒）
+ */
+PHP_METHOD(XHCurl, setRetry)
+{
+    zend_long count;       /* 重试次数 */
+    zend_long delay_ms;    /* 重试间隔（毫秒） */
+
+    /* 解析参数：count 必填，delay_ms 可选默认 100ms */
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(count)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(delay_ms)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 获取当前对象 */
+    xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 参数校验：重试次数不能为负 */
+    if (count < 0) {
+        zend_argument_value_error(1, "must be non-negative");
+        RETURN_THROWS();
+    }
+    /* 重试间隔不能为负 */
+    if (delay_ms < 0) {
+        zend_argument_value_error(2, "must be non-negative");
+        RETURN_THROWS();
+    }
+
+    /* 设置重试参数 */
+    obj->retry_count = count;
+    obj->retry_delay_ms = (delay_ms > 0) ? delay_ms : 100;
+}
+
+/**
  * 同步执行单个请求
  * XHCurl::exec(XHRequest $request): XHResponse
  * 阻塞等待请求完成后返回响应
@@ -373,12 +434,67 @@ PHP_METHOD(XHCurl, exec)
         return;
     }
 
-    /* 执行同步请求（curl_easy_perform 阻塞等待完成） */
-    CURLcode res = curl_easy_perform(ctx->easy);
-
-    /* 获取 HTTP 状态码 */
+    /* +--------------------------------------------------------------+
+     * | 执行同步请求，支持失败重试                                    |
+     * | 重试条件：网络错误（CURLE_*)或 HTTP 5xx 服务器错误            |
+     * | 重试次数由 setRetry() 配置，默认 0 不重试                     |
+     * +--------------------------------------------------------------+
+     */
+    CURLcode res = CURLE_OK;
     long status_code = 0;
-    curl_easy_getinfo(ctx->easy, CURLINFO_RESPONSE_CODE, &status_code);
+    long attempt = 0;  /* 当前尝试次数（0 = 首次请求） */
+
+    /* 重试循环：最多尝试 retry_count + 1 次 */
+    while (1) {
+        /* 执行同步请求（curl_easy_perform 阻塞等待完成） */
+        res = curl_easy_perform(ctx->easy);
+
+        /* 获取 HTTP 状态码 */
+        status_code = 0;
+        curl_easy_getinfo(ctx->easy, CURLINFO_RESPONSE_CODE, &status_code);
+
+        /* 判断是否需要重试 */
+        zend_bool should_retry = 0;
+        /* 条件1：curl 执行失败（网络错误、连接超时等） */
+        if (res != CURLE_OK) {
+            should_retry = 1;
+        }
+        /* 条件2：HTTP 5xx 服务器错误 */
+        else if (status_code >= 500 && status_code < 600) {
+            should_retry = 1;
+        }
+
+        /* 判断是否还有重试机会 */
+        if (should_retry && attempt < curl_obj->retry_count) {
+            /* 需要重试：清理当前请求的数据，准备下一次尝试 */
+            attempt++;
+
+            /* 重置响应体缓冲区（保留容量，仅重置大小） */
+            ctx->body_buf.size = 0;
+            /* 重置响应头缓冲区 */
+            ctx->header_buf.size = 0;
+            /* 释放已解析的头部链表 */
+            xhcurl_header_list_free(ctx->parsed_headers);
+            ctx->parsed_headers = NULL;
+
+            /* 等待重试间隔（毫秒级 sleep） */
+            if (curl_obj->retry_delay_ms > 0) {
+#ifdef PHP_WIN32
+                /* Windows 下使用 Sleep 函数（毫秒） */
+                Sleep((DWORD)curl_obj->retry_delay_ms);
+#else
+                /* Unix 下使用 usleep（微秒） */
+                usleep((useconds_t)curl_obj->retry_delay_ms * 1000);
+#endif
+            }
+
+            /* 继续下一次重试 */
+            continue;
+        }
+
+        /* 无需重试或重试次数用尽，退出循环 */
+        break;
+    }
 
     /* 获取请求总耗时 */
     double total_time = 0.0;
@@ -482,6 +598,17 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_setMaxResponseSize, 0, 0, 1)
     ZEND_ARG_INFO(0, bytes)
 ZEND_END_ARG_INFO()
 
+/* setHttp2 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_setHttp2, 0, 0, 1)
+    ZEND_ARG_INFO(0, enabled)
+ZEND_END_ARG_INFO()
+
+/* setRetry 参数信息：count 必填，delayMs 可选 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_setRetry, 0, 0, 1)
+    ZEND_ARG_INFO(0, count)
+    ZEND_ARG_INFO(0, delayMs)
+ZEND_END_ARG_INFO()
+
 /* exec 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_exec, 0, 0, 1)
     ZEND_ARG_INFO(0, request)
@@ -506,6 +633,10 @@ static const zend_function_entry xhcurl_methods[] = {
     PHP_ME(XHCurl, setProxy, arginfo_xhcurl_setProxy, ZEND_ACC_PUBLIC)
     /* 设置最大响应体大小 */
     PHP_ME(XHCurl, setMaxResponseSize, arginfo_xhcurl_setMaxResponseSize, ZEND_ACC_PUBLIC)
+    /* 设置是否启用 HTTP/2 */
+    PHP_ME(XHCurl, setHttp2, arginfo_xhcurl_setHttp2, ZEND_ACC_PUBLIC)
+    /* 设置失败重试机制 */
+    PHP_ME(XHCurl, setRetry, arginfo_xhcurl_setRetry, ZEND_ACC_PUBLIC)
     /* 同步执行单个请求 */
     PHP_ME(XHCurl, exec, arginfo_xhcurl_exec, ZEND_ACC_PUBLIC)
     /* 结束标记 */

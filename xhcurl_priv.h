@@ -31,6 +31,7 @@
 #else
 /* Unix/Linux 平台线程相关头文件 */
 # include <pthread.h>
+# include <unistd.h>  /* usleep（重试间隔 sleep） */
 #endif
 
 /* +----------------------------------------------------------------------+
@@ -158,6 +159,9 @@ typedef struct _xhcurl_obj {
     char               *user_agent;         /* 默认 User-Agent */
     char               *proxy;              /* 默认代理服务器地址 */
     size_t              max_response_size;  /* 响应体最大允许大小（字节） */
+    zend_bool           http2_enabled;      /* 是否启用 HTTP/2（默认启用） */
+    long                retry_count;        /* 失败重试次数（默认 0 不重试） */
+    long                retry_delay_ms;     /* 重试间隔（毫秒，默认 100ms） */
     zend_object         std;                /* PHP 对象标准头（必须放在最后） */
 } xhcurl_obj_t;
 

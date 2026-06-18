@@ -108,6 +108,21 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
         curl_easy_setopt(ctx->easy, CURLOPT_MAXREDIRS, req_obj->max_redirects);
     }
 
+    /* +--------------------------------------------------------------+
+     * | HTTP/2 支持（性能优化）                                       |
+     * | 启用 HTTP/2 协议协商，对支持 HTTP/2 的服务器自动升级          |
+     * | 需要 libcurl >= 7.47.0 且编译时启用 HTTP/2 支持              |
+     * +--------------------------------------------------------------+
+     */
+#ifdef CURLPIPE_MULTIPLEX
+    if (curl_obj->http2_enabled) {
+        /* 启用 HTTP/2（允许服务器协商升级） */
+        curl_easy_setopt(ctx->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+        /* 启用 HTTP/2 多路复用（连接共享） */
+        curl_easy_setopt(ctx->easy, CURLOPT_PIPEWAIT, 1L);
+    }
+#endif
+
     /* 构建请求头列表：先添加全局头部，再添加请求级头部（请求级可覆盖全局） */
     struct curl_slist *headers = NULL;
 
