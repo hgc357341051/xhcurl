@@ -328,6 +328,18 @@ extern zend_class_entry *xhthreadpool_ce;
 extern zend_class_entry *xhcurl_exception_ce;
 
 /* +----------------------------------------------------------------------+
+ * | JSON 函数指针缓存（性能优化）                                        |
+ * | 在 MINIT 时缓存 json_encode/json_decode 的函数指针，                 |
+ * | 避免每次调用都通过 zend_hash_find 查找函数表                         |
+ * +----------------------------------------------------------------------+
+ */
+
+/* json_encode 函数指针（MINIT 时初始化） */
+extern zend_function *xhcurl_json_encode_func;
+/* json_decode 函数指针（MINIT 时初始化） */
+extern zend_function *xhcurl_json_decode_func;
+
+/* +----------------------------------------------------------------------+
  * | 缓冲区操作函数声明（xhcurl_buffer.c）                                |
  * +----------------------------------------------------------------------+
  */

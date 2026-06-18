@@ -336,13 +336,21 @@ PHP_METHOD(XHResponse, toJsonArray)
     /* 释放临时 JSON 字符串 */
     efree(json_str);
 
-    /* 构造函数名字符串 "json_decode" */
-    zend_string *func_name = zend_string_init(ZEND_STRL("json_decode"), 0);
-    /* 调用用户空间 json_decode 函数 */
-    int call_result = call_user_function(EG(function_table), NULL, &json_ret,
+    /* 调用 json_decode 函数（优先使用 MINIT 阶段缓存的函数指针） */
+    int call_result = FAILURE;
+    if (xhcurl_json_decode_func != NULL) {
+        /* 使用缓存的函数指针直接调用，避免函数表哈希查找 */
+        zend_call_known_function(xhcurl_json_decode_func, NULL, NULL,
+                                  &json_ret, 4, json_args, NULL);
+        /* zend_call_known_function 无返回值，通过异常判断是否成功 */
+        call_result = (EG(exception) == NULL) ? SUCCESS : FAILURE;
+    } else {
+        /* 回退方案：通过函数名查找调用 */
+        zend_string *func_name = zend_string_init(ZEND_STRL("json_decode"), 0);
+        call_result = call_user_function(EG(function_table), NULL, &json_ret,
                                           func_name, 4, json_args);
-    /* 释放函数名字符串 */
-    zend_string_release(func_name);
+        zend_string_release(func_name);
+    }
     /* 释放参数 */
     zval_ptr_dtor(&json_args[0]);
 

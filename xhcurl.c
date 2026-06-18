@@ -15,6 +15,18 @@
 /* XHCurl 类入口指针 */
 zend_class_entry *xhcurl_ce;
 
+/* +----------------------------------------------------------------------+
+ * | JSON 函数指针缓存（性能优化）                                        |
+ * | 在 MINIT 时缓存 json_encode/json_decode 的函数指针，                 |
+ * | 避免每次调用都通过 zend_hash_find 查找函数表                         |
+ * +----------------------------------------------------------------------+
+ */
+
+/* json_encode 函数指针（MINIT 时初始化） */
+zend_function *xhcurl_json_encode_func = NULL;
+/* json_decode 函数指针（MINIT 时初始化） */
+zend_function *xhcurl_json_decode_func = NULL;
+
 /* XHCurlException 异常类入口指针 */
 zend_class_entry *xhcurl_exception_ce;
 
@@ -552,6 +564,26 @@ PHP_MINIT_FUNCTION(xhcurl)
 
     /* 注册扩展版本常量 */
     REGISTER_STRING_CONSTANT("XHCURL_VERSION", PHP_XHCURL_VERSION, CONST_CS | CONST_PERSISTENT);
+
+    /* +------------------------------------------------------------------+
+     * | 缓存 JSON 函数指针（性能优化）                                    |
+     * | 在 MINIT 阶段一次性查找 json_encode/json_decode 函数表，          |
+     * | 后续调用直接使用缓存的指针，避免每次调用都做哈希查找              |
+     * +------------------------------------------------------------------+
+     */
+    {
+        /* 在全局函数表中查找 json_encode */
+        zend_function *func = zend_hash_str_find_ptr(CG(function_table), "json_encode", sizeof("json_encode") - 1);
+        if (func != NULL) {
+            xhcurl_json_encode_func = func;
+        }
+
+        /* 在全局函数表中查找 json_decode */
+        func = zend_hash_str_find_ptr(CG(function_table), "json_decode", sizeof("json_decode") - 1);
+        if (func != NULL) {
+            xhcurl_json_decode_func = func;
+        }
+    }
 
     return SUCCESS;
 }
