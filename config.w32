@@ -1,0 +1,32 @@
+// +----------------------------------------------------------------------+
+// | XHCurl 扩展 - Windows 构建配置                                       |
+// | 类似 curl 的 PHP 扩展，支持单次/批量/多线程同步异步请求               |
+// +----------------------------------------------------------------------+
+
+// 检查用户是否启用 xhcurl 扩展
+ARG_ENABLE("xhcurl", "enable xhcurl support", "no");
+
+if (PHP_XHCURL != "no") {
+    // 检查 libcurl 库文件是否存在
+    if (CHECK_LIB("libcurl.lib", "xhcurl", PHP_XHCURL) &&
+        CHECK_HEADER_ADD_INCLUDE("curl/curl.h", "CFLAGS_XHCURL")) {
+
+        // 声明扩展的源文件列表
+        EXTENSION("xhcurl",
+            "xhcurl.c " +
+            "xhcurl_buffer.c " +
+            "xhcurl_response.c " +
+            "xhcurl_request.c " +
+            "xhcurl_multi.c " +
+            "xhcurl_threadpool.c",
+            PHP_XHCURL_SHARED);
+
+        // 定义扩展可用宏
+        AC_DEFINE('HAVE_XHCURL', 1, 'Have xhcurl extension');
+
+        // Windows 线程支持（线程池功能依赖）
+        AC_DEFINE('HAVE_WIN32_THREAD', 1, 'Have Windows thread support');
+    } else {
+        WARNING("xhcurl not enabled; libcurl libraries and headers not found");
+    }
+}

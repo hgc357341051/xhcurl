@@ -1,0 +1,58 @@
+# +----------------------------------------------------------------------+
+# | XHCurl 扩展 - Git 忽略文件                                           |
+# +----------------------------------------------------------------------+
+
+# 编译产物
+*.o
+*.lo
+*.la
+*.slo
+.libs/
+.deps/
+
+# 模块共享库文件
+modules/*.so
+modules/*.dll
+
+# 配置脚本生成文件
+aclocal.m4
+autom4te.cache/
+config.guess
+config.h.in
+config.log
+config.status
+config.sub
+configure
+install-sh
+ltmain.sh
+missing
+Makefile
+mkinstalldirs
+run-tests.php
+libtool
+
+# PHP 开发工具
+php_xhcurl.h.gcov
+xhcurl.c.gcov
+xhcurl.la
+
+# IDE 文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS 文件
+.DS_Store
+Thumbs.db
+
+# 测试输出
+tests/*.out
+tests/*.diff
+tests/*.exp
+tests/*.log
+tests/*.mem
+tests/*.php
+tests/*.sh
+tests/*.xml

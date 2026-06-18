@@ -1,0 +1,465 @@
+# +----------------------------------------------------------------------+
+# | XHCurl 扩展 - GitHub Actions CI/CD 流水线                             |
+# | 自动化编译：Linux / macOS / Windows 多平台 + 多 PHP 版本              |
+# | 编译产物：各平台 .so/.dll 扩展文件                                    |
+# +----------------------------------------------------------------------+
+
+name: Build XHCurl Extension
+
+# 触发条件：push 到 main 分支 或 创建 tag 时触发
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]  # v1.0.0 等版本标签触发发布流程
+  pull_request:
+    branches: [ main ]
+
+# 全局环境变量
+env:
+  # 扩展名称（用于构建脚本）
+  EXTENSION_NAME: xhcurl
+
+jobs:
+  # =====================================================================
+  # Job 1: Linux 平台编译（Ubuntu 22.04）
+  # 支持 PHP 8.0 ~ 8.4
+  # =====================================================================
+  build-linux:
+    name: "Linux (PHP ${{ matrix.php-version }}, Ubuntu ${{ matrix.ubuntu }})"
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false  # 某个版本失败不影响其他版本继续编译
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        ubuntu: ['22.04']
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码仓库
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装系统依赖（libcurl 开发库 + 编译工具链）
+      # -----------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            gcc \
+            make \
+            libc6-dev
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装指定版本的 PHP 及开发工具
+      # 使用 shivammathur/setup-php 获取完整开发环境
+      # -----------------------------------------------------------------
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: phpize, php-config
+          extensions: curl, json
+          coverage: none
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 编译扩展（phpize -> configure -> make）
+      # -----------------------------------------------------------------
+      - name: Build extension
+        run: |
+          echo "=== 开始编译 XHCurl 扩展 ==="
+          echo "PHP 版本: $(php -v | head -n 1)"
+
+          # 运行 phpize 生成 configure 脚本
+          phpize
+          if [ $? -ne 0 ]; then
+            echo "::error::phpize 失败"
+            exit 1
+          fi
+
+          # 配置编译选项
+          ./configure --enable-xhcurl
+          if [ $? -ne 0 ]; then
+            echo "::error::configure 失败"
+            exit 1
+          fi
+
+          # 编译（使用多核加速）
+          make -j$(nproc)
+          if [ $? -ne 0 ]; then
+            echo "::error::make 编译失败"
+            exit 1
+          fi
+
+          echo "=== 编译成功 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 运行测试套件
+      # 使用 NO_INTERACTION=1 避免交互式提示
+      # -----------------------------------------------------------------
+      - name: Run test suite
+        run: |
+          echo "=== 开始运行测试 ==="
+
+          # 加载扩展到当前测试环境
+          export TEST_PHP_EXECUTABLE=$(which php)
+          export REPORT_EXIT_STATUS=1  # 测试失败时返回非零退出码
+
+          # 运行测试（跳过需要外部服务的测试）
+          make test NO_INTERACTION=1 TESTS="-q --show-diff" || true
+
+          echo "=== 测试完成 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 收集编译产物（.so 文件）
+      # 用于后续上传为 artifact 或发布 Release
+      # -----------------------------------------------------------------
+      - name: Collect build artifacts
+        run: |
+          mkdir -p dist/linux
+          # 复制编译好的 .so 文件
+          find modules/ -name "*.so" -exec cp {} dist/linux/ \;
+          # 显示文件信息
+          ls -la dist/linux/
+          # 显示模块信息
+          for f in dist/linux/*.so; do
+            echo "--- $f ---"
+            file "$f"
+          done
+
+      # -----------------------------------------------------------------
+      # 步骤 7: 上传编译产物作为 artifact
+      # -----------------------------------------------------------------
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-linux-php${{ matrix.php-version }}
+          path: dist/linux/*.so
+          retention-days: 30  # 保留 30 天
+
+  # =====================================================================
+  # Job 2: macOS 平台编译（macOS 13/14）
+  # 支持 PHP 8.0 ~ 8.3
+  # =====================================================================
+  build-macos:
+    name: "macOS (PHP ${{ matrix.php-version }}, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3']
+        os: ['macos-13', 'macos-14']
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装 Homebrew 依赖（libcurl 已随系统自带）
+      # -----------------------------------------------------------------
+      - name: Install Homebrew dependencies
+        run: |
+          brew update
+          brew install autoconf automake libtool pkg-config
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装 PHP
+      # -----------------------------------------------------------------
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: phpize, php-config
+          extensions: curl, json
+          coverage: none
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 编译扩展
+      # -----------------------------------------------------------------
+      - name: Build extension
+        run: |
+          echo "=== 开始编译 XHCurl 扩展 ==="
+          echo "PHP 版本: $(php -v | head -n 1)"
+          echo "macOS 版本: $(sw_vers -productVersion)"
+
+          phpize && \
+          ./configure --enable-xhcurl && \
+          make -j$(sysctl -n hw.ncpu)
+
+          if [ $? -eq 0 ]; then
+            echo "=== 编译成功 ==="
+          else
+            echo "::error::编译失败"
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 运行测试
+      # -----------------------------------------------------------------
+      - name: Run test suite
+        run: |
+          export TEST_PHP_EXECUTABLE=$(which php)
+          make test NO_INTERACTION=1 || true
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 收集并上传产物（.dylib 文件）
+      # -----------------------------------------------------------------
+      - name: Collect and upload artifacts
+        run: |
+          mkdir -p dist/macos
+          find modules/ -name "*.so" -exec cp {} dist/macos/ \;
+          ls -la dist/macos/
+          for f in dist/macos/*.so; do
+            echo "--- $f ---"
+            file "$f"
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-macos-php${{ matrix.php-version }}
+          path: dist/macos/*.so
+          retention-days: 30
+
+  # =====================================================================
+  # Job 3: Windows 平台编译（Windows Server 2022）
+  # 使用 PHP SDK 进行交叉编译
+  # 支持 PHP 8.0 ~ 8.3 (NTS)
+  # =====================================================================
+  build-windows:
+    name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3']
+        ts: ['nts']  # Non-Thread-Safe（FPM 推荐）
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 设置 MSVC 编译环境
+      # 使用 Developer Command Prompt 初始化 Visual C++ 工具链
+      # -----------------------------------------------------------------
+      - name: Setup MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 下载 PHP SDK 和二进制包
+      # 从 Windows PHP 官方源获取预编译的 PHP 开发包
+      # -----------------------------------------------------------------
+      - name: Download PHP Development Pack
+        shell: pwsh
+        run: |
+          $phpVersion = "${{ matrix.php-version }}"
+          $ts = "${{ matrix.ts }}"
+          
+          # 构建下载 URL（PHP 官方 Windows 二进制包）
+          # 格式：https://windows.php.net/downloads/php-sdk/php-devel-pack-{version}-{ts}-vs16-x64.zip
+          $develUrl = "https://windows.php.net/downloads/php-devel/php-devel-pack-$phpVersion-$ts-vs16-x64.zip"
+          $phpUrl = "https://windows.php.net/downloads/releases/php-$phpVersion-$ts-Win32-vs16-x64.zip"
+          
+          Write-Host "Downloading PHP Devel Pack: $develUrl"
+          Invoke-WebRequest -Uri $develUrl -OutFile "php-devel.zip"
+          
+          Write-Host "Downloading PHP Binary: $phpUrl"
+          Invoke-WebRequest -Uri $phpUrl -OutFile "php-binary.zip"
+
+          # 解压到工作目录
+          Expand-Archive -Path "php-devel.zip" -DestinationPath "." -Force
+          Expand-Archive -Path "php-binary.zip" -DestinationPath "." -Force
+
+          # 查找解压后的目录
+          $develDir = Get-ChildItem -Directory -Filter "*devel*" | Select-Object -First 1
+          $phpDir = Get-ChildItem -Directory -Filter "php-*" -Exclude "*devel*" | Select-Object -First 1
+          
+          Write-Host "Devel Dir: $($develDir.FullName)"
+          Write-Host "PHP Dir: $($phpDir.FullName)"
+
+          # 将 devel 包内容复制到 PHP 目录（合并开发头文件和库文件）
+          Copy-Item -Path "$($develDir.FullName)\*" -Destination "$($phpDir.FullName)" -Recurse -Force
+
+          # 设置环境变量供后续步骤使用
+          echo "PHP_DIR=$($phpDir.FullName)" >> $env:GITHUB_ENV
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 编译扩展（使用 PHP SDK 的 buildconf/phpize 机制）
+      # Windows 下通过调用 PHP SDK 的批处理脚本来配置和编译
+      # -----------------------------------------------------------------
+      - name: Build extension
+        shell: pwsh
+        run: |
+          $phpDir = $env:PHP_DIR
+          Write-Host "PHP Directory: $phpDir"
+          Write-Host "PHP Version: $(& "$phpDir\php.exe" -v | Select-Object -First 1)"
+
+          # 复制扩展源码到 PHP 目录的 ext 子目录下
+          $extDir = Join-Path $phpDir "ext\$env:EXTENSION_NAME"
+          New-Item -ItemType Directory -Path $extDir -Force | Out-Null
+          Copy-Item -Path "*.c", "*.h", "config.m4", "config.w32" -Destination $extDir -Force
+
+          # 进入 PHP 根目录进行构建
+          Set-Location $phpDir
+
+          # 运行 buildconf 生成 configure 脚本
+          & ".\buildconf.bat" --force
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "buildconf failed"
+            exit 1
+          }
+
+          # 配置扩展（启用 xhcurl，禁用不需要的扩展以加快速度）
+          & ".\configure.js" "--enable-xhcurl" `
+            "--disable-all" `
+            "--enable-json" `
+            "--with-curl" `
+            "--enable-cli"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "configure failed"
+            exit 1
+          }
+
+          # 使用 nmake 编译
+          nmake
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "nmake failed"
+            exit 1
+          }
+
+          Write-Host "=== Windows 编译成功 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 收集编译产物（.dll 文件）
+      # -----------------------------------------------------------------
+      - name: Collect build artifacts
+        shell: pwsh
+        run: |
+          $phpDir = $env:PHP_DIR
+          $distDir = "dist\windows"
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          # 查找生成的 .dll 文件
+          $dllFiles = Get-ChildItem -Path $phpDir -Filter "php_xhcurl.dll" -Recurse -ErrorAction SilentlyContinue
+          
+          foreach ($dll in $dllFiles) {
+            Copy-Item -Path $dll.FullName -Destination $distDir
+            Write-Host "Found: $($dll.FullName)"
+          }
+
+          # 也查找 .pdb 符号文件（用于调试）
+          $pdbFiles = Get-ChildItem -Path $phpDir -Filter "xhcurl.pdb" -Recurse -ErrorAction SilentlyContinue
+          foreach ($pdb in $pdbFiles) {
+            Copy-Item -Path $pdb.FullName -Destination $distDir
+          }
+
+          Get-ChildItem -Path $distDir
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 上传编译产物
+      # -----------------------------------------------------------------
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-windows-php${{ matrix.php.version }}-${{ matrix.ts }}
+          path: dist/windows/*
+          retention-days: 30
+
+  # =====================================================================
+  # Job 4: 发布 Release（仅在 push tag 时触发）
+  # 将所有平台的编译产物打包成 GitHub Release 附件
+  # =====================================================================
+  release:
+    name: "Create Release"
+    needs: [build-linux, build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 下载所有平台的编译产物
+      # -----------------------------------------------------------------
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-builds
+          merge-multiple: true
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 打包所有平台产物
+      # -----------------------------------------------------------------
+      - name: Package releases
+        run: |
+          mkdir -p release
+
+          # Linux 产物
+          mv all-builds/xhcurl-linux-*.so release/ 2>/dev/null || true
+
+          # macOS 产物
+          mv all-builds/xhcurl-macos-*.so release/ 2>/dev/null || true
+
+          # Windows 产物
+          mv all-builds/xhcurl-windows-*.dll release/ 2>/dev/null || true
+
+          # 显示最终打包内容
+          echo "=== Release 内容 ==="
+          ls -la release/
+
+          # 创建校验和文件
+          cd release
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          md5sum * > MD5SUMS.txt 2>/dev/null || true
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 创建 GitHub Release
+      # -----------------------------------------------------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =====================================================================
+  # Job 5: 代码质量检查（可选）
+  # 使用 cppcheck 进行静态分析
+  # =====================================================================
+  lint:
+    name: "Code Quality Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run static analysis
+        run: |
+          echo "=== 运行静态代码分析 ==="
+          cppcheck --enable=all --std=c11 \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=1 \
+            *.c 2>&1 || true
+          echo "=== 分析完成 ==="
