@@ -13,6 +13,15 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* 引入 PHP 异常处理相关头文件（zend_throw_exception / zend_ce_exception） */
+#include "zend_exceptions.h"
+/* 引入 PHP smart_str 智能字符串头文件（smart_str_appendl / smart_str_0 等） */
+#include "smart_str.h"
+/* 引入 PHP JSON 扩展头文件（php_json_encode / php_json_decode） */
+#include "ext/json/php_json.h"
+/* 引入 PHP SAPI 头文件（sapi_module 全局变量） */
+#include "SAPI.h"
+
 /* +----------------------------------------------------------------------+
  * | 平台兼容性宏定义                                                      |
  * +----------------------------------------------------------------------+
@@ -148,9 +157,11 @@ typedef struct _xhcurl_req_context {
 typedef struct _xhmulti_obj {
     CURLM                      *multi;           /* curl multi 句柄 */
     xhcurl_obj_t               *curl_obj;        /* 关联的 XHCurl 全局管理器引用 */
-    GHashTable                 *ctx_map;         /* 映射：CURL* -> xhcurl_req_context_t* */
+    xhcurl_req_context_t      **contexts;        /* 请求上下文指针数组（按添加顺序） */
+    int                         context_count;   /* 已添加的请求上下文数量 */
+    int                         context_capacity;/* 上下文数组已分配容量 */
     zval                        curl_zval;       /* XHCurl PHP 对象引用（防止 GC 回收） */
-    int                         request_count;   /* 已添加的请求数量 */
+    int                         request_count;   /* 已添加的请求数量（兼容旧字段） */
     zend_object                 std;             /* PHP 对象标准头（必须放在最后） */
 } xhmulti_obj_t;
 

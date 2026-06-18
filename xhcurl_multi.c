@@ -12,45 +12,6 @@
 zend_class_entry *xhmulti_ce;
 
 /* +----------------------------------------------------------------------+
- * | GHashTable 辅助函数（用于 CURL* -> context 映射）                     |
- * +----------------------------------------------------------------------+
- */
-
-/**
- * GHash 哈希函数：将 CURL 指针转为哈希键
- * @param key CURL 指针
- * @return 哈希值
- */
-static guint xhcurl_ghash_ptr_hash(gconstpointer key)
-{
-    /* 将指针值直接作为哈希值 */
-    return GPOINTER_TO_UINT(key);
-}
-
-/**
- * GHash 比较函数：比较两个 CURL 指针是否相等
- * @param a 指针 a
- * @param b 指针 b
- * @return TRUE 相等，FALSE 不相等
- */
-static gboolean xhcurl_ghash_ptr_equal(gconstpointer a, gconstpointer b)
-{
-    return (a == b);
-}
-
-/**
- * GHash 值销毁函数：释放请求上下文
- * @param data 请求上下文指针
- */
-static void xhcurl_ghash_value_destroy(gpointer data)
-{
-    xhcurl_req_context_t *ctx = (xhcurl_req_context_t *)data;
-    if (ctx != NULL) {
-        xhcurl_context_free(ctx);
-    }
-}
-
-/* +----------------------------------------------------------------------+
  * | 对象生命周期函数                                                      |
  * +----------------------------------------------------------------------+
  */
@@ -67,19 +28,25 @@ static void xhmulti_free_obj(zend_object *object)
     /* 释放 curl multi 句柄 */
     if (obj->multi != NULL) {
         /* 先移除所有 easy 句柄 */
-        CURLMsg *msg = NULL;
-        int msgs_left = 0;
-        while ((msg = curl_multi_info_read(obj->multi, &msgs_left)) != NULL) {
-            /* 仅处理完成的消息 */
+        for (int i = 0; i < obj->context_count; i++) {
+            if (obj->contexts[i] != NULL && obj->contexts[i]->easy != NULL) {
+                curl_multi_remove_handle(obj->multi, obj->contexts[i]->easy);
+            }
         }
         curl_multi_cleanup(obj->multi);
         obj->multi = NULL;
     }
 
-    /* 释放上下文映射表（会自动调用 value_destroy 释放各上下文） */
-    if (obj->ctx_map != NULL) {
-        g_hash_table_destroy(obj->ctx_map);
-        obj->ctx_map = NULL;
+    /* 释放所有请求上下文 */
+    if (obj->contexts != NULL) {
+        for (int i = 0; i < obj->context_count; i++) {
+            if (obj->contexts[i] != NULL) {
+                xhcurl_context_free(obj->contexts[i]);
+                obj->contexts[i] = NULL;
+            }
+        }
+        efree(obj->contexts);
+        obj->contexts = NULL;
     }
 
     /* 释放 XHCurl PHP 对象引用 */
@@ -108,16 +75,40 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
     object_properties_init(&obj->std, class_type);
 
     /* 初始化自定义字段 */
-    obj->multi = NULL;          /* curl multi 句柄在构造函数中创建 */
-    obj->curl_obj = NULL;       /* XHCurl 引用在构造函数中设置 */
-    obj->ctx_map = NULL;        /* 上下文映射表在构造函数中创建 */
-    obj->request_count = 0;     /* 初始请求数为 0 */
-    ZVAL_UNDEF(&obj->curl_zval); /* 初始化 XHCurl 引用 */
+    obj->multi = NULL;              /* curl multi 句柄在构造函数中创建 */
+    obj->curl_obj = NULL;           /* XHCurl 引用在构造函数中设置 */
+    obj->contexts = NULL;           /* 上下文数组在首次 add 时分配 */
+    obj->context_count = 0;         /* 初始请求数为 0 */
+    obj->context_capacity = 0;      /* 初始容量为 0 */
+    obj->request_count = 0;         /* 兼容字段 */
+    ZVAL_UNDEF(&obj->curl_zval);    /* 初始化 XHCurl 引用 */
 
     /* 设置对象释放函数 */
     obj->std.handlers = zend_get_std_object_handlers();
 
     return &obj->std;
+}
+
+/* +----------------------------------------------------------------------+
+ * | 内部辅助函数                                                          |
+ * +----------------------------------------------------------------------+
+ */
+
+/**
+ * 在上下文数组中根据 CURL easy 句柄查找对应的上下文
+ * @param obj  XHMulti 对象
+ * @param easy CURL easy 句柄
+ * @return 请求上下文指针，未找到返回 NULL
+ */
+static xhcurl_req_context_t *xhmulti_find_context(xhmulti_obj_t *obj, CURL *easy)
+{
+    /* 线性遍历上下文数组查找匹配的 easy 句柄 */
+    for (int i = 0; i < obj->context_count; i++) {
+        if (obj->contexts[i] != NULL && obj->contexts[i]->easy == easy) {
+            return obj->contexts[i];
+        }
+    }
+    return NULL;
 }
 
 /* +----------------------------------------------------------------------+
@@ -150,18 +141,6 @@ PHP_METHOD(XHMulti, __construct)
     obj->multi = curl_multi_init();
     if (obj->multi == NULL) {
         zend_throw_exception(xhcurl_exception_ce, "Failed to create curl multi handle", 0);
-        return;
-    }
-
-    /* 创建上下文映射表：CURL* -> xhcurl_req_context_t* */
-    obj->ctx_map = g_hash_table_new_full(
-        xhcurl_ghash_ptr_hash,       /* 哈希函数 */
-        xhcurl_ghash_ptr_equal,      /* 比较函数 */
-        NULL,                         /* 键销毁函数（CURL* 由 curl_easy_cleanup 管理） */
-        xhcurl_ghash_value_destroy   /* 值销毁函数（释放请求上下文） */
-    );
-    if (obj->ctx_map == NULL) {
-        zend_throw_exception(xhcurl_exception_ce, "Failed to create context map", 0);
         return;
     }
 }
@@ -202,10 +181,30 @@ PHP_METHOD(XHMulti, add)
         return;
     }
 
-    /* 将上下文添加到映射表 */
-    g_hash_table_insert(obj->ctx_map, (gpointer)ctx->easy, (gpointer)ctx);
+    /* 检查是否需要扩容上下文数组 */
+    if (obj->context_count >= obj->context_capacity) {
+        /* 计算新容量（初始 16，之后翻倍增长） */
+        int new_capacity = (obj->context_capacity == 0) ? 16 : obj->context_capacity * 2;
+        /* 重新分配上下文数组 */
+        obj->contexts = (xhcurl_req_context_t **)erealloc(
+            obj->contexts, new_capacity * sizeof(xhcurl_req_context_t *));
+        if (obj->contexts == NULL) {
+            /* 扩容失败，回滚：从 multi 移除 easy 句柄并释放上下文 */
+            curl_multi_remove_handle(obj->multi, ctx->easy);
+            xhcurl_context_free(ctx);
+            zend_throw_exception(xhcurl_exception_ce, "Failed to allocate context array", 0);
+            return;
+        }
+        /* 初始化新分配的空间为 NULL */
+        for (int i = obj->context_capacity; i < new_capacity; i++) {
+            obj->contexts[i] = NULL;
+        }
+        obj->context_capacity = new_capacity;
+    }
 
-    /* 增加请求计数 */
+    /* 将上下文添加到数组（保持添加顺序） */
+    obj->contexts[obj->context_count] = ctx;
+    obj->context_count++;
     obj->request_count++;
 }
 
@@ -224,29 +223,14 @@ PHP_METHOD(XHMulti, execute)
     xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
     /* 检查是否有请求需要执行 */
-    if (obj->request_count == 0) {
+    if (obj->context_count == 0) {
         /* 无请求，返回空数组 */
         array_init(return_value);
         return;
     }
 
-    /* 初始化返回数组 */
-    array_init_size(return_value, obj->request_count);
-
-    /* 收集所有上下文到有序数组（保持添加顺序） */
-    xhcurl_req_context_t **ctx_array = (xhcurl_req_context_t **)ecalloc(
-        obj->request_count, sizeof(xhcurl_req_context_t *));
-    guint ctx_idx = 0;
-
-    /* 遍历映射表，收集上下文指针 */
-    GHashTableIter iter;
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, obj->ctx_map);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        if (ctx_idx < (guint)obj->request_count) {
-            ctx_array[ctx_idx++] = (xhcurl_req_context_t *)value;
-        }
-    }
+    /* 初始化返回数组（按添加顺序） */
+    array_init_size(return_value, obj->context_count);
 
     /* curl_multi 事件循环 */
     int still_running = 0;
@@ -273,23 +257,22 @@ PHP_METHOD(XHMulti, execute)
         }
     } while (still_running > 0);
 
-    /* 处理所有已完成的请求 */
+    /* 处理所有已完成的请求：更新状态码、Content-Type、解析响应头 */
     CURLMsg *msg = NULL;
     int msgs_left = 0;
     while ((msg = curl_multi_info_read(obj->multi, &msgs_left)) != NULL) {
         if (msg->msg == CURLMSG_DONE) {
-            /* 请求完成，从映射表中获取上下文 */
-            xhcurl_req_context_t *ctx = (xhcurl_req_context_t *)g_hash_table_lookup(
-                obj->ctx_map, (gpointer)msg->easy_handle);
+            /* 请求完成，在数组中查找对应的上下文 */
+            xhcurl_req_context_t *ctx = xhmulti_find_context(obj, msg->easy_handle);
             if (ctx != NULL) {
-                /* 更新 curl 错误码 */
+                /* 获取 HTTP 状态码 */
                 ctx->status_code = 0;
                 curl_easy_getinfo(ctx->easy, CURLINFO_RESPONSE_CODE, &ctx->status_code);
 
                 /* 获取 Content-Type */
                 char *ct = NULL;
                 curl_easy_getinfo(ctx->easy, CURLINFO_CONTENT_TYPE, &ct);
-                if (ct != NULL) {
+                if (ct != NULL && ctx->content_type == NULL) {
                     ctx->content_type = estrdup(ct);
                 }
 
@@ -299,10 +282,16 @@ PHP_METHOD(XHMulti, execute)
         }
     }
 
-    /* 为每个请求创建 XHResponse 对象 */
-    for (guint i = 0; i < ctx_idx; i++) {
-        xhcurl_req_context_t *ctx = ctx_array[i];
-        if (ctx == NULL) continue;
+    /* 按添加顺序为每个请求创建 XHResponse 对象 */
+    for (int i = 0; i < obj->context_count; i++) {
+        xhcurl_req_context_t *ctx = obj->contexts[i];
+        if (ctx == NULL) {
+            /* 上下文为空，添加一个空响应 */
+            zval null_zv;
+            ZVAL_NULL(&null_zv);
+            add_next_index_zval(return_value, &null_zv);
+            continue;
+        }
 
         /* 创建 XHResponse PHP 对象 */
         zval response_zv;
@@ -311,8 +300,7 @@ PHP_METHOD(XHMulti, execute)
 
         /* 填充响应数据 */
         resp_obj->status_code = ctx->status_code;
-        resp_obj->curl_code = curl_easy_getinfo(ctx->easy, CURLINFO_TOTAL_TIME, &resp_obj->total_time) == CURLE_OK ?
-                              CURLE_OK : CURLE_FAILED_INIT;
+        resp_obj->curl_code = CURLE_OK;
 
         /* 获取请求总耗时 */
         curl_easy_getinfo(ctx->easy, CURLINFO_TOTAL_TIME, &resp_obj->total_time);
@@ -322,22 +310,19 @@ PHP_METHOD(XHMulti, execute)
             resp_obj->content_type = estrdup(ctx->content_type);
         }
 
-        /* 设置错误信息 */
-        CURLcode res = CURLE_OK;
-        /* 检查是否有 curl 错误（通过 curl_multi_info_read 的 result 字段） */
-        /* 这里简化处理：如果状态码为 0 且无数据，则视为请求失败 */
+        /* 设置错误信息：如果状态码为 0 且无数据，则视为请求失败 */
         if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
             resp_obj->error_msg = estrdup("Request failed");
         }
 
-        /* 转移响应体缓冲区所有权 */
+        /* 转移响应体缓冲区所有权（避免大块内存复制） */
         resp_obj->body = (xhcurl_buffer_t *)ecalloc(1, sizeof(xhcurl_buffer_t));
         if (resp_obj->body != NULL) {
             resp_obj->body->data = ctx->body_buf.data;
             resp_obj->body->size = ctx->body_buf.size;
             resp_obj->body->capacity = ctx->body_buf.capacity;
             resp_obj->body->max_size = ctx->body_buf.max_size;
-            /* 清空原始缓冲区指针，防止重复释放 */
+            /* 清空原始缓冲区指针，防止 xhcurl_context_free 重复释放 */
             ctx->body_buf.data = NULL;
             ctx->body_buf.size = 0;
             ctx->body_buf.capacity = 0;
@@ -351,23 +336,23 @@ PHP_METHOD(XHMulti, execute)
         add_next_index_zval(return_value, &response_zv);
     }
 
-    /* 释放有序上下文数组 */
-    efree(ctx_array);
-
-    /* 清理：从 multi 句柄移除所有 easy 句柄，并清空映射表 */
-    GHashTableIter cleanup_iter;
-    gpointer cleanup_key, cleanup_value;
-    g_hash_table_iter_init(&cleanup_iter, obj->ctx_map);
-    while (g_hash_table_iter_next(&cleanup_iter, &cleanup_key, &cleanup_value)) {
-        CURL *easy = (CURL *)cleanup_key;
-        /* 从 multi 句柄移除 easy 句柄 */
-        curl_multi_remove_handle(obj->multi, easy);
+    /* 清理：从 multi 句柄移除所有 easy 句柄 */
+    for (int i = 0; i < obj->context_count; i++) {
+        if (obj->contexts[i] != NULL && obj->contexts[i]->easy != NULL) {
+            curl_multi_remove_handle(obj->multi, obj->contexts[i]->easy);
+        }
     }
 
-    /* 清空映射表（会自动调用 value_destroy 释放各上下文） */
-    g_hash_table_remove_all(obj->ctx_map);
+    /* 释放所有请求上下文 */
+    for (int i = 0; i < obj->context_count; i++) {
+        if (obj->contexts[i] != NULL) {
+            xhcurl_context_free(obj->contexts[i]);
+            obj->contexts[i] = NULL;
+        }
+    }
 
-    /* 重置请求计数 */
+    /* 重置请求数量和容量（保留已分配的数组供下次使用） */
+    obj->context_count = 0;
     obj->request_count = 0;
 }
 
@@ -384,7 +369,7 @@ PHP_METHOD(XHMulti, count)
     xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
     /* 返回请求数量 */
-    RETURN_LONG(obj->request_count);
+    RETURN_LONG(obj->context_count);
 }
 
 /* +----------------------------------------------------------------------+
