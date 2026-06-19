@@ -447,12 +447,10 @@ jobs:
       # 步骤 7: 修补 Makefile 添加 libcurl 路径
       # configure 生成的 Makefile 不包含 curl 的 include/lib 路径
       # 因为 config.w32 中没有使用 CHECK_LIB/CHECK_HEADER_ADD_INCLUDE
-      # 需要手动注入这些路径到 Makefile 的对应变量中
       #
-      # PHP Windows Makefile 中的关键变量：
-      #   CFLAGS_XHCURL  - 编译器标志（添加 /I 头文件路径）
-      #   LDFLAGS_XHCURL - 链接器标志（添加 /LIBPATH 库路径）
-      #   LIBS_XHCURL    - 链接库列表（添加 libcurl.lib 等）
+      # PHP Windows Makefile 的链接命令不使用 LDFLAGS_XHCURL / LIBS_XHCURL
+      # 而是使用全局的 LDFLAGS 和 LIBS 变量
+      # 所以必须修改全局变量才能让链接器找到 libcurl
       # -----------------------------------------------------------------
       - name: Patch Makefile for libcurl
         shell: pwsh
@@ -470,35 +468,37 @@ jobs:
 
           # 显示修改前的相关变量（调试用）
           Write-Host "=== 修改前的 Makefile 变量 ==="
-          $content -split "`n" | Where-Object { $_ -match "XHCURL" } | ForEach-Object { Write-Host "  $_" }
+          $content -split "`n" | Where-Object { $_ -match "^(LDFLAGS|LIBS|CFLAGS)\s*=" } | ForEach-Object { Write-Host "  $_" }
 
-          # 注入 curl 头文件路径到 CFLAGS_XHCURL
-          # /I 表示 include 目录，等号后不能有空格
+          # 注入 curl 头文件路径到 CFLAGS_XHCURL（编译器已使用此变量）
           $content = $content -replace '(CFLAGS_XHCURL\s*=\s*)', "`$1/I `"$curlDir\include`" "
 
-          # 注入 curl 库路径到 LDFLAGS_XHCURL
-          # /LIBPATH 指定额外的库搜索目录
-          $content = $content -replace '(LDFLAGS_XHCURL\s*=\s*)', "`$1/LIBPATH:`"$curlDir\lib`" "
+          # 注入 curl 库搜索路径到全局 LDFLAGS
+          # PHP 链接器使用全局 LDFLAGS，不使用 LDFLAGS_XHCURL
+          $content = $content -replace '(LDFLAGS\s*=\s*)', "`$1/LIBPATH:`"$curlDir\lib`" "
 
-          # 注入 libcurl.lib 和 ws2_32.lib 到 LIBS_XHCURL
-          # ws2_32.lib 是 Windows Sockets 库（curl 依赖）
-          $content = $content -replace '(LIBS_XHCURL\s*=\s*)', "`$1libcurl.lib ws2_32.lib "
+          # 注入 libcurl.lib 到全局 LIBS
+          # PHP 链接器使用全局 LIBS，不使用 LIBS_XHCURL
+          # ws2_32.lib 已在默认 LIBS 中，无需重复添加
+          $content = $content -replace '(LIBS\s*=\s*)', "`$1libcurl.lib "
 
           # 写回 Makefile
           Set-Content -Path $makefile -Value $content -NoNewline
 
           # 显示修改后的相关变量（验证）
           Write-Host "=== 修改后的 Makefile 变量 ==="
-          $content -split "`n" | Where-Object { $_ -match "XHCURL" } | ForEach-Object { Write-Host "  $_" }
+          $content -split "`n" | Where-Object { $_ -match "^(LDFLAGS|LIBS|CFLAGS)\s*=" } | ForEach-Object { Write-Host "  $_" }
 
       # -----------------------------------------------------------------
       # 步骤 8: 编译
       # nmake 使用 MSVC 工具链编译扩展
+      # 设置 LIB 环境变量确保 link.exe 能找到 libcurl.lib
       # -----------------------------------------------------------------
       - name: nmake
         shell: cmd
         run: |
           cd php-src
+          set LIB=%CURL_DIR%\lib;%LIB%
           nmake /NOLOGO
 
       # -----------------------------------------------------------------
