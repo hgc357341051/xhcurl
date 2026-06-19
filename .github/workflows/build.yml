@@ -315,16 +315,34 @@ jobs:
           $phpVersion = "${{ matrix.php-version }}"
           $ts = "${{ matrix.ts }}"
 
+          # 补全完整版本号（如 8.0 → 8.0.30，8.1 → 8.1.29 等）
+          # PHP 源码 tag 格式为 php-X.Y.Z，必须使用完整版本号
+          $fullVersion = switch ($phpVersion) {
+            "8.0" { "8.0.30" }
+            "8.1" { "8.1.29" }
+            "8.2" { "8.2.20" }
+            "8.3" { "8.3.8" }
+            default { $phpVersion }
+          }
+          Write-Host "PHP 完整版本号: $fullVersion"
+
           # 确定 Visual C++ 版本标识（PHP 8.x 使用 vs16，PHP 8.3+ 使用 vs17）
           $vc = if ($phpVersion -ge "8.3") { "vs17" } else { "vs16" }
 
-          # PHP 源码 URL（GitHub 官方仓库的 tag）
-          $sourceUrl = "https://github.com/php/php-src/archive/refs/tags/php-$phpVersion.zip"
-          # PHP devel pack URL（包含头文件和导入库）
-          $develUrl = "https://windows.php.net/downloads/php-sdk/php-devel-pack-$phpVersion-$ts-$vc-x64.zip"
+          # PHP 源码 URL（GitHub 官方仓库的 tag，使用完整版本号）
+          $sourceUrl = "https://github.com/php/php-src/archive/refs/tags/php-$fullVersion.zip"
+          # PHP devel pack URL（包含头文件和导入库，使用完整版本号）
+          $develUrl = "https://windows.php.net/downloads/php-sdk/php-devel-pack-$fullVersion-$ts-$vc-x64.zip"
 
           Write-Host "Downloading PHP source: $sourceUrl"
-          Invoke-WebRequest -Uri $sourceUrl -OutFile "php-src.zip"
+          try {
+            Invoke-WebRequest -Uri $sourceUrl -OutFile "php-src.zip" -ErrorAction Stop
+          } catch {
+            Write-Host "::warning::源码下载失败，尝试 archive 目录"
+            # 备用 URL（archive 目录，存放旧版本）
+            $archiveSourceUrl = "https://museum.php.net/php-src/php-$fullVersion.zip"
+            Invoke-WebRequest -Uri $archiveSourceUrl -OutFile "php-src.zip"
+          }
 
           Write-Host "Downloading PHP devel pack: $develUrl"
           try {
@@ -332,13 +350,20 @@ jobs:
           } catch {
             Write-Host "::warning::devel pack 下载失败，尝试备用 URL"
             # 备用 URL（archive 目录）
-            $archiveUrl = "https://windows.php.net/downloads/releases/archives/php-devel-pack-$phpVersion-$ts-$vc-x64.zip"
-            Invoke-WebRequest -Uri $archiveUrl -OutFile "php-devel.zip"
+            $archiveUrl = "https://windows.php.net/downloads/releases/archives/php-devel-pack-$fullVersion-$ts-$vc-x64.zip"
+            try {
+              Invoke-WebRequest -Uri $archiveUrl -OutFile "php-devel.zip" -ErrorAction Stop
+            } catch {
+              Write-Host "::warning::备用 URL 也失败，尝试不指定 VC 版本"
+              # 最后尝试：不指定 VC 版本（部分版本可能不包含 VC 标识）
+              $noVcUrl = "https://windows.php.net/downloads/php-sdk/php-devel-pack-$fullVersion-$ts-x64.zip"
+              Invoke-WebRequest -Uri $noVcUrl -OutFile "php-devel.zip"
+            }
           }
 
           # 解压 PHP 源码
           Expand-Archive -Path "php-src.zip" -DestinationPath "C:\php-src" -Force
-          # 源码目录名形如 php-src-php-8.2.0，重命名为标准名
+          # 源码目录名形如 php-src-php-8.2.20，重命名为标准名
           $srcDir = Get-ChildItem -Path "C:\php-src" -Directory | Select-Object -First 1
           Rename-Item -Path $srcDir.FullName -NewName "php-src"
           Write-Host "PHP 源码目录: C:\php-src\php-src"
