@@ -9,17 +9,18 @@ ARG_ENABLE("xhcurl", "enable xhcurl support", "no");
 
 // 声明 libcurl 依赖路径选项
 // ARG_WITH 创建路径选项（no/yes/路径字符串）
-// 使用 "xhcurl-curl" 避免与 PHP 内置 curl 扩展的 "curl" 选项冲突
-// --with-xhcurl-curl=C:\path\to\curl 会让 PHP_XHCURL_CURL = "C:\path\to\curl"
+// 使用 "xhcurl_curl" 避免与 PHP 内置 curl 扩展的 "curl" 选项冲突
+// --with-xhcurl_curl=C:\path\to\curl 会让 PHP_XHCURL_CURL = "C:\path\to\curl"
 // CHECK_LIB 的第三个参数使用此路径来搜索库文件
-ARG_WITH("xhcurl-curl", "path to libcurl for xhcurl support", "no");
+// 注意：使用下划线而非连字符，避免 JScript 变量名语法错误
+ARG_WITH("xhcurl_curl", "path to libcurl for xhcurl support", "no");
 
 if (PHP_XHCURL != "no") {
     // 检查 libcurl 库文件和头文件是否存在
     // CHECK_LIB("libcurl.lib", "xhcurl", PHP_XHCURL_CURL) 含义：
     //   第1参数：要查找的库文件名
     //   第2参数：扩展名（用于构建搜索路径 ext/xhcurl/lib）
-    //   第3参数：额外的搜索路径提示（来自 --with-xhcurl-curl=PATH）
+    //   第3参数：额外的搜索路径提示（来自 --with-xhcurl_curl=PATH）
     // CHECK_HEADER_ADD_INCLUDE 在 include 路径中查找 curl/curl.h
     if (PHP_XHCURL_CURL != "no" &&
         CHECK_LIB("libcurl.lib", "xhcurl", PHP_XHCURL_CURL) &&

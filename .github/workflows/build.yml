@@ -359,7 +359,7 @@ jobs:
           dir /s /b "%CURL_DIR%\lib\*.lib" 2>nul
 
           REM 运行 configure
-          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-xhcurl-curl=%CURL_DIR%
+          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-xhcurl_curl=%CURL_DIR%
         env:
           PHP_SDK_PREFIX: ${{ steps.setup-php-sdk.outputs.prefix }}
 
