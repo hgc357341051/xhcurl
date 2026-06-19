@@ -360,6 +360,7 @@ jobs:
           Copy-Item -Path "xhcurl_threadpool.c" -Destination "php-src\ext\xhcurl\" -Force
           Copy-Item -Path "xhcurl_utils.c" -Destination "php-src\ext\xhcurl\" -Force
           Copy-Item -Path "php_xhcurl.h" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_priv.h" -Destination "php-src\ext\xhcurl\" -Force
           Copy-Item -Path "config.w32" -Destination "php-src\ext\xhcurl\" -Force
 
           # 验证文件复制成功
