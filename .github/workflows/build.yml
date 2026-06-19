@@ -349,9 +349,27 @@ jobs:
       # --with-prefix 指向 PHP 安装目录（由 setup-php-sdk 输出）
       # --with-curl 指向 vcpkg 安装的 libcurl
       # configure.js 是 JScript 文件，必须用 cscript 运行
+      #
+      # 注意：PHP configure.js 的 --with-curl 会自动在指定目录下
+      # 查找 include/curl/curl.h 和 lib/libcurl.lib
+      # vcpkg x64-windows-static 的目录结构正好匹配
       # -----------------------------------------------------------------
       - name: configure
-        run: cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }} --with-curl=${{ env.CURL_DIR }}
+        shell: cmd
+        run: |
+          REM 调试：显示 curl 目录结构
+          echo === CURL_DIR 内容 ===
+          dir /s /b "%CURL_DIR%\include\curl\curl.h" 2>nul
+          dir /s /b "%CURL_DIR%\lib\*.lib" 2>nul
+
+          REM 调试：显示当前目录
+          echo === 当前目录 ===
+          cd
+
+          REM 运行 configure
+          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-curl=%CURL_DIR%
+        env:
+          PHP_SDK_PREFIX: ${{ steps.setup-php-sdk.outputs.prefix }}
 
       # -----------------------------------------------------------------
       # 步骤 7: 编译
@@ -363,6 +381,7 @@ jobs:
       # -----------------------------------------------------------------
       # 步骤 8: 收集编译产物（.dll 文件）
       # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
+      # phpize 方式编译的 DLL 可能在多种位置
       # -----------------------------------------------------------------
       - name: Collect build artifacts
         shell: pwsh
@@ -370,13 +389,30 @@ jobs:
           $distDir = "dist\windows"
           New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-          # phpize 方式编译的 .dll 通常在当前目录或 Release_TS/Release 子目录
+          # 调试：递归搜索所有 php_xhcurl.dll
+          Write-Host "=== 搜索 php_xhcurl.dll ==="
+          $allDlls = Get-ChildItem -Path "D:\" -Recurse -Filter "php_xhcurl.dll" -ErrorAction SilentlyContinue 2>$null
+          if ($allDlls) {
+            $allDlls | ForEach-Object { Write-Host "  找到: $($_.FullName)" }
+          } else {
+            Write-Host "  未找到 php_xhcurl.dll"
+          }
+
+          # 调试：搜索当前目录和 PHP SDK 目录下的所有 .dll
+          Write-Host "=== 当前目录结构 ==="
+          Get-ChildItem -Path "." -Recurse -Filter "php_xhcurl*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
+
+          # phpize 方式编译的 .dll 可能在多种位置
           $searchDirs = @(
             ".",
             "Release_TS",
             "Release",
             "x64\Release_TS",
-            "x64\Release"
+            "x64\Release",
+            "Debug_TS",
+            "Debug",
+            "x64\Debug_TS",
+            "x64\Debug"
           )
 
           $dllFound = $false
@@ -400,12 +436,19 @@ jobs:
             }
           }
 
+          # 如果在常规目录没找到，尝试使用之前全盘搜索的结果
+          if (-not $dllFound -and $allDlls) {
+            $dll = $allDlls | Select-Object -First 1
+            $newName = "xhcurl-windows-php${{ matrix.php-version }}-${{ matrix.ts }}.dll"
+            Copy-Item -Path $dll.FullName -Destination (Join-Path $distDir $newName)
+            Write-Host "Found (全盘搜索): $($dll.FullName) -> $newName"
+            $dllFound = $true
+          }
+
           if (-not $dllFound) {
             echo "::error::未找到编译产物 php_xhcurl.dll"
             echo "::error::搜索目录:"
             $searchDirs | ForEach-Object { echo "  $_" }
-            echo "::error::当前目录内容:"
-            Get-ChildItem -Recurse -Filter "*.dll" | ForEach-Object { echo "  $($_.FullName)" }
             exit 1
           }
 
