@@ -306,15 +306,18 @@ jobs:
           # 重命名为标准名称
           Rename-Item -Path "php-sdk-binary-tools-master" -NewName "phpsdk-binary-tools"
 
-          # 验证关键文件存在
-          if (-not (Test-Path "C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat")) {
+          # 验证关键文件存在（phpsdk_setvars.bat 在 bin\ 子目录下）
+          if (-not (Test-Path "C:\php-sdk\phpsdk-binary-tools\bin\phpsdk_setvars.bat")) {
             echo "::error::phpsdk_setvars.bat 未找到"
             Get-ChildItem -Path "C:\php-sdk\phpsdk-binary-tools" -Recurse -Filter "*.bat" | ForEach-Object { Write-Host $_.FullName }
             exit 1
           }
 
           Write-Host "PHP SDK 安装成功"
+          Write-Host "=== 根目录 .bat 文件 ==="
           Get-ChildItem -Path "C:\php-sdk\phpsdk-binary-tools" -Filter "*.bat" | ForEach-Object { Write-Host "  $($_.Name)" }
+          Write-Host "=== bin\ 目录 .bat 文件 ==="
+          Get-ChildItem -Path "C:\php-sdk\phpsdk-binary-tools\bin" -Filter "*.bat" | ForEach-Object { Write-Host "  $($_.Name)" }
 
       # -----------------------------------------------------------------
       # 步骤 4: 下载 PHP 源码和 devel pack
@@ -429,9 +432,10 @@ jobs:
         run: |
           REM ===============================================================
           REM 1. 初始化 PHP SDK 环境（设置 MSVC + PHP_SDK_VS=vs17）
+          REM phpsdk_setvars.bat 位于 bin\ 子目录下
           REM ===============================================================
           echo === 初始化 PHP SDK 环境 ===
-          call "C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat" vs17 x64
+          call "C:\php-sdk\phpsdk-binary-tools\bin\phpsdk_setvars.bat" vs17 x64
           if errorlevel 1 (
             echo ::error::phpsdk_setvars.bat 初始化失败
             exit /b 1
