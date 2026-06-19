@@ -427,6 +427,10 @@ jobs:
             exit /b 1
           )
 
+          REM 调试：显示 configure.js 错误行附近的内容
+          echo === configure.js 第 4230-4240 行 ===
+          powershell -Command "Get-Content configure.js | Select-Object -Skip 4229 -First 11 | ForEach-Object { $i++; Write-Host ('{0}: {1}' -f (4230+$i-1), $_) }"
+
           REM 运行 configure（不传 --with-curl，避免 JScript 冲突）
           cscript //nologo configure.js ^
             --disable-all ^
