@@ -242,16 +242,26 @@ jobs:
 
   # =====================================================================
   # Job 3: Windows 平台编译（Windows Server 2022）
-  # 使用 php/setup-php-sdk 官方 Action + phpize 方式编译
+  # 使用完整 PHP 源码树方式编译（非 phpize）
+  #
+  # 为什么不用 phpize？
+  #   phpize 在 Windows 上生成的 configure.js 存在兼容性问题，
+  #   会导致 JScript 编译错误。完整源码树方式是 PHP 官方推荐的
+  #   Windows 扩展编译方法。
   #
   # 编译流程：
-  #   php/setup-php-sdk → 设置 PHP SDK + devel pack
+  #   php/setup-php-sdk → 设置 PHP SDK + 输出 toolset/prefix
   #   ilammy/msvc-dev-cmd → 设置 MSVC 工具链（使用正确的 toolset）
-  #   phpize → 生成 configure 脚本
-  #   configure --enable-xhcurl=shared → 配置
-  #   nmake → 编译
+  #   下载 PHP 源码 + 复制扩展到源码树
+  #   vcpkg install curl → 安装 libcurl
+  #   buildconf → configure → nmake
   #
-  # 参考：https://github.com/php/setup-php-sdk
+  # config.w32 使用 PHP 内置 curl 扩展的 --with-curl=PATH 选项
+  # 来获取 libcurl 的安装路径（无需自定义 ARG_WITH）
+  #
+  # 参考：
+  #   https://wiki.php.net/internals/windows/stepbystepbuild_sdk_2
+  #   https://github.com/php/setup-php-sdk
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
@@ -260,7 +270,6 @@ jobs:
       fail-fast: false
       matrix:
         # PHP 8.4+ 需要 VS 2022 (vs17)，与 windows-2022 runner 匹配
-        # PHP 8.0-8.3 需要 VS 2019 (vs16)，需要 windows-2019 runner
         php-version: ['8.4']
         ts: ['nts']  # Non-Thread-Safe（FPM 推荐）
 
@@ -289,7 +298,73 @@ jobs:
           cache: true
 
       # -----------------------------------------------------------------
-      # 步骤 3: 安装 libcurl 开发库（通过 vcpkg）
+      # 步骤 3: 设置 MSVC 编译环境
+      # 使用 setup-php-sdk 输出的 toolset 确保版本匹配
+      # 例如 PHP 8.4 需要 toolset 14.4（VS 2022）
+      # -----------------------------------------------------------------
+      - name: Setup MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 下载 PHP 源码并准备扩展目录
+      # 完整 PHP 源码树包含 buildconf.bat、configure.js 模板等
+      # 这些是 phpize 方式无法提供的
+      # -----------------------------------------------------------------
+      - name: Download PHP source and prepare extension
+        shell: pwsh
+        run: |
+          # 从 setup-php-sdk 输出获取 PHP 完整版本号
+          $prefix = "${{ steps.setup-php-sdk.outputs.prefix }}"
+          Write-Host "PHP prefix: $prefix"
+
+          # 从 prefix 路径中提取 PHP 版本号
+          # prefix 格式类似: C:\php-sdk\phpdev\vs17\x64\php-8.4.22-nts
+          if ($prefix -match 'php-(\d+\.\d+\.\d+)') {
+            $phpFullVersion = $Matches[1]
+          } else {
+            # 备用：从 php -v 获取
+            $phpFullVersion = (php -v | Select-Object -First 1) -replace 'PHP (\d+\.\d+\.\d+).*', '$1'
+          }
+          Write-Host "PHP 完整版本号: $phpFullVersion"
+
+          # 下载 PHP 源码
+          $sourceUrl = "https://github.com/php/php-src/archive/refs/tags/php-${phpFullVersion}.zip"
+          Write-Host "Downloading PHP source: $sourceUrl"
+          Invoke-WebRequest -Uri $sourceUrl -OutFile "php-src.zip"
+
+          # 解压 PHP 源码
+          Expand-Archive -Path "php-src.zip" -DestinationPath "php-src-tmp" -Force
+
+          # 源码目录名格式：php-src-php-8.4.22
+          $srcDir = Get-ChildItem -Path "php-src-tmp" -Directory | Select-Object -First 1
+          Write-Host "PHP 源码目录: $($srcDir.FullName)"
+
+          # 移动到固定路径
+          Move-Item -Path $srcDir.FullName -Destination "php-src" -Force
+
+          # 复制我们的扩展到 PHP 源码树的 ext/ 目录
+          Copy-Item -Path "xhcurl.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_buffer.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_context.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_cookie.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_header.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_multi.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_request.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_response.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_threadpool.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "xhcurl_utils.c" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "php_xhcurl.h" -Destination "php-src\ext\xhcurl\" -Force
+          Copy-Item -Path "config.w32" -Destination "php-src\ext\xhcurl\" -Force
+
+          # 验证文件复制成功
+          Write-Host "=== ext/xhcurl 目录内容 ==="
+          Get-ChildItem -Path "php-src\ext\xhcurl" | ForEach-Object { Write-Host "  $($_.Name)" }
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 安装 libcurl 开发库（通过 vcpkg）
       # vcpkg 是 Microsoft 的 C++ 包管理器，预装在 GitHub runner 上
       # 安装 curl:x64-windows-static 可获得静态链接的 libcurl
       # -----------------------------------------------------------------
@@ -311,69 +386,76 @@ jobs:
             Write-Host "curl.h 找到"
           } else {
             Write-Host "::error::curl.h 未找到"
-            Get-ChildItem -Path "C:\vcpkg\installed" -Recurse -Filter "curl.h" | ForEach-Object { Write-Host "  $($_.FullName)" }
             exit 1
           }
 
           if (Test-Path "$curlDir\lib\libcurl.lib") {
             Write-Host "libcurl.lib 找到"
-          } elseif (Test-Path "$curlDir\lib\curl.lib") {
-            Write-Host "curl.lib 找到"
           } else {
-            Write-Host "::warning::libcurl 库文件未找到，列出 lib 目录内容"
+            Write-Host "::warning::libcurl.lib 未找到，列出 lib 目录内容"
             Get-ChildItem -Path "$curlDir\lib" -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
           }
 
       # -----------------------------------------------------------------
-      # 步骤 4: 设置 MSVC 编译环境
-      # 使用 setup-php-sdk 输出的 toolset 确保版本匹配
-      # 例如 PHP 8.4 需要 toolset 14.4（VS 2022）
+      # 步骤 6: buildconf + configure
+      # buildconf.bat 扫描所有 ext/*/config.w32 生成 configure.js
+      # configure.js 检查依赖并生成 Makefile
+      #
+      # 关键选项：
+      #   --disable-all          禁用所有默认扩展（加速编译）
+      #   --enable-cli           启用 CLI SAPI（必需）
+      #   --enable-xhcurl=shared 编译 xhcurl 为独立 DLL
+      #   --with-curl=PATH       指定 libcurl 路径（PHP 内置选项，
+      #                          config.w32 通过 PHP_CURL 变量使用）
+      #   --without-curl         不编译 PHP 内置 curl 扩展（仅使用路径）
+      #   --with-prefix=PATH     PHP 安装目录（由 setup-php-sdk 输出）
       # -----------------------------------------------------------------
-      - name: Setup MSVC developer command prompt
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-          toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
-
-      # -----------------------------------------------------------------
-      # 步骤 5: 运行 phpize 生成 configure 脚本
-      # phpize 是 PHP 扩展的标准构建准备工具
-      # 它会根据 config.w32 生成 configure.js
-      # -----------------------------------------------------------------
-      - name: phpize
-        run: phpize
-
-      # -----------------------------------------------------------------
-      # 步骤 6: configure 配置
-      # --enable-xhcurl=shared 生成独立 .dll（不编译进 php.exe）
-      # --with-prefix 指向 PHP 安装目录（由 setup-php-sdk 输出）
-      # --with-xhcurl-curl 指向 vcpkg 安装的 libcurl（避免与内置 curl 选项冲突）
-      # configure.js 是 JScript 文件，必须用 cscript 运行
-      # -----------------------------------------------------------------
-      - name: configure
+      - name: Build and configure
         shell: cmd
         run: |
-          REM 调试：显示 curl 目录结构
-          echo === CURL_DIR 内容 ===
-          dir /s /b "%CURL_DIR%\include\curl\curl.h" 2>nul
-          dir /s /b "%CURL_DIR%\lib\*.lib" 2>nul
+          REM 进入 PHP 源码目录
+          cd php-src
+
+          REM 运行 buildconf 生成 configure.js
+          call buildconf.bat --force
+          if errorlevel 1 (
+            echo ::error::buildconf 失败
+            exit /b 1
+          )
+
+          REM 显示 configure 帮助中 xhcurl 相关选项（调试用）
+          echo === xhcurl 相关 configure 选项 ===
+          cscript //nologo configure.js --help | findstr /i "xhcurl curl"
 
           REM 运行 configure
-          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-xhcurl_curl=%CURL_DIR%
-        env:
-          PHP_SDK_PREFIX: ${{ steps.setup-php-sdk.outputs.prefix }}
+          REM --with-curl 设置 PHP_CURL 变量（供 xhcurl 的 config.w32 使用）
+          REM --without-curl 禁止编译 PHP 内置 curl 扩展（但 PHP_CURL 变量仍保留路径值）
+          cscript //nologo configure.js ^
+            --disable-all ^
+            --enable-cli ^
+            --enable-xhcurl=shared ^
+            --with-curl=%CURL_DIR% ^
+            --without-curl ^
+            --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }}
+          if errorlevel 1 (
+            echo ::error::configure 失败
+            exit /b 1
+          )
 
       # -----------------------------------------------------------------
       # 步骤 7: 编译
       # nmake 使用 MSVC 工具链编译扩展
       # -----------------------------------------------------------------
       - name: nmake
-        run: nmake /NOLOGO
+        shell: cmd
+        run: |
+          cd php-src
+          nmake /NOLOGO
 
       # -----------------------------------------------------------------
       # 步骤 8: 收集编译产物（.dll 文件）
       # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
-      # phpize 方式编译的 DLL 可能在多种位置
+      # 完整源码树方式的 DLL 在 php-src/Release*/ 目录下
       # -----------------------------------------------------------------
       - name: Collect build artifacts
         shell: pwsh
@@ -381,30 +463,33 @@ jobs:
           $distDir = "dist\windows"
           New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-          # 调试：递归搜索所有 php_xhcurl.dll
+          # 递归搜索 php_xhcurl.dll
           Write-Host "=== 搜索 php_xhcurl.dll ==="
-          $allDlls = Get-ChildItem -Path "D:\" -Recurse -Filter "php_xhcurl.dll" -ErrorAction SilentlyContinue 2>$null
+          $allDlls = Get-ChildItem -Path "php-src" -Recurse -Filter "php_xhcurl.dll" -ErrorAction SilentlyContinue
           if ($allDlls) {
             $allDlls | ForEach-Object { Write-Host "  找到: $($_.FullName)" }
           } else {
             Write-Host "  未找到 php_xhcurl.dll"
+            # 调试：列出所有 Release 目录内容
+            Write-Host "=== Release 目录内容 ==="
+            Get-ChildItem -Path "php-src" -Directory -Filter "Release*" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "  目录: $($_.FullName)"
+              Get-ChildItem -Path $_.FullName -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "    $($_.Name)"
+              }
+            }
           }
 
-          # 调试：搜索当前目录和 PHP SDK 目录下的所有 .dll
-          Write-Host "=== 当前目录结构 ==="
-          Get-ChildItem -Path "." -Recurse -Filter "php_xhcurl*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
-
-          # phpize 方式编译的 .dll 可能在多种位置
+          # 搜索可能的输出目录
           $searchDirs = @(
-            ".",
-            "Release_TS",
-            "Release",
-            "x64\Release_TS",
-            "x64\Release",
-            "Debug_TS",
-            "Debug",
-            "x64\Debug_TS",
-            "x64\Debug"
+            "php-src\Release_TS",
+            "php-src\Release",
+            "php-src\x64\Release_TS",
+            "php-src\x64\Release",
+            "php-src\Debug_TS",
+            "php-src\Debug",
+            "php-src\x64\Debug_TS",
+            "php-src\x64\Debug"
           )
 
           $dllFound = $false
@@ -417,12 +502,6 @@ jobs:
                 Copy-Item -Path $dll.FullName -Destination (Join-Path $distDir $newName)
                 Write-Host "Found: $($dll.FullName) -> $newName"
                 $dllFound = $true
-
-                # 同时复制 .pdb 符号文件（用于调试）
-                $pdb = Get-ChildItem -Path $dir -Filter "php_xhcurl.pdb" -ErrorAction SilentlyContinue
-                if ($pdb) {
-                  Copy-Item -Path $pdb.FullName -Destination $distDir
-                }
                 break
               }
             }
@@ -439,8 +518,6 @@ jobs:
 
           if (-not $dllFound) {
             echo "::error::未找到编译产物 php_xhcurl.dll"
-            echo "::error::搜索目录:"
-            $searchDirs | ForEach-Object { echo "  $_" }
             exit 1
           }
 
