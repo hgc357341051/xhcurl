@@ -268,34 +268,29 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------------------------------------
-      # 步骤 2: 设置 MSVC 编译环境
-      # 使用 Developer Command Prompt 初始化 Visual C++ 工具链（x64）
-      # -----------------------------------------------------------------
-      - name: Setup MSVC build environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # -----------------------------------------------------------------
-      # 步骤 3: 缓存 PHP SDK binary tools
+      # 步骤 2: 缓存 PHP SDK binary tools
       # 避免每次都从 GitHub 下载（约 100MB）
       # -----------------------------------------------------------------
       - name: Cache PHP SDK
         uses: actions/cache@v4
         with:
           path: C:\php-sdk
-          key: php-sdk-binary-tools-${{ runner.os }}-v1
+          key: php-sdk-binary-tools-${{ runner.os }}-v2
 
       # -----------------------------------------------------------------
-      # 步骤 4: 安装 PHP SDK binary tools
-      # 官方工具链，提供 buildconf、configure、nmake 等 Windows 编译脚本
+      # 步骤 3: 安装 PHP SDK binary tools
+      # 官方工具链，提供 phpsdk_setvars.bat（设置 MSVC + PHP_SDK_VS 环境变量）
       # 仓库：https://github.com/php/php-sdk-binary-tools
+      #
+      # 关键：phpsdk_setvars.bat 会设置 PHP_SDK_VS 环境变量（如 vs17），
+      # configure.js 依赖此变量判断编译器兼容性。
+      # ilammy/msvc-dev-cmd 不会设置此变量，导致 "Incompatible binary tools version" 错误。
       # -----------------------------------------------------------------
       - name: Setup PHP SDK binary tools
         shell: pwsh
         run: |
           # 若缓存命中则跳过下载
-          if (Test-Path "C:\php-sdk\phpsdk-binary-tools") {
+          if (Test-Path "C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat") {
             Write-Host "PHP SDK 已缓存，跳过下载"
             return
           }
@@ -311,8 +306,18 @@ jobs:
           # 重命名为标准名称
           Rename-Item -Path "php-sdk-binary-tools-master" -NewName "phpsdk-binary-tools"
 
+          # 验证关键文件存在
+          if (-not (Test-Path "C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat")) {
+            echo "::error::phpsdk_setvars.bat 未找到"
+            Get-ChildItem -Path "C:\php-sdk\phpsdk-binary-tools" -Recurse -Filter "*.bat" | ForEach-Object { Write-Host $_.FullName }
+            exit 1
+          }
+
+          Write-Host "PHP SDK 安装成功"
+          Get-ChildItem -Path "C:\php-sdk\phpsdk-binary-tools" -Filter "*.bat" | ForEach-Object { Write-Host "  $($_.Name)" }
+
       # -----------------------------------------------------------------
-      # 步骤 5: 下载 PHP 源码和 devel pack
+      # 步骤 4: 下载 PHP 源码和 devel pack
       # Windows 编译需要 PHP 源码树（包含 config.w32、build 脚本等）
       # -----------------------------------------------------------------
       - name: Download PHP source and devel pack
@@ -399,7 +404,7 @@ jobs:
           echo "PHP_VC=$vc" >> $env:GITHUB_ENV
 
       # -----------------------------------------------------------------
-      # 步骤 6: 复制扩展源码到 PHP 源码树
+      # 步骤 5: 复制扩展源码到 PHP 源码树
       # PHP Windows 编译要求扩展位于 php-src/ext/<extname> 目录下
       # -----------------------------------------------------------------
       - name: Copy extension source to PHP source tree
@@ -413,29 +418,47 @@ jobs:
           Get-ChildItem -Path $extDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 7: 编译扩展
-      # 直接使用已设置的 MSVC 环境（由 ilammy/msvc-dev-cmd 提供）
-      # 不需要 phpsdk_setvars.bat（那是完整 PHP SDK 环境用的）
+      # 步骤 6: 编译扩展
+      # 关键：必须先调用 phpsdk_setvars.bat 初始化 PHP SDK 环境
+      #   - 设置 MSVC 编译器路径（cl.exe, nmake.exe, link.exe）
+      #   - 设置 PHP_SDK_VS 环境变量（如 vs17），configure.js 依赖此变量
+      #   - 不调用会导致 "Incompatible binary tools version" 错误
       # -----------------------------------------------------------------
       - name: Build extension
         shell: cmd
         run: |
-          REM 进入 PHP 源码目录
+          REM ===============================================================
+          REM 1. 初始化 PHP SDK 环境（设置 MSVC + PHP_SDK_VS=vs17）
+          REM ===============================================================
+          echo === 初始化 PHP SDK 环境 ===
+          call "C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat" vs17 x64
+          if errorlevel 1 (
+            echo ::error::phpsdk_setvars.bat 初始化失败
+            exit /b 1
+          )
+
+          REM 验证环境变量
+          echo PHP_SDK_VS=%PHP_SDK_VS%
+          echo PHP_SDK_ARCH=%PHP_SDK_ARCH%
+
+          REM ===============================================================
+          REM 2. 进入 PHP 源码目录
+          REM ===============================================================
           cd /d "%PHP_SRC_DIR%"
 
           REM 验证 MSVC 环境
           echo === MSVC 环境检查 ===
           where cl.exe
           where nmake.exe
-          where link.exe
 
           REM 验证 PHP 源码结构
           echo === PHP 源码结构 ===
-          dir /b buildconf.bat configure.js 2>nul
+          dir /b buildconf.bat 2>nul
           dir /b ext\xhcurl\*.c 2>nul
 
-          REM 生成 configure 脚本（--force 覆盖已有的 configure.js）
-          REM < NUL 重定向空输入，避免 buildconf.bat 等待用户输入
+          REM ===============================================================
+          REM 3. 生成 configure 脚本
+          REM ===============================================================
           echo === 运行 buildconf.bat ===
           call buildconf.bat --force < NUL
           if errorlevel 1 (
@@ -443,26 +466,26 @@ jobs:
             exit /b 1
           )
 
-          REM 验证 configure.js 已生成
           if not exist configure.js (
             echo ::error::configure.js 未生成
             exit /b 1
           )
 
-          REM 配置：使用 --enable-xhcurl=shared 生成独立 .dll
-          REM --disable-all 加速编译，只编译需要的扩展
-          REM --with-curl 需要 curl 开发包（devel pack 中已包含）
-          REM configure.js 是 JScript 文件，必须用 cscript 运行（不能用 call）
+          REM ===============================================================
+          REM 4. 配置：--enable-xhcurl=shared 生成独立 .dll
+          REM    configure.js 是 JScript 文件，必须用 cscript 运行
+          REM ===============================================================
           echo === 运行 configure.js ===
           cscript //nologo configure.js --enable-xhcurl=shared --disable-all --enable-json --with-curl --enable-cli --enable-cgi
           if errorlevel 1 (
             echo ::error::configure 失败
-            REM 显示 configure 日志帮助调试
             type configure.log 2>nul
             exit /b 1
           )
 
-          REM 编译（nmake 使用 MSVC 工具链）
+          REM ===============================================================
+          REM 5. 编译
+          REM ===============================================================
           echo === 运行 nmake ===
           nmake /NOLOGO
           if errorlevel 1 (
@@ -471,11 +494,10 @@ jobs:
           )
 
           echo === Windows 编译成功 ===
-          REM 列出生成的文件
           dir /s /b php_xhcurl.dll 2>nul
 
       # -----------------------------------------------------------------
-      # 步骤 8: 收集编译产物（.dll 文件）
+      # 步骤 7: 收集编译产物（.dll 文件）
       # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
       # -----------------------------------------------------------------
       - name: Collect build artifacts
@@ -524,7 +546,7 @@ jobs:
           Get-ChildItem -Path $distDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 9: 上传编译产物
+      # 步骤 8: 上传编译产物
       # -----------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
