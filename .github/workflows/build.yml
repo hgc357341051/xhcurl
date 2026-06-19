@@ -449,8 +449,9 @@ jobs:
           REM 配置：使用 --enable-xhcurl=shared 生成独立 .dll
           REM --disable-all 加速编译，只编译需要的扩展
           REM --with-curl 需要 curl 开发包（devel pack 中已包含）
+          REM configure.js 是 JScript 文件，必须用 cscript 运行（不能用 call）
           echo === 运行 configure.js ===
-          call configure.js --enable-xhcurl=shared --disable-all --enable-json --with-curl --enable-cli --enable-cgi < NUL
+          cscript //nologo configure.js --enable-xhcurl=shared --disable-all --enable-json --with-curl --enable-cli --enable-cgi
           if errorlevel 1 (
             echo ::error::configure 失败
             REM 显示 configure 日志帮助调试
