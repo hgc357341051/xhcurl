@@ -118,13 +118,16 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 6: 收集编译产物（.so 文件）
-      # 用于后续上传为 artifact 或发布 Release
+      # 重命名为 xhcurl-linux-php{version}.so 格式，避免多版本冲突
       # -----------------------------------------------------------------
       - name: Collect build artifacts
         run: |
           mkdir -p dist/linux
-          # 复制编译好的 .so 文件
-          find modules/ -name "*.so" -exec cp {} dist/linux/ \;
+          # 复制并重命名编译好的 .so 文件，加入平台和 PHP 版本信息
+          for f in modules/*.so; do
+            basename=$(basename "$f" .so)
+            cp "$f" "dist/linux/${basename}-linux-php${{ matrix.php-version }}.so"
+          done
           # 显示文件信息
           ls -la dist/linux/
           # 显示模块信息
@@ -213,12 +216,17 @@ jobs:
           make test NO_INTERACTION=1 || true
 
       # -----------------------------------------------------------------
-      # 步骤 6: 收集并上传产物（.dylib 文件）
+      # 步骤 6: 收集并上传产物（.so 文件）
+      # 重命名为 xhcurl-macos-php{version}.so 格式，避免多版本冲突
       # -----------------------------------------------------------------
       - name: Collect and upload artifacts
         run: |
           mkdir -p dist/macos
-          find modules/ -name "*.so" -exec cp {} dist/macos/ \;
+          # 复制并重命名，加入平台和 PHP 版本信息
+          for f in modules/*.so; do
+            basename=$(basename "$f" .so)
+            cp "$f" "dist/macos/${basename}-macos-php${{ matrix.php-version }}.so"
+          done
           ls -la dist/macos/
           for f in dist/macos/*.so; do
             echo "--- $f ---"
@@ -413,14 +421,12 @@ jobs:
         run: |
           mkdir -p release
 
-          # Linux 产物
-          mv all-builds/xhcurl-linux-*.so release/ 2>/dev/null || true
+          echo "=== all-builds 目录结构 ==="
+          find all-builds -type f | sort
 
-          # macOS 产物
-          mv all-builds/xhcurl-macos-*.so release/ 2>/dev/null || true
-
-          # Windows 产物
-          mv all-builds/xhcurl-windows-*.dll release/ 2>/dev/null || true
+          # 递归查找所有 .so 和 .dll 文件并移动到 release 目录
+          # download-artifact 配置 merge-multiple 后，文件可能分布在子目录中
+          find all-builds -type f \( -name "*.so" -o -name "*.dll" \) -exec cp {} release/ \;
 
           # 显示最终打包内容
           echo "=== Release 内容 ==="
@@ -432,6 +438,7 @@ jobs:
 
           if [ "$binary_count" -eq 0 ]; then
             echo "::error::没有找到任何编译产物，无法发布 Release"
+            echo "::error::请检查 build-linux 和 build-macos 任务是否成功上传 artifact"
             exit 1
           fi
 
