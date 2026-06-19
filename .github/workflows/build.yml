@@ -406,7 +406,8 @@ jobs:
           merge-multiple: true
 
       # -----------------------------------------------------------------
-      # 步骤 2: 打包所有平台产物
+      # 步骤 2: 打包所有平台产物并生成校验和
+      # 注意：只对二进制文件（.so/.dll）生成校验和，避免递归包含 .txt 文件
       # -----------------------------------------------------------------
       - name: Package releases
         run: |
@@ -425,16 +426,43 @@ jobs:
           echo "=== Release 内容 ==="
           ls -la release/
 
-          # 创建校验和文件
+          # 统计二进制文件数量
+          binary_count=$(find release -type f \( -name "*.so" -o -name "*.dll" \) | wc -l)
+          echo "Binary files count: $binary_count"
+
+          if [ "$binary_count" -eq 0 ]; then
+            echo "::error::没有找到任何编译产物，无法发布 Release"
+            exit 1
+          fi
+
+          # 只对二进制文件生成校验和（避免递归包含 .txt 文件）
           cd release
-          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
-          md5sum * > MD5SUMS.txt 2>/dev/null || true
+          # 使用 find 精确匹配二进制文件，排除 .txt 校验和文件
+          find . -type f \( -name "*.so" -o -name "*.dll" \) -exec sha256sum {} + > SHA256SUMS.txt
+          find . -type f \( -name "*.so" -o -name "*.dll" \) -exec md5sum {} + > MD5SUMS.txt
+
+          # 验证校验和文件非空
+          echo "=== SHA256SUMS.txt 内容 ==="
+          cat SHA256SUMS.txt
+          echo "=== MD5SUMS.txt 内容 ==="
+          cat MD5SUMS.txt
+
+          # 确保校验和文件非空（防止 422 上传错误）
+          if [ ! -s SHA256SUMS.txt ]; then
+            echo "::error::SHA256SUMS.txt 为空"
+            exit 1
+          fi
+          if [ ! -s MD5SUMS.txt ]; then
+            echo "::error::MD5SUMS.txt 为空"
+            exit 1
+          fi
 
       # -----------------------------------------------------------------
       # 步骤 3: 创建 GitHub Release
+      # 使用 @v2 版本（基于 Node 24，避免 Node 20 废弃警告）
       # -----------------------------------------------------------------
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
           draft: false
