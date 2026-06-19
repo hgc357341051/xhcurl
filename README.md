@@ -6,6 +6,10 @@
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的 HTTP 客户端能力，支持单次请求、批量异步请求、多线程并发请求，并针对大数据量场景做了内存优化。
+git tag -d v1.0.0
+git push origin :refs/tags/v1.0.0
+git tag v1.0.0
+git push origin v1.0.0
 
 ## 目录
 
@@ -51,11 +55,12 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 |------|----------|----------|------|
 | Linux (Ubuntu 22.04) | 8.0, 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
 | macOS 14 | 8.0, 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
+| Windows Server 2019 | 8.0, 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
 | Windows Server 2022 | 8.4 | NTS | ✅ 支持 |
 
 > **注意**：
 > - `XHThreadPool` 在所有平台上仅 CLI 模式可用。
-> - Windows 仅提供 PHP 8.4 的预编译包（因 PHP 8.0-8.3 需要 VS 2019，而 CI runner 仅预装 VS 2022）。如需其他 Windows 版本，可参考 [Windows 编译指南](#windows-编译指南) 自行编译。
+> - Windows PHP 8.0-8.3 使用 VS 2019 编译（vs16），PHP 8.4 使用 VS 2022 编译（vs17），确保与官方 PHP Windows 二进制包的编译器版本一致。
 
 ---
 

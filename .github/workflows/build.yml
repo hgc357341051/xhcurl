@@ -241,7 +241,7 @@ jobs:
           retention-days: 30
 
   # =====================================================================
-  # Job 3: Windows 平台编译（Windows Server 2022）
+  # Job 3: Windows 平台编译
   # 使用完整 PHP 源码树方式编译（非 phpize）
   #
   # 为什么不用 phpize？
@@ -256,8 +256,16 @@ jobs:
   #   vcpkg install curl → 安装 libcurl
   #   buildconf → configure → nmake
   #
-  # config.w32 使用 PHP 内置 curl 扩展的 --with-curl=PATH 选项
-  # 来获取 libcurl 的安装路径（无需自定义 ARG_WITH）
+  # Runner 选择策略：
+  #   PHP 8.0-8.3 需要 VS 2019 (vs16) → windows-2019 runner
+  #   PHP 8.4+   需要 VS 2022 (vs17) → windows-2022 runner
+  #   参考：https://wiki.php.net/internals/windows/stepbystepbuild_sdk_2
+  #
+  # config.w32 注意事项：
+  #   - 只使用 ARG_ENABLE，不使用 ARG_WITH（避免 JScript 冲突）
+  #   - 只使用 /* */ 块注释，不使用 // 行注释
+  #     （buildconf.bat 会剥掉 // 前缀，导致注释内容变成 JScript 代码）
+  #   - curl 路径通过 Makefile 补丁注入（非 config.w32）
   #
   # 参考：
   #   https://wiki.php.net/internals/windows/stepbystepbuild_sdk_2
@@ -265,13 +273,35 @@ jobs:
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
-    runs-on: windows-2022
+    # 根据 PHP 版本选择不同的 runner：
+    #   PHP 8.0-8.3 需要 VS 2019 → windows-2019（预装 VS 2019）
+    #   PHP 8.4+   需要 VS 2022 → windows-2022（预装 VS 2022）
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # PHP 8.4+ 需要 VS 2022 (vs17)，与 windows-2022 runner 匹配
-        php-version: ['8.4']
-        ts: ['nts']  # Non-Thread-Safe（FPM 推荐）
+        # 每个 PHP 版本对应正确的 runner 和 VS 版本
+        include:
+          # PHP 8.0 需要 VS 2019 (vs16, toolset 14.2)
+          - php-version: '8.0'
+            ts: 'nts'
+            runner: windows-2019
+          # PHP 8.1 需要 VS 2019 (vs16, toolset 14.2)
+          - php-version: '8.1'
+            ts: 'nts'
+            runner: windows-2019
+          # PHP 8.2 需要 VS 2019 (vs16, toolset 14.2)
+          - php-version: '8.2'
+            ts: 'nts'
+            runner: windows-2019
+          # PHP 8.3 需要 VS 2019 (vs16, toolset 14.2)
+          - php-version: '8.3'
+            ts: 'nts'
+            runner: windows-2019
+          # PHP 8.4 需要 VS 2022 (vs17, toolset 14.4)
+          - php-version: '8.4'
+            ts: 'nts'
+            runner: windows-2022
 
     steps:
       # -----------------------------------------------------------------
@@ -427,10 +457,6 @@ jobs:
             echo ::error::buildconf 失败
             exit /b 1
           )
-
-          REM 调试：显示 configure.js 错误行附近的内容
-          echo === configure.js 第 4230-4240 行 ===
-          powershell -Command "Get-Content configure.js | Select-Object -Skip 4229 -First 11 | ForEach-Object { $i++; Write-Host ('{0}: {1}' -f (4230+$i-1), $_) }"
 
           REM 运行 configure（不传 --with-curl，避免 JScript 冲突）
           cscript //nologo configure.js ^
