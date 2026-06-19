@@ -408,10 +408,11 @@ jobs:
       #   --disable-all          禁用所有默认扩展（加速编译）
       #   --enable-cli           启用 CLI SAPI（必需）
       #   --enable-xhcurl=shared 编译 xhcurl 为独立 DLL
-      #   --with-curl=PATH       指定 libcurl 路径（PHP 内置选项，
-      #                          config.w32 通过 PHP_CURL 变量使用）
-      #   --without-curl         不编译 PHP 内置 curl 扩展（仅使用路径）
       #   --with-prefix=PATH     PHP 安装目录（由 setup-php-sdk 输出）
+      #
+      # 注意：不使用 --with-curl，因为 PHP 内置 curl 扩展的
+      #       ARG_WITH("curl",...) 与我们的扩展产生 JScript 冲突
+      #       curl 路径在下一步通过修改 Makefile 注入
       # -----------------------------------------------------------------
       - name: Build and configure
         shell: cmd
@@ -426,19 +427,11 @@ jobs:
             exit /b 1
           )
 
-          REM 显示 configure 帮助中 xhcurl 相关选项（调试用）
-          echo === xhcurl 相关 configure 选项 ===
-          cscript //nologo configure.js --help | findstr /i "xhcurl curl"
-
-          REM 运行 configure
-          REM --with-curl 设置 PHP_CURL 变量（供 xhcurl 的 config.w32 使用）
-          REM --without-curl 禁止编译 PHP 内置 curl 扩展（但 PHP_CURL 变量仍保留路径值）
+          REM 运行 configure（不传 --with-curl，避免 JScript 冲突）
           cscript //nologo configure.js ^
             --disable-all ^
             --enable-cli ^
             --enable-xhcurl=shared ^
-            --with-curl=%CURL_DIR% ^
-            --without-curl ^
             --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }}
           if errorlevel 1 (
             echo ::error::configure 失败
@@ -446,7 +439,55 @@ jobs:
           )
 
       # -----------------------------------------------------------------
-      # 步骤 7: 编译
+      # 步骤 7: 修补 Makefile 添加 libcurl 路径
+      # configure 生成的 Makefile 不包含 curl 的 include/lib 路径
+      # 因为 config.w32 中没有使用 CHECK_LIB/CHECK_HEADER_ADD_INCLUDE
+      # 需要手动注入这些路径到 Makefile 的对应变量中
+      #
+      # PHP Windows Makefile 中的关键变量：
+      #   CFLAGS_XHCURL  - 编译器标志（添加 /I 头文件路径）
+      #   LDFLAGS_XHCURL - 链接器标志（添加 /LIBPATH 库路径）
+      #   LIBS_XHCURL    - 链接库列表（添加 libcurl.lib 等）
+      # -----------------------------------------------------------------
+      - name: Patch Makefile for libcurl
+        shell: pwsh
+        run: |
+          $makefile = "php-src\Makefile"
+          $curlDir = $env:CURL_DIR
+
+          if (-not (Test-Path $makefile)) {
+            Write-Host "::error::Makefile 未找到: $makefile"
+            exit 1
+          }
+
+          # 读取 Makefile 内容
+          $content = Get-Content -Path $makefile -Raw
+
+          # 显示修改前的相关变量（调试用）
+          Write-Host "=== 修改前的 Makefile 变量 ==="
+          $content -split "`n" | Where-Object { $_ -match "XHCURL" } | ForEach-Object { Write-Host "  $_" }
+
+          # 注入 curl 头文件路径到 CFLAGS_XHCURL
+          # /I 表示 include 目录，等号后不能有空格
+          $content = $content -replace '(CFLAGS_XHCURL\s*=\s*)', "`$1/I `"$curlDir\include`" "
+
+          # 注入 curl 库路径到 LDFLAGS_XHCURL
+          # /LIBPATH 指定额外的库搜索目录
+          $content = $content -replace '(LDFLAGS_XHCURL\s*=\s*)', "`$1/LIBPATH:`"$curlDir\lib`" "
+
+          # 注入 libcurl.lib 和 ws2_32.lib 到 LIBS_XHCURL
+          # ws2_32.lib 是 Windows Sockets 库（curl 依赖）
+          $content = $content -replace '(LIBS_XHCURL\s*=\s*)', "`$1libcurl.lib ws2_32.lib "
+
+          # 写回 Makefile
+          Set-Content -Path $makefile -Value $content -NoNewline
+
+          # 显示修改后的相关变量（验证）
+          Write-Host "=== 修改后的 Makefile 变量 ==="
+          $content -split "`n" | Where-Object { $_ -match "XHCURL" } | ForEach-Object { Write-Host "  $_" }
+
+      # -----------------------------------------------------------------
+      # 步骤 8: 编译
       # nmake 使用 MSVC 工具链编译扩展
       # -----------------------------------------------------------------
       - name: nmake
@@ -456,7 +497,7 @@ jobs:
           nmake /NOLOGO
 
       # -----------------------------------------------------------------
-      # 步骤 8: 收集编译产物（.dll 文件）
+      # 步骤 9: 收集编译产物（.dll 文件）
       # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
       # 完整源码树方式的 DLL 在 php-src/Release*/ 目录下
       # -----------------------------------------------------------------
@@ -528,7 +569,7 @@ jobs:
           Get-ChildItem -Path $distDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 9: 上传编译产物
+      # 步骤 10: 上传编译产物
       # -----------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
