@@ -1,25 +1,8 @@
-// +----------------------------------------------------------------------+
-// | XHCurl 扩展 - Windows 构建配置                                       |
-// | 类似 curl 的 PHP 扩展，支持单次/批量/多线程同步异步请求               |
-// +----------------------------------------------------------------------+
+/* XHCurl - Windows build configuration */
 
-// 检查用户是否启用 xhcurl 扩展
-// ARG_ENABLE 创建布尔/共享标志选项（no/yes/shared）
 ARG_ENABLE("xhcurl", "enable xhcurl support", "no");
 
 if (PHP_XHCURL != "no") {
-    // 声明扩展的源文件列表
-    // 模块划分（遵循单一职责原则）：
-    //   xhcurl.c           - 模块入口 + XHCurl 全局管理器类
-    //   xhcurl_buffer.c    - 响应缓冲区管理（init/write/read/free）
-    //   xhcurl_header.c    - HTTP 头部链表操作（add/find/free/parse）
-    //   xhcurl_cookie.c    - Cookie 链表操作（add/free）
-    //   xhcurl_context.c   - 请求执行上下文 + curl 回调函数
-    //   xhcurl_utils.c     - 辅助工具函数（SAPI 判断、字符串处理）
-    //   xhcurl_response.c  - XHResponse 懒加载响应类
-    //   xhcurl_request.c   - XHRequest 请求构建器类
-    //   xhcurl_multi.c     - XHMulti 批量异步执行器类
-    //   xhcurl_threadpool.c - XHThreadPool CLI 线程池类
     EXTENSION("xhcurl",
         "xhcurl.c " +
         "xhcurl_buffer.c " +
@@ -33,15 +16,6 @@ if (PHP_XHCURL != "no") {
         "xhcurl_threadpool.c",
         PHP_XHCURL_SHARED);
 
-    // 定义扩展可用宏
     AC_DEFINE('HAVE_XHCURL', 1, 'Have xhcurl extension');
-
-    // Windows 线程支持（线程池功能依赖）
     AC_DEFINE('HAVE_WIN32_THREAD', 1, 'Have Windows thread support');
-
-    // 注意：libcurl 的头文件和库路径不在此处配置
-    // 而是在 CI 中通过修改 Makefile 添加
-    // 原因：CHECK_LIB / CHECK_HEADER_ADD_INCLUDE / ARG_WITH
-    //       在某些 PHP 源码版本下会生成无效的 JScript 代码
-    //       导致 configure.js 编译错误
 }
