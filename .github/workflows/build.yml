@@ -242,13 +242,16 @@ jobs:
 
   # =====================================================================
   # Job 3: Windows 平台编译（Windows Server 2022）
-  # 使用 php-sdk-binary-tools 官方工具链编译 PHP 扩展
+  # 使用 php/setup-php-sdk 官方 Action + phpize 方式编译
   #
-  # 重要说明：
-  # - PHP 8.0 ~ 8.3 需要 Visual Studio 2019 (vs16)
-  # - PHP 8.4+ 需要 Visual Studio 2022 (vs17)
-  # - GitHub windows-2022 runner 仅预装 VS 2022，因此只编译 PHP 8.4
-  # - 如需编译 8.0-8.3，需在 runner 上安装 VS 2019 或使用 vs16 工具集
+  # 编译流程：
+  #   php/setup-php-sdk → 设置 PHP SDK + devel pack
+  #   ilammy/msvc-dev-cmd → 设置 MSVC 工具链（使用正确的 toolset）
+  #   phpize → 生成 configure 脚本
+  #   configure --enable-xhcurl=shared → 配置
+  #   nmake → 编译
+  #
+  # 参考：https://github.com/php/setup-php-sdk
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
@@ -256,7 +259,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 仅编译 PHP 8.4（与 runner 预装的 VS 2022 匹配）
+        # PHP 8.4+ 需要 VS 2022 (vs17)，与 windows-2022 runner 匹配
+        # PHP 8.0-8.3 需要 VS 2019 (vs16)，需要 windows-2019 runner
         php-version: ['8.4']
         ts: ['nts']  # Non-Thread-Safe（FPM 推荐）
 
@@ -268,243 +272,56 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------------------------------------
-      # 步骤 2: 设置 MSVC 编译环境
-      # 使用 ilammy/msvc-dev-cmd 初始化 Visual C++ 工具链（x64）
+      # 步骤 2: 设置 PHP SDK（官方 Action）
+      # 自动下载 PHP SDK、PHP 二进制、devel pack
+      # 输出 toolset（如 14.4）供 ilammy/msvc-dev-cmd 使用
+      # 输出 prefix 供 configure --with-prefix 使用
       # -----------------------------------------------------------------
-      - name: Setup MSVC build environment
+      - name: Setup PHP SDK
+        id: setup-php-sdk
+        uses: php/setup-php-sdk@v0.12
+        with:
+          version: ${{ matrix.php-version }}
+          arch: x64
+          ts: ${{ matrix.ts }}
+          deps: libcurl, openssl
+          cache: true
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 设置 MSVC 编译环境
+      # 使用 setup-php-sdk 输出的 toolset 确保版本匹配
+      # 例如 PHP 8.4 需要 toolset 14.4（VS 2022）
+      # -----------------------------------------------------------------
+      - name: Setup MSVC developer command prompt
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
 
       # -----------------------------------------------------------------
-      # 步骤 3: 缓存 PHP SDK binary tools
-      # 避免每次都从 GitHub 下载（约 100MB）
+      # 步骤 4: 运行 phpize 生成 configure 脚本
+      # phpize 是 PHP 扩展的标准构建准备工具
+      # 它会根据 config.w32 生成 configure.js
       # -----------------------------------------------------------------
-      - name: Cache PHP SDK
-        uses: actions/cache@v4
-        with:
-          path: C:\php-sdk
-          key: php-sdk-binary-tools-${{ runner.os }}-v3
+      - name: phpize
+        run: phpize
 
       # -----------------------------------------------------------------
-      # 步骤 4: 安装 PHP SDK binary tools
-      # 官方工具链，提供 buildconf.bat、configure.js 等编译脚本
-      # 仓库：https://github.com/php/php-sdk-binary-tools
-      #
-      # 说明：
-      # - phpsdk_setvars.bat 在 GitHub Actions 非交互式 cmd 中无法正确传递环境变量
-      # - 改用 ilammy/msvc-dev-cmd 设置 MSVC 环境
-      # - 手动设置 PHP_SDK_VS 环境变量供 configure.js 使用
+      # 步骤 5: configure 配置
+      # --enable-xhcurl=shared 生成独立 .dll（不编译进 php.exe）
+      # --with-prefix 指向 PHP 安装目录（由 setup-php-sdk 输出）
+      # --with-curl 链接 libcurl（由 deps 选项安装）
+      # configure.js 是 JScript 文件，必须用 cscript 运行
       # -----------------------------------------------------------------
-      - name: Setup PHP SDK binary tools
-        shell: pwsh
-        run: |
-          # 若缓存命中则跳过下载
-          if (Test-Path "C:\php-sdk\phpsdk-binary-tools\bin\phpsdk_setvars.bat") {
-            Write-Host "PHP SDK 已缓存，跳过下载"
-            return
-          }
-
-          New-Item -ItemType Directory -Path "C:\php-sdk" -Force | Out-Null
-          Set-Location "C:\php-sdk"
-
-          # 下载官方 PHP SDK binary tools
-          $sdkUrl = "https://github.com/php/php-sdk-binary-tools/archive/refs/heads/master.zip"
-          Write-Host "Downloading PHP SDK binary tools: $sdkUrl"
-          Invoke-WebRequest -Uri $sdkUrl -OutFile "phpsdk.zip"
-          Expand-Archive -Path "phpsdk.zip" -DestinationPath "." -Force
-          # 重命名为标准名称
-          Rename-Item -Path "php-sdk-binary-tools-master" -NewName "phpsdk-binary-tools"
-
-          # 验证关键文件存在（phpsdk_setvars.bat 在 bin\ 子目录下）
-          if (-not (Test-Path "C:\php-sdk\phpsdk-binary-tools\bin\phpsdk_setvars.bat")) {
-            echo "::error::phpsdk_setvars.bat 未找到"
-            exit 1
-          }
-
-          Write-Host "PHP SDK 安装成功"
+      - name: configure
+        run: cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }}
 
       # -----------------------------------------------------------------
-      # 步骤 4: 下载 PHP 源码和 devel pack
-      # Windows 编译需要 PHP 源码树（包含 config.w32、build 脚本等）
+      # 步骤 6: 编译
+      # nmake 使用 MSVC 工具链编译扩展
       # -----------------------------------------------------------------
-      - name: Download PHP source and devel pack
-        shell: pwsh
-        run: |
-          $phpVersion = "${{ matrix.php-version }}"
-          $ts = "${{ matrix.ts }}"
-
-          # 补全完整版本号（使用 windows.php.net 实际可用的最新版本）
-          $fullVersion = switch ($phpVersion) {
-            "8.4" { "8.4.22" }  # PHP 8.4 最新版本
-            default { $phpVersion }
-          }
-          Write-Host "PHP 完整版本号: $fullVersion"
-
-          # 确定 Visual C++ 版本标识
-          # PHP 8.0 ~ 8.3 使用 vs16（Visual Studio 2019）
-          # PHP 8.4+ 使用 vs17（Visual Studio 2022）
-          $vc = if ($phpVersion -ge "8.4") { "vs17" } else { "vs16" }
-          Write-Host "Visual C++ 版本: $vc"
-
-          # PHP 源码 URL（GitHub 官方仓库的 tag，使用完整版本号）
-          $sourceUrl = "https://github.com/php/php-src/archive/refs/tags/php-$fullVersion.zip"
-
-          # PHP devel pack URL（包含头文件和导入库）
-          # 正确格式：php-devel-pack-{version}-Win32-{vc}-x64.zip
-          # 注意：devel pack 不区分 nts/ts，文件名中包含 "Win32"
-          $develBaseUrl = "https://downloads.php.net/~windows/releases"
-          $develFileName = "php-devel-pack-$fullVersion-Win32-$vc-x64.zip"
-          $develUrl = "$develBaseUrl/$develFileName"
-
-          # 备用 URL（windows.php.net 镜像）
-          $develUrlFallback1 = "https://windows.php.net/downloads/releases/$develFileName"
-          # 归档目录（旧版本可能在此）
-          $develUrlFallback2 = "https://windows.php.net/downloads/releases/archives/$develFileName"
-
-          Write-Host "Downloading PHP source: $sourceUrl"
-          try {
-            Invoke-WebRequest -Uri $sourceUrl -OutFile "php-src.zip" -ErrorAction Stop
-          } catch {
-            Write-Host "::warning::GitHub 源码下载失败，尝试 museum.php.net"
-            $archiveSourceUrl = "https://museum.php.net/php-src/php-$fullVersion.zip"
-            Invoke-WebRequest -Uri $archiveSourceUrl -OutFile "php-src.zip"
-          }
-
-          Write-Host "Downloading PHP devel pack: $develUrl"
-          $develDownloaded = $false
-          foreach ($url in @($develUrl, $develUrlFallback1, $develUrlFallback2)) {
-            try {
-              Write-Host "尝试下载: $url"
-              Invoke-WebRequest -Uri $url -OutFile "php-devel.zip" -ErrorAction Stop
-              $develDownloaded = $true
-              Write-Host "下载成功: $url"
-              break
-            } catch {
-              Write-Host "::warning::下载失败: $url - $($_.Exception.Message)"
-            }
-          }
-
-          if (-not $develDownloaded) {
-            echo "::error::所有 devel pack 下载 URL 均失败"
-            echo "::error::请检查版本号 $fullVersion 和 VC 版本 $vc 是否正确"
-            echo "::error::可访问 https://windows.php.net/download/ 查看可用版本"
-            exit 1
-          }
-
-          # 解压 PHP 源码
-          Expand-Archive -Path "php-src.zip" -DestinationPath "C:\php-src" -Force
-          # 源码目录名形如 php-src-php-8.4.22，重命名为标准名
-          $srcDir = Get-ChildItem -Path "C:\php-src" -Directory | Select-Object -First 1
-          Rename-Item -Path $srcDir.FullName -NewName "php-src"
-          Write-Host "PHP 源码目录: C:\php-src\php-src"
-
-          # 解压 devel pack 到 PHP 源码目录（提供 phpsdk 库和头文件）
-          Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel" -Force
-          $develDir = Get-ChildItem -Path "C:\php-devel" -Directory | Select-Object -First 1
-          Write-Host "PHP devel 目录: $($develDir.FullName)"
-
-          # 将 devel pack 内容合并到 PHP 源码目录
-          Copy-Item -Path "$($develDir.FullName)\*" -Destination "C:\php-src\php-src" -Recurse -Force
-
-          # 设置环境变量供后续步骤使用
-          echo "PHP_SRC_DIR=C:\php-src\php-src" >> $env:GITHUB_ENV
-          echo "PHP_VC=$vc" >> $env:GITHUB_ENV
-
-      # -----------------------------------------------------------------
-      # 步骤 5: 复制扩展源码到 PHP 源码树
-      # PHP Windows 编译要求扩展位于 php-src/ext/<extname> 目录下
-      # -----------------------------------------------------------------
-      - name: Copy extension source to PHP source tree
-        shell: pwsh
-        run: |
-          $extDir = Join-Path $env:PHP_SRC_DIR "ext\xhcurl"
-          New-Item -ItemType Directory -Path $extDir -Force | Out-Null
-          # 复制扩展源码和构建配置文件
-          Copy-Item -Path "*.c", "*.h", "config.m4", "config.w32" -Destination $extDir -Force
-          Write-Host "扩展源码已复制到: $extDir"
-          Get-ChildItem -Path $extDir | Format-Table Name, Length
-
-      # -----------------------------------------------------------------
-      # 步骤 6: 编译扩展
-      # 关键：configure.js 需要 PHP_SDK_VS 环境变量判断 VS 版本
-      # ilammy/msvc-dev-cmd 已设置 MSVC 工具链，但不会设置 PHP_SDK_VS
-      # 因此手动设置 PHP_SDK_VS=vs17 和 PHP_SDK_ARCH=x64
-      # -----------------------------------------------------------------
-      - name: Build extension
-        shell: cmd
-        env:
-          # 手动设置 PHP SDK 环境变量（configure.js 依赖）
-          PHP_SDK_VS: 'vs17'
-          PHP_SDK_ARCH: 'x64'
-          PHP_SDK_ROOT_PATH: 'C:\php-sdk\phpsdk-binary-tools'
-        run: |
-          REM ===============================================================
-          REM 1. 验证 MSVC 环境（由 ilammy/msvc-dev-cmd 设置）
-          REM ===============================================================
-          echo === MSVC 环境检查 ===
-          where cl.exe
-          where nmake.exe
-          if errorlevel 1 (
-            echo ::error::MSVC 工具链未找到，请检查 ilammy/msvc-dev-cmd 是否正确执行
-            exit /b 1
-          )
-
-          REM 验证 PHP SDK 环境变量
-          echo === PHP SDK 环境变量 ===
-          echo PHP_SDK_VS=%PHP_SDK_VS%
-          echo PHP_SDK_ARCH=%PHP_SDK_ARCH%
-          echo PHP_SDK_ROOT_PATH=%PHP_SDK_ROOT_PATH%
-
-          REM ===============================================================
-          REM 2. 进入 PHP 源码目录
-          REM ===============================================================
-          cd /d "%PHP_SRC_DIR%"
-
-          REM 验证 PHP 源码结构
-          echo === PHP 源码结构 ===
-          dir /b buildconf.bat 2>nul
-          dir /b ext\xhcurl\*.c 2>nul
-
-          REM ===============================================================
-          REM 3. 生成 configure 脚本
-          REM ===============================================================
-          echo === 运行 buildconf.bat ===
-          call buildconf.bat --force < NUL
-          if errorlevel 1 (
-            echo ::error::buildconf 失败
-            exit /b 1
-          )
-
-          if not exist configure.js (
-            echo ::error::configure.js 未生成
-            exit /b 1
-          )
-
-          REM ===============================================================
-          REM 4. 配置：--enable-xhcurl=shared 生成独立 .dll
-          REM    configure.js 是 JScript 文件，必须用 cscript 运行
-          REM ===============================================================
-          echo === 运行 configure.js ===
-          cscript //nologo configure.js --enable-xhcurl=shared --disable-all --enable-json --with-curl --enable-cli --enable-cgi
-          if errorlevel 1 (
-            echo ::error::configure 失败
-            type configure.log 2>nul
-            exit /b 1
-          )
-
-          REM ===============================================================
-          REM 5. 编译
-          REM ===============================================================
-          echo === 运行 nmake ===
-          nmake /NOLOGO
-          if errorlevel 1 (
-            echo ::error::nmake 编译失败
-            exit /b 1
-          )
-
-          echo === Windows 编译成功 ===
-          dir /s /b php_xhcurl.dll 2>nul
+      - name: nmake
+        run: nmake /NOLOGO
 
       # -----------------------------------------------------------------
       # 步骤 7: 收集编译产物（.dll 文件）
@@ -516,12 +333,13 @@ jobs:
           $distDir = "dist\windows"
           New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-          # 在 Release_TS 或 Release 目录下查找生成的 .dll
+          # phpize 方式编译的 .dll 通常在当前目录或 Release_TS/Release 子目录
           $searchDirs = @(
-            Join-Path $env:PHP_SRC_DIR "Release_TS"
-            Join-Path $env:PHP_SRC_DIR "Release"
-            Join-Path $env:PHP_SRC_DIR "x64\Release_TS"
-            Join-Path $env:PHP_SRC_DIR "x64\Release"
+            ".",
+            "Release_TS",
+            "Release",
+            "x64\Release_TS",
+            "x64\Release"
           )
 
           $dllFound = $false
@@ -549,6 +367,8 @@ jobs:
             echo "::error::未找到编译产物 php_xhcurl.dll"
             echo "::error::搜索目录:"
             $searchDirs | ForEach-Object { echo "  $_" }
+            echo "::error::当前目录内容:"
+            Get-ChildItem -Recurse -Filter "*.dll" | ForEach-Object { echo "  $($_.FullName)" }
             exit 1
           }
 
