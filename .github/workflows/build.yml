@@ -243,7 +243,12 @@ jobs:
   # =====================================================================
   # Job 3: Windows 平台编译（Windows Server 2022）
   # 使用 php-sdk-binary-tools 官方工具链编译 PHP 扩展
-  # 支持 PHP 8.0 ~ 8.3，NTS（Non-Thread-Safe，FPM 推荐）
+  #
+  # 重要说明：
+  # - PHP 8.0 ~ 8.3 需要 Visual Studio 2019 (vs16)
+  # - PHP 8.4+ 需要 Visual Studio 2022 (vs17)
+  # - GitHub windows-2022 runner 仅预装 VS 2022，因此只编译 PHP 8.4
+  # - 如需编译 8.0-8.3，需在 runner 上安装 VS 2019 或使用 vs16 工具集
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
@@ -251,7 +256,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.0', '8.1', '8.2', '8.3']
+        # 仅编译 PHP 8.4（与 runner 预装的 VS 2022 匹配）
+        php-version: ['8.4']
         ts: ['nts']  # Non-Thread-Safe（FPM 推荐）
 
     steps:
@@ -317,10 +323,7 @@ jobs:
 
           # 补全完整版本号（使用 windows.php.net 实际可用的最新版本）
           $fullVersion = switch ($phpVersion) {
-            "8.0" { "8.0.30" }  # PHP 8.0 最终版本
-            "8.1" { "8.1.34" }  # PHP 8.1 最新版本
-            "8.2" { "8.2.31" }  # PHP 8.2 最新版本
-            "8.3" { "8.3.31" }  # PHP 8.3 最新版本
+            "8.4" { "8.4.22" }  # PHP 8.4 最新版本
             default { $phpVersion }
           }
           Write-Host "PHP 完整版本号: $fullVersion"
@@ -378,7 +381,7 @@ jobs:
 
           # 解压 PHP 源码
           Expand-Archive -Path "php-src.zip" -DestinationPath "C:\php-src" -Force
-          # 源码目录名形如 php-src-php-8.2.31，重命名为标准名
+          # 源码目录名形如 php-src-php-8.4.22，重命名为标准名
           $srcDir = Get-ChildItem -Path "C:\php-src" -Directory | Select-Object -First 1
           Rename-Item -Path $srcDir.FullName -NewName "php-src"
           Write-Host "PHP 源码目录: C:\php-src\php-src"
