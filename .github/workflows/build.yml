@@ -345,6 +345,9 @@ jobs:
           # 移动到固定路径
           Move-Item -Path $srcDir.FullName -Destination "php-src" -Force
 
+          # 创建扩展目录（必须先创建，否则 Copy-Item 会失败）
+          New-Item -ItemType Directory -Path "php-src\ext\xhcurl" -Force | Out-Null
+
           # 复制我们的扩展到 PHP 源码树的 ext/ 目录
           Copy-Item -Path "xhcurl.c" -Destination "php-src\ext\xhcurl\" -Force
           Copy-Item -Path "xhcurl_buffer.c" -Destination "php-src\ext\xhcurl\" -Force
