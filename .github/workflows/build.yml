@@ -411,40 +411,64 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 7: 编译扩展
-      # 使用 PHP SDK 的 phpsdk-buildtree + buildconf + configure + nmake 流程
+      # 直接使用已设置的 MSVC 环境（由 ilammy/msvc-dev-cmd 提供）
+      # 不需要 phpsdk_setvars.bat（那是完整 PHP SDK 环境用的）
       # -----------------------------------------------------------------
       - name: Build extension
         shell: cmd
         run: |
-          REM 初始化 PHP SDK 环境（设置 MSVC、路径等）
-          call C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat
-
           REM 进入 PHP 源码目录
           cd /d "%PHP_SRC_DIR%"
 
+          REM 验证 MSVC 环境
+          echo === MSVC 环境检查 ===
+          where cl.exe
+          where nmake.exe
+          where link.exe
+
+          REM 验证 PHP 源码结构
+          echo === PHP 源码结构 ===
+          dir /b buildconf.bat configure.js 2>nul
+          dir /b ext\xhcurl\*.c 2>nul
+
           REM 生成 configure 脚本（--force 覆盖已有的 configure.js）
-          call buildconf.bat --force
+          REM < NUL 重定向空输入，避免 buildconf.bat 等待用户输入
+          echo === 运行 buildconf.bat ===
+          call buildconf.bat --force < NUL
           if errorlevel 1 (
             echo ::error::buildconf 失败
             exit /b 1
           )
 
-          REM 配置：仅启用 xhcurl + 必需依赖（json、curl、cli）
+          REM 验证 configure.js 已生成
+          if not exist configure.js (
+            echo ::error::configure.js 未生成
+            exit /b 1
+          )
+
+          REM 配置：使用 --enable-xhcurl=shared 生成独立 .dll
           REM --disable-all 加速编译，只编译需要的扩展
-          call configure.js --enable-xhcurl --disable-all --enable-json --with-curl --enable-cli --enable-cgi
+          REM --with-curl 需要 curl 开发包（devel pack 中已包含）
+          echo === 运行 configure.js ===
+          call configure.js --enable-xhcurl=shared --disable-all --enable-json --with-curl --enable-cli --enable-cgi < NUL
           if errorlevel 1 (
             echo ::error::configure 失败
+            REM 显示 configure 日志帮助调试
+            type configure.log 2>nul
             exit /b 1
           )
 
           REM 编译（nmake 使用 MSVC 工具链）
-          nmake
+          echo === 运行 nmake ===
+          nmake /NOLOGO
           if errorlevel 1 (
             echo ::error::nmake 编译失败
             exit /b 1
           )
 
           echo === Windows 编译成功 ===
+          REM 列出生成的文件
+          dir /s /b php_xhcurl.dll 2>nul
 
       # -----------------------------------------------------------------
       # 步骤 8: 收集编译产物（.dll 文件）
