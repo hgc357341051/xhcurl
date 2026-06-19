@@ -276,6 +276,8 @@ jobs:
       # 自动下载 PHP SDK、PHP 二进制、devel pack
       # 输出 toolset（如 14.4）供 ilammy/msvc-dev-cmd 使用
       # 输出 prefix 供 configure --with-prefix 使用
+      # 注意：不使用 deps 参数（会导致 NullReferenceException），
+      # curl 依赖通过 vcpkg 安装
       # -----------------------------------------------------------------
       - name: Setup PHP SDK
         id: setup-php-sdk
@@ -284,11 +286,40 @@ jobs:
           version: ${{ matrix.php-version }}
           arch: x64
           ts: ${{ matrix.ts }}
-          deps: libcurl, openssl
           cache: true
 
       # -----------------------------------------------------------------
-      # 步骤 3: 设置 MSVC 编译环境
+      # 步骤 3: 安装 libcurl 开发库（通过 vcpkg）
+      # vcpkg 是 Microsoft 的 C++ 包管理器，预装在 GitHub runner 上
+      # 安装 curl:x64-windows-static 可获得静态链接的 libcurl
+      # -----------------------------------------------------------------
+      - name: Install libcurl via vcpkg
+        shell: pwsh
+        run: |
+          # 使用 vcpkg 安装 curl（静态链接版本，避免运行时 DLL 依赖）
+          vcpkg install curl:x64-windows-static
+          # 集成到 MSVC 构建系统
+          vcpkg integrate install
+
+          # 输出 curl 安装路径供后续使用
+          $curlDir = & vcpkg prefix curl:x64-windows-static 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            # vcpkg prefix 不可用，使用默认路径
+            $curlDir = "C:\vcpkg\installed\x64-windows-static"
+          }
+          echo "CURL_DIR=$curlDir" >> $env:GITHUB_ENV
+          Write-Host "libcurl 安装路径: $curlDir"
+
+          # 验证 curl 头文件和库文件存在
+          if (Test-Path "$curlDir\include\curl\curl.h") {
+            Write-Host "curl.h 找到"
+          } else {
+            Write-Host "::warning::curl.h 未找到，尝试搜索"
+            Get-ChildItem -Path "C:\vcpkg\installed" -Recurse -Filter "curl.h" | ForEach-Object { Write-Host "  $($_.FullName)" }
+          }
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 设置 MSVC 编译环境
       # 使用 setup-php-sdk 输出的 toolset 确保版本匹配
       # 例如 PHP 8.4 需要 toolset 14.4（VS 2022）
       # -----------------------------------------------------------------
@@ -299,7 +330,7 @@ jobs:
           toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
 
       # -----------------------------------------------------------------
-      # 步骤 4: 运行 phpize 生成 configure 脚本
+      # 步骤 5: 运行 phpize 生成 configure 脚本
       # phpize 是 PHP 扩展的标准构建准备工具
       # 它会根据 config.w32 生成 configure.js
       # -----------------------------------------------------------------
@@ -307,24 +338,24 @@ jobs:
         run: phpize
 
       # -----------------------------------------------------------------
-      # 步骤 5: configure 配置
+      # 步骤 6: configure 配置
       # --enable-xhcurl=shared 生成独立 .dll（不编译进 php.exe）
       # --with-prefix 指向 PHP 安装目录（由 setup-php-sdk 输出）
-      # --with-curl 链接 libcurl（由 deps 选项安装）
+      # --with-curl 指向 vcpkg 安装的 libcurl
       # configure.js 是 JScript 文件，必须用 cscript 运行
       # -----------------------------------------------------------------
       - name: configure
-        run: cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }}
+        run: cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=${{ steps.setup-php-sdk.outputs.prefix }} --with-curl=${{ env.CURL_DIR }}
 
       # -----------------------------------------------------------------
-      # 步骤 6: 编译
+      # 步骤 7: 编译
       # nmake 使用 MSVC 工具链编译扩展
       # -----------------------------------------------------------------
       - name: nmake
         run: nmake /NOLOGO
 
       # -----------------------------------------------------------------
-      # 步骤 7: 收集编译产物（.dll 文件）
+      # 步骤 8: 收集编译产物（.dll 文件）
       # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
       # -----------------------------------------------------------------
       - name: Collect build artifacts
@@ -376,7 +407,7 @@ jobs:
           Get-ChildItem -Path $distDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 8: 上传编译产物
+      # 步骤 9: 上传编译产物
       # -----------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
