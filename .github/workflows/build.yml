@@ -301,12 +301,8 @@ jobs:
           # 集成到 MSVC 构建系统
           vcpkg integrate install
 
-          # 输出 curl 安装路径供后续使用
-          $curlDir = & vcpkg prefix curl:x64-windows-static 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            # vcpkg prefix 不可用，使用默认路径
-            $curlDir = "C:\vcpkg\installed\x64-windows-static"
-          }
+          # vcpkg 静态库默认安装路径
+          $curlDir = "C:\vcpkg\installed\x64-windows-static"
           echo "CURL_DIR=$curlDir" >> $env:GITHUB_ENV
           Write-Host "libcurl 安装路径: $curlDir"
 
@@ -314,8 +310,18 @@ jobs:
           if (Test-Path "$curlDir\include\curl\curl.h") {
             Write-Host "curl.h 找到"
           } else {
-            Write-Host "::warning::curl.h 未找到，尝试搜索"
+            Write-Host "::error::curl.h 未找到"
             Get-ChildItem -Path "C:\vcpkg\installed" -Recurse -Filter "curl.h" | ForEach-Object { Write-Host "  $($_.FullName)" }
+            exit 1
+          }
+
+          if (Test-Path "$curlDir\lib\libcurl.lib") {
+            Write-Host "libcurl.lib 找到"
+          } elseif (Test-Path "$curlDir\lib\curl.lib") {
+            Write-Host "curl.lib 找到"
+          } else {
+            Write-Host "::warning::libcurl 库文件未找到，列出 lib 目录内容"
+            Get-ChildItem -Path "$curlDir\lib" -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
           }
 
       # -----------------------------------------------------------------
