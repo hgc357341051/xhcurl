@@ -477,10 +477,21 @@ jobs:
           # PHP 链接器使用全局 LDFLAGS，不使用 LDFLAGS_XHCURL
           $content = $content -replace '(LDFLAGS\s*=\s*)', "`$1/LIBPATH:`"$curlDir\lib`" "
 
-          # 注入 libcurl.lib 到全局 LIBS
-          # PHP 链接器使用全局 LIBS，不使用 LIBS_XHCURL
+          # 注入 libcurl 及其传递依赖到全局 LIBS
+          # 静态链接 libcurl 时必须显式链接所有传递依赖：
+          #   libcurl.lib  - curl 核心库
+          #   zs.lib       - zlib（vcpkg 静态 zlib 的名称）
+          #   crypt32.lib  - Windows 证书存储 API（schannel 依赖）
+          #   secur32.lib  - Windows 安全支持提供程序（SSPI 依赖）
+          #   iphlpapi.lib - Windows IP Helper API（if_nametoindex 依赖）
+          #   ncrypt.lib   - Windows 密码学 API（密钥管理依赖）
           # ws2_32.lib 已在默认 LIBS 中，无需重复添加
-          $content = $content -replace '(LIBS\s*=\s*)', "`$1libcurl.lib "
+          $content = $content -replace '(LIBS\s*=\s*)', "`$1libcurl.lib zs.lib crypt32.lib secur32.lib iphlpapi.lib ncrypt.lib "
+
+          # 添加 /NODEFAULTLIB:LIBCMT 避免 CRT 冲突
+          # vcpkg 静态库使用 /MT（静态 CRT），PHP 使用 /MD（动态 CRT）
+          # 混合使用会导致 LNK4098 警告和链接失败
+          $content = $content -replace '(LDFLAGS\s*=\s*)', "`$1/NODEFAULTLIB:LIBCMT "
 
           # 写回 Makefile
           Set-Content -Path $makefile -Value $content -NoNewline

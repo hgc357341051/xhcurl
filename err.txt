@@ -1,147 +1,44 @@
-Linux (PHP 8.2, Ubuntu 22.04)
-
-Run echo "=== 开始编译 XHCurl 扩展 ==="
-=== 开始编译 XHCurl 扩展 ===
-PHP 版本: PHP 8.2.31 (cli) (built: Jun 17 2026 02:29:11) (NTS)
-Configuring for:
-PHP Api Version:         20220829
-Zend Module Api No:      20220829
-Zend Extension Api No:   420220829
-configure.ac:162: warning: The macro `AC_PROG_LIBTOOL' is obsolete.
-configure.ac:162: You should run autoupdate.
-build/libtool.m4:99: AC_PROG_LIBTOOL is expanded from...
-configure.ac:162: the top level
-checking for grep that handles long lines and -e... /usr/bin/grep
-checking for egrep... /usr/bin/grep -E
-checking for a sed that does not truncate output... /usr/bin/sed
-checking for pkg-config... /usr/bin/pkg-config
-checking pkg-config is at least version 0.9.0... yes
-checking for cc... cc
-checking whether the C compiler works... yes
-checking for C compiler default output file name... a.out
-checking for suffix of executables... 
-checking whether we are cross compiling... no
-checking for suffix of object files... o
-checking whether the compiler supports GNU C... yes
-checking whether cc accepts -g... yes
-checking for cc option to enable C11 features... none needed
-checking how to run the C preprocessor... cc -E
-checking for icc... no
-checking for suncc... no
-checking for system library directory... lib
-checking if compiler supports -Wl,-rpath,... yes
-checking build system type... x86_64-pc-linux-gnu
-checking host system type... x86_64-pc-linux-gnu
-checking target system type... x86_64-pc-linux-gnu
-checking for PHP prefix... /usr
-checking for PHP includes... -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib
-checking for PHP extension directory... /usr/lib/php/20220829
-checking for PHP installed headers prefix... /usr/include/php/20220829
-checking if debug is enabled... no
-checking if zts is enabled... no
-checking for gawk... gawk
-checking whether to enable xhcurl support... yes, shared
-checking for pkg-config... /usr/bin/pkg-config
-checking for stdio.h... yes
-checking for stdlib.h... yes
-checking for string.h... yes
-checking for inttypes.h... yes
-checking for stdint.h... yes
-checking for strings.h... yes
-checking for sys/stat.h... yes
-checking for sys/types.h... yes
-checking for unistd.h... yes
-checking for pthread.h... yes
-checking how to print strings... printf
-checking for a sed that does not truncate output... (cached) /usr/bin/sed
-checking for fgrep... /usr/bin/grep -F
-checking for ld used by cc... /usr/bin/ld
-checking if the linker (/usr/bin/ld) is GNU ld... yes
-checking for BSD- or MS-compatible name lister (nm)... /usr/bin/nm -B
-checking the name lister (/usr/bin/nm -B) interface... BSD nm
-checking whether ln -s works... yes
-checking the maximum length of command line arguments... 3145728
-checking how to convert x86_64-pc-linux-gnu file names to x86_64-pc-linux-gnu format... func_convert_file_noop
-checking how to convert x86_64-pc-linux-gnu file names to toolchain format... func_convert_file_noop
-checking for /usr/bin/ld option to reload object files... -r
-checking for objdump... objdump
-checking how to recognize dependent libraries... pass_all
-checking for dlltool... no
-checking how to associate runtime and link libraries... printf %s\n
-checking for ar... ar
-checking for archiver @FILE support... @
-checking for strip... strip
-checking for ranlib... ranlib
-checking for gawk... (cached) gawk
-checking command to parse /usr/bin/nm -B output from cc object... ok
-checking for sysroot... no
-checking for a working dd... /usr/bin/dd
-checking how to truncate binary pipes... /usr/bin/dd bs=4096 count=1
-checking for mt... mt
-checking if mt is a manifest tool... no
-checking for dlfcn.h... yes
-checking for objdir... .libs
-checking if cc supports -fno-rtti -fno-exceptions... no
-checking for cc option to produce PIC... -fPIC -DPIC
-checking if cc PIC flag -fPIC -DPIC works... yes
-checking if cc static flag -static works... yes
-checking if cc supports -c -o file.o... yes
-checking if cc supports -c -o file.o... (cached) yes
-checking whether the cc linker (/usr/bin/ld -m elf_x86_64) supports shared libraries... yes
-checking whether -lc should be explicitly linked in... no
-checking dynamic linker characteristics... GNU/Linux ld.so
-checking how to hardcode library paths into programs... immediate
-checking whether stripping libraries is possible... yes
-checking if libtool supports shared libraries... yes
-checking whether to build shared libraries... yes
-checking whether to build static libraries... no
-configure: patching config.h.in
-configure: creating ./config.status
-config.status: creating config.h
-config.status: executing libtool commands
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c -o xhcurl.lo  -MMD -MF xhcurl.dep -MT xhcurl.lo
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c -o xhcurl_buffer.lo  -MMD -MF xhcurl_buffer.dep -MT xhcurl_buffer.lo
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c -o xhcurl_response.lo  -MMD -MF xhcurl_response.dep -MT xhcurl_response.lo
-/bin/bash /home/runner/work/xhcurl/xhcurl/libtool --tag=CC --mode=compile cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu  -DHAVE_CONFIG_H  -g -O2 -D_GNU_SOURCE   -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c -o xhcurl_request.lo  -MMD -MF xhcurl_request.dep -MT xhcurl_request.lo
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl.c -MMD -MF xhcurl.dep -MT xhcurl.lo  -fPIC -DPIC -o .libs/xhcurl.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_response.c -MMD -MF xhcurl_response.dep -MT xhcurl_response.lo  -fPIC -DPIC -o .libs/xhcurl_response.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c -MMD -MF xhcurl_buffer.dep -MT xhcurl_buffer.lo  -fPIC -DPIC -o .libs/xhcurl_buffer.o
-libtool: compile:  cc -I. -I/home/runner/work/xhcurl/xhcurl -I/home/runner/work/xhcurl/xhcurl/include -I/home/runner/work/xhcurl/xhcurl/main -I/home/runner/work/xhcurl/xhcurl -I/usr/include/php/20220829 -I/usr/include/php/20220829/main -I/usr/include/php/20220829/TSRM -I/usr/include/php/20220829/Zend -I/usr/include/php/20220829/ext -I/usr/include/php/20220829/ext/date/lib -I/usr/include/x86_64-linux-gnu -DHAVE_CONFIG_H -g -O2 -D_GNU_SOURCE -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1 -DZEND_COMPILE_DL_EXT=1 -c /home/runner/work/xhcurl/xhcurl/xhcurl_request.c -MMD -MF xhcurl_request.dep -MT xhcurl_request.lo  -fPIC -DPIC -o .libs/xhcurl_request.o
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_response.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
-   19 | #include "smart_str.h"
-      |          ^~~~~~~~~~~~~
-compilation terminated.
-make: *** [Makefile:216: xhcurl_response.lo] Error 1
-make: *** Waiting for unfinished jobs....
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_request.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
-   19 | #include "smart_str.h"
-      |          ^~~~~~~~~~~~~
-compilation terminated.
-make: *** [Makefile:219: xhcurl_request.lo] Error 1
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl_buffer.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
-   19 | #include "smart_str.h"
-      |          ^~~~~~~~~~~~~
-compilation terminated.
-In file included from /home/runner/work/xhcurl/xhcurl/xhcurl.c:8:
-/home/runner/work/xhcurl/xhcurl/xhcurl_priv.h:19:10: fatal error: smart_str.h: No such file or directory
-   19 | #include "smart_str.h"
-      |          ^~~~~~~~~~~~~
-compilation terminated.
-make: *** [Makefile:213: xhcurl_buffer.lo] Error 1
-make: *** [Makefile:210: xhcurl.lo] Error 1
+avifinfo.c
+	rc /nologo /fo D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php8ts.dll.res /d FILE_DESCRIPTION="\"PHP Script Interpreter\""  /d FILE_NAME="\"php8ts.dll\"" /d PRODUCT_NAME="\"PHP Script Interpreter\""  /ID:\a\xhcurl\xhcurl\php-src\x64\Release_TS /d MC_INCLUDE="\"D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\wsyslog.rc\""  win32\build\template.rc
+	ML64.exe /DBOOST_CONTEXT_EXPORT=EXPORT /nologo /c /Fo D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\Zend\jump_x86_64_ms_pe_masm.obj Zend\asm\jump_x86_64_ms_pe_masm.asm
+ Assembling: Zend\asm\jump_x86_64_ms_pe_masm.asm
+	ML64.exe /DBOOST_CONTEXT_EXPORT=EXPORT /nologo /c /Fo D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\Zend\make_x86_64_ms_pe_masm.obj Zend\asm\make_x86_64_ms_pe_masm.asm
+ Assembling: Zend\asm\make_x86_64_ms_pe_masm.asm
+	ML64.exe /DBOOST_CONTEXT_EXPORT=EXPORT /nologo /c /Fo D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\Zend\save_xmm_x86_64_ms_masm.obj Zend\asm\save_xmm_x86_64_ms_masm.asm
+ Assembling: Zend\asm\save_xmm_x86_64_ms_masm.asm
+   Creating library D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php8ts.lib and object D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php8ts.exp
+   Creating library D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php_xhcurl.lib and object D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php_xhcurl.exp
+LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use /NODEFAULTLIB:library
+libcurl.lib(version.c.obj) : error LNK2019: unresolved external symbol zlibVersion referenced in function curl_version
+libcurl.lib(url.c.obj) : error LNK2019: unresolved external symbol __imp_if_nametoindex referenced in function zonefrom_url
+libcurl.lib(content_encoding.c.obj) : error LNK2019: unresolved external symbol inflate referenced in function inflate_stream
+libcurl.lib(content_encoding.c.obj) : error LNK2019: unresolved external symbol inflateEnd referenced in function gzip_do_close
+libcurl.lib(content_encoding.c.obj) : error LNK2019: unresolved external symbol inflateReset2 referenced in function inflate_stream
+libcurl.lib(content_encoding.c.obj) : error LNK2019: unresolved external symbol inflateInit_ referenced in function deflate_do_init
+libcurl.lib(content_encoding.c.obj) : error LNK2019: unresolved external symbol inflateInit2_ referenced in function gzip_do_init
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CertOpenStore referenced in function get_client_cert
+libcurl.lib(schannel_verify.c.obj) : error LNK2001: unresolved external symbol __imp_CertOpenStore
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CertCloseStore referenced in function schannel_close
+libcurl.lib(schannel_verify.c.obj) : error LNK2001: unresolved external symbol __imp_CertCloseStore
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CertEnumCertificatesInStore referenced in function traverse_cert_store
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CertFindCertificateInStore referenced in function get_client_cert
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CertFreeCertificateContext referenced in function schannel_acquire_credential_handle
+libcurl.lib(schannel_verify.c.obj) : error LNK2001: unresolved external symbol __imp_CertFreeCertificateContext
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_CryptStringToBinaryW referenced in function get_client_cert
+libcurl.lib(schannel.c.obj) : error LNK2019: unresolved external symbol __imp_PFXImportCertStore referenced in function get_client_cert
+libcurl.lib(curl_sspi.c.obj) : error LNK2019: unresolved external symbol __imp_InitSecurityInterfaceW referenced in function Curl_sspi_global_init
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CryptDecodeObjectEx referenced in function Curl_verify_host
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertFreeCRLContext referenced in function add_certs_data_to_store
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertAddCertificateContextToStore referenced in function add_certs_data_to_store
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertFreeCTLContext referenced in function add_certs_data_to_store
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertFindExtension referenced in function Curl_verify_host
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertGetNameStringW referenced in function Curl_verify_host
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CryptQueryObject referenced in function add_certs_data_to_store
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertCreateCertificateChainEngine referenced in function Curl_verify_certificate
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertFreeCertificateChainEngine referenced in function Curl_verify_certificate
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertGetCertificateChain referenced in function Curl_verify_certificate
+libcurl.lib(schannel_verify.c.obj) : error LNK2019: unresolved external symbol __imp_CertFreeCertificateChain referenced in function Curl_verify_certificate
+D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php_xhcurl.dll : fatal error LNK1120: 26 unresolved externals
+NMAKE : fatal error U1077: '"link.exe" @"D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\resp\XHCURL_GLOBAL_OBJS.txt" D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php8ts.lib  libcurl.lib kernel32.lib ole32.lib user32.lib advapi32.lib shell32.lib ws2_32.lib Dnsapi.lib psapi.lib bcrypt.lib D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php_xhcurl.dll.res /out:D:\a\xhcurl\xhcurl\php-src\x64\Release_TS\php_xhcurl.dll /LIBPATH:"C:\vcpkg\installed\x64-windows-static\lib" /dll /LIBPATH:"C:\vcpkg\installed\x64-windows-static\lib" /nologo /libpath:"D:\a\xhcurl\xhcurl\php-src\no\lib" ' : return code '0x460'
+Stop.
 Error: Process completed with exit code 2.
-
-
-
-Windows (PHP 8.2, nts)
-Run $phpVersion = "8.2"
-Downloading PHP Devel Pack: https://windows.php.net/downloads/php-devel/php-devel-pack-8.2-nts-vs16-x64.zip
-Invoke-WebRequest: D:\a\_temp\5467660e-3fcf-4c6b-b6fb-ad5710bcd385.ps1:11
-Line |
-  11 |  Invoke-WebRequest -Uri $develUrl -OutFile "php-devel.zip"
-     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Response status code does not indicate success: 404 (Not Found).
-Error: Process completed with exit code 1.
