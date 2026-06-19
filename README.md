@@ -32,6 +32,8 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 | 特性 | 说明 |
 |------|------|
 | **三种执行模式** | 同步单次（`exec`）、批量异步（`XHMulti`）、多线程并发（`XHThreadPool`） |
+| **HTTP/2 支持** | 自动协议协商升级，启用多路复用（multiplexing）提升并发性能 |
+| **失败重试** | 网络错误或 HTTP 5xx 自动重试，可配置重试次数和间隔 |
 | **流式回调** | `onChunk()` / `onHeader()` 实时处理响应数据，避免一次性加载到内存 |
 | **懒加载响应** | `getBodyChunk(offset, length)` 按需分段读取响应体，防止内存溢出 |
 | **两级配置** | 全局配置（`XHCurl`）+ 请求级配置（`XHRequest`），请求级覆盖全局 |
@@ -39,6 +41,7 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 | **CLI 多线程** | `XHThreadPool` 真多线程并发，仅 CLI 模式可用，避免 FPM 线程安全问题 |
 | **内存安全** | 响应体存储在 C 侧 `malloc` 缓冲区，不计入 PHP `memory_limit`，通过 `max_response_size` 限制 |
 | **共享会话** | 基于 `curl_share` 在多个请求间共享 DNS 缓存、SSL 会话、Cookie |
+| **JSON 函数缓存** | MINIT 阶段缓存 `json_encode`/`json_decode` 函数指针，避免每次哈希查找 |
 
 ---
 
@@ -288,6 +291,58 @@ $multi->add($req2);
 $responses = $multi->execute();
 ```
 
+### 示例 7：HTTP/2 多路复用
+
+```php
+<?php
+$curl = new XHCurl();
+
+// 启用 HTTP/2（默认已启用，对支持的服务器自动升级协议）
+// HTTP/2 多路复用允许在单个 TCP 连接上并发多个请求，大幅提升性能
+$curl->setHttp2(true);
+$curl->setTimeout(10);
+
+// 批量请求同一域名，HTTP/2 多路复用将复用同一连接
+$multi = new XHMulti($curl);
+for ($i = 0; $i < 20; $i++) {
+    $multi->add(new XHRequest("https://httpbin.org/get?id=$i"));
+}
+
+$start = microtime(true);
+$responses = $multi->execute();
+$elapsed = microtime(true) - $start;
+
+echo "20 个请求耗时: " . round($elapsed, 3) . " 秒\n";
+echo "相比 HTTP/1.1 的 20 个串行连接，HTTP/2 多路复用显著降低延迟\n";
+```
+
+### 示例 8：失败自动重试
+
+```php
+<?php
+$curl = new XHCurl();
+
+// 配置重试：网络错误（连接超时、DNS 失败等）或 HTTP 5xx 自动重试
+// 参数1：重试次数（0 = 不重试）
+// 参数2：重试间隔（毫秒，默认 100ms）
+$curl->setRetry(3, 200);
+$curl->setTimeout(5);
+$curl->setConnectTimeout(3);
+
+// 对不稳定的服务器发起请求，自动重试最多 3 次
+$request = new XHRequest('https://httpbin.org/status/500');
+$response = $curl->exec($request);
+
+// 即使重试 3 次后仍为 500，也不会崩溃
+echo "最终状态码: " . $response->getStatusCode() . "\n";
+echo "错误信息: " . ($response->getError() ?? '无') . "\n";
+
+// 重试场景示例：
+// 1. 服务器临时 502/503/504 → 重试后可能恢复
+// 2. 网络抖动导致连接超时 → 重试后成功
+// 3. DNS 解析失败 → 重试后可能解析成功
+```
+
 ---
 
 ## API 文档
@@ -309,6 +364,8 @@ $responses = $multi->execute();
 | `setUserAgent(string $ua): void` | 设置默认 User-Agent |
 | `setProxy(string $proxy): void` | 设置代理（如 `http://host:port` 或 `socks5://host:port`） |
 | `setMaxResponseSize(int $bytes): void` | 设置最大响应体大小（默认 10MB，超过则截断） |
+| `setHttp2(bool $enabled): void` | 启用/禁用 HTTP/2（默认启用，支持多路复用） |
+| `setRetry(int $count, int $delayMs = 100): void` | 设置失败重试（网络错误或 5xx 自动重试） |
 | `exec(XHRequest $request): XHResponse` | 同步执行单个请求 |
 
 #### 示例
@@ -323,6 +380,14 @@ $curl->setVerifySsl(true);
 $curl->setUserAgent('MyApp/2.0');
 $curl->setProxy('http://proxy.example.com:8080');
 $curl->setMaxResponseSize(50 * 1024 * 1024); // 50MB
+
+// HTTP/2 配置（默认已启用，对支持 HTTP/2 的服务器自动升级协议）
+$curl->setHttp2(true);  // 启用 HTTP/2 多路复用（默认）
+// $curl->setHttp2(false); // 禁用 HTTP/2，强制使用 HTTP/1.1
+
+// 失败重试配置（网络错误或 HTTP 5xx 自动重试）
+$curl->setRetry(3, 200);  // 最多重试 3 次，间隔 200ms
+// $curl->setRetry(0);     // 禁用重试（默认）
 ```
 
 ---
@@ -636,6 +701,14 @@ while ($offset < $response->getBodyLength()) {
 ### 5. 缓冲区扩容策略
 
 C 侧缓冲区采用指数增长策略（每次翻倍），减少频繁 `realloc` 调用。
+
+### 6. HTTP/2 多路复用
+
+启用 HTTP/2 后，对同一主机的多个请求复用单个 TCP 连接，减少连接建立开销和内存占用。`XHMulti` 批量请求场景下性能提升尤为明显。
+
+### 7. JSON 函数指针缓存
+
+在 `MINIT` 阶段一次性查找 `json_encode`/`json_decode` 函数指针并缓存，后续调用直接使用 `zend_call_known_function`，避免每次调用都做函数表哈希查找。
 
 ---
 

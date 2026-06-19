@@ -242,13 +242,12 @@ jobs:
 
   # =====================================================================
   # Job 3: Windows 平台编译（Windows Server 2022）
-  # 暂时禁用：Windows 下 PHP 扩展编译需要完整的 PHP SDK 和源码树，
-  # 后续将通过 php-sdk-binary-tools 重新实现
+  # 使用 php-sdk-binary-tools 官方工具链编译 PHP 扩展
+  # 支持 PHP 8.0 ~ 8.3，NTS（Non-Thread-Safe，FPM 推荐）
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
     runs-on: windows-2022
-    if: false  # 暂时禁用，待修复
     strategy:
       fail-fast: false
       matrix:
@@ -264,7 +263,7 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 2: 设置 MSVC 编译环境
-      # 使用 Developer Command Prompt 初始化 Visual C++ 工具链
+      # 使用 Developer Command Prompt 初始化 Visual C++ 工具链（x64）
       # -----------------------------------------------------------------
       - name: Setup MSVC build environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -272,122 +271,197 @@ jobs:
           arch: x64
 
       # -----------------------------------------------------------------
-      # 步骤 3: 下载 PHP SDK 和二进制包
-      # 从 Windows PHP 官方源获取预编译的 PHP 开发包
+      # 步骤 3: 缓存 PHP SDK binary tools
+      # 避免每次都从 GitHub 下载（约 100MB）
       # -----------------------------------------------------------------
-      - name: Download PHP Development Pack
+      - name: Cache PHP SDK
+        uses: actions/cache@v4
+        with:
+          path: C:\php-sdk
+          key: php-sdk-binary-tools-${{ runner.os }}-v1
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 安装 PHP SDK binary tools
+      # 官方工具链，提供 buildconf、configure、nmake 等 Windows 编译脚本
+      # 仓库：https://github.com/php/php-sdk-binary-tools
+      # -----------------------------------------------------------------
+      - name: Setup PHP SDK binary tools
+        shell: pwsh
+        run: |
+          # 若缓存命中则跳过下载
+          if (Test-Path "C:\php-sdk\phpsdk-binary-tools") {
+            Write-Host "PHP SDK 已缓存，跳过下载"
+            return
+          }
+
+          New-Item -ItemType Directory -Path "C:\php-sdk" -Force | Out-Null
+          Set-Location "C:\php-sdk"
+
+          # 下载官方 PHP SDK binary tools
+          $sdkUrl = "https://github.com/php/php-sdk-binary-tools/archive/refs/heads/master.zip"
+          Write-Host "Downloading PHP SDK binary tools: $sdkUrl"
+          Invoke-WebRequest -Uri $sdkUrl -OutFile "phpsdk.zip"
+          Expand-Archive -Path "phpsdk.zip" -DestinationPath "." -Force
+          # 重命名为标准名称
+          Rename-Item -Path "php-sdk-binary-tools-master" -NewName "phpsdk-binary-tools"
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 下载 PHP 源码和 devel pack
+      # Windows 编译需要 PHP 源码树（包含 config.w32、build 脚本等）
+      # -----------------------------------------------------------------
+      - name: Download PHP source and devel pack
         shell: pwsh
         run: |
           $phpVersion = "${{ matrix.php-version }}"
           $ts = "${{ matrix.ts }}"
-          
-          # 构建下载 URL（PHP 官方 Windows 二进制包）
-          # 格式：https://windows.php.net/downloads/php-sdk/php-devel-pack-{version}-{ts}-vs16-x64.zip
-          $develUrl = "https://windows.php.net/downloads/php-devel/php-devel-pack-$phpVersion-$ts-vs16-x64.zip"
-          $phpUrl = "https://windows.php.net/downloads/releases/php-$phpVersion-$ts-Win32-vs16-x64.zip"
-          
-          Write-Host "Downloading PHP Devel Pack: $develUrl"
-          Invoke-WebRequest -Uri $develUrl -OutFile "php-devel.zip"
-          
-          Write-Host "Downloading PHP Binary: $phpUrl"
-          Invoke-WebRequest -Uri $phpUrl -OutFile "php-binary.zip"
 
-          # 解压到工作目录
-          Expand-Archive -Path "php-devel.zip" -DestinationPath "." -Force
-          Expand-Archive -Path "php-binary.zip" -DestinationPath "." -Force
+          # 确定 Visual C++ 版本标识（PHP 8.x 使用 vs16，PHP 8.3+ 使用 vs17）
+          $vc = if ($phpVersion -ge "8.3") { "vs17" } else { "vs16" }
 
-          # 查找解压后的目录
-          $develDir = Get-ChildItem -Directory -Filter "*devel*" | Select-Object -First 1
-          $phpDir = Get-ChildItem -Directory -Filter "php-*" -Exclude "*devel*" | Select-Object -First 1
-          
-          Write-Host "Devel Dir: $($develDir.FullName)"
-          Write-Host "PHP Dir: $($phpDir.FullName)"
+          # PHP 源码 URL（GitHub 官方仓库的 tag）
+          $sourceUrl = "https://github.com/php/php-src/archive/refs/tags/php-$phpVersion.zip"
+          # PHP devel pack URL（包含头文件和导入库）
+          $develUrl = "https://windows.php.net/downloads/php-sdk/php-devel-pack-$phpVersion-$ts-$vc-x64.zip"
 
-          # 将 devel 包内容复制到 PHP 目录（合并开发头文件和库文件）
-          Copy-Item -Path "$($develDir.FullName)\*" -Destination "$($phpDir.FullName)" -Recurse -Force
+          Write-Host "Downloading PHP source: $sourceUrl"
+          Invoke-WebRequest -Uri $sourceUrl -OutFile "php-src.zip"
+
+          Write-Host "Downloading PHP devel pack: $develUrl"
+          try {
+            Invoke-WebRequest -Uri $develUrl -OutFile "php-devel.zip" -ErrorAction Stop
+          } catch {
+            Write-Host "::warning::devel pack 下载失败，尝试备用 URL"
+            # 备用 URL（archive 目录）
+            $archiveUrl = "https://windows.php.net/downloads/releases/archives/php-devel-pack-$phpVersion-$ts-$vc-x64.zip"
+            Invoke-WebRequest -Uri $archiveUrl -OutFile "php-devel.zip"
+          }
+
+          # 解压 PHP 源码
+          Expand-Archive -Path "php-src.zip" -DestinationPath "C:\php-src" -Force
+          # 源码目录名形如 php-src-php-8.2.0，重命名为标准名
+          $srcDir = Get-ChildItem -Path "C:\php-src" -Directory | Select-Object -First 1
+          Rename-Item -Path $srcDir.FullName -NewName "php-src"
+          Write-Host "PHP 源码目录: C:\php-src\php-src"
+
+          # 解压 devel pack 到 PHP 源码目录（提供 phpsdk 库和头文件）
+          Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel" -Force
+          $develDir = Get-ChildItem -Path "C:\php-devel" -Directory | Select-Object -First 1
+          Write-Host "PHP devel 目录: $($develDir.FullName)"
+
+          # 将 devel pack 内容合并到 PHP 源码目录
+          Copy-Item -Path "$($develDir.FullName)\*" -Destination "C:\php-src\php-src" -Recurse -Force
 
           # 设置环境变量供后续步骤使用
-          echo "PHP_DIR=$($phpDir.FullName)" >> $env:GITHUB_ENV
+          echo "PHP_SRC_DIR=C:\php-src\php-src" >> $env:GITHUB_ENV
+          echo "PHP_VC=$vc" >> $env:GITHUB_ENV
 
       # -----------------------------------------------------------------
-      # 步骤 4: 编译扩展（使用 PHP SDK 的 buildconf/phpize 机制）
-      # Windows 下通过调用 PHP SDK 的批处理脚本来配置和编译
+      # 步骤 6: 复制扩展源码到 PHP 源码树
+      # PHP Windows 编译要求扩展位于 php-src/ext/<extname> 目录下
       # -----------------------------------------------------------------
-      - name: Build extension
+      - name: Copy extension source to PHP source tree
         shell: pwsh
         run: |
-          $phpDir = $env:PHP_DIR
-          Write-Host "PHP Directory: $phpDir"
-          Write-Host "PHP Version: $(& "$phpDir\php.exe" -v | Select-Object -First 1)"
-
-          # 复制扩展源码到 PHP 目录的 ext 子目录下
-          $extDir = Join-Path $phpDir "ext\$env:EXTENSION_NAME"
+          $extDir = Join-Path $env:PHP_SRC_DIR "ext\xhcurl"
           New-Item -ItemType Directory -Path $extDir -Force | Out-Null
+          # 复制扩展源码和构建配置文件
           Copy-Item -Path "*.c", "*.h", "config.m4", "config.w32" -Destination $extDir -Force
-
-          # 进入 PHP 根目录进行构建
-          Set-Location $phpDir
-
-          # 运行 buildconf 生成 configure 脚本
-          & ".\buildconf.bat" --force
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "buildconf failed"
-            exit 1
-          }
-
-          # 配置扩展（启用 xhcurl，禁用不需要的扩展以加快速度）
-          & ".\configure.js" "--enable-xhcurl" `
-            "--disable-all" `
-            "--enable-json" `
-            "--with-curl" `
-            "--enable-cli"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "configure failed"
-            exit 1
-          }
-
-          # 使用 nmake 编译
-          nmake
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "nmake failed"
-            exit 1
-          }
-
-          Write-Host "=== Windows 编译成功 ==="
+          Write-Host "扩展源码已复制到: $extDir"
+          Get-ChildItem -Path $extDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 5: 收集编译产物（.dll 文件）
+      # 步骤 7: 编译扩展
+      # 使用 PHP SDK 的 phpsdk-buildtree + buildconf + configure + nmake 流程
+      # -----------------------------------------------------------------
+      - name: Build extension
+        shell: cmd
+        run: |
+          REM 初始化 PHP SDK 环境（设置 MSVC、路径等）
+          call C:\php-sdk\phpsdk-binary-tools\phpsdk_setvars.bat
+
+          REM 进入 PHP 源码目录
+          cd /d "%PHP_SRC_DIR%"
+
+          REM 生成 configure 脚本（--force 覆盖已有的 configure.js）
+          call buildconf.bat --force
+          if errorlevel 1 (
+            echo ::error::buildconf 失败
+            exit /b 1
+          )
+
+          REM 配置：仅启用 xhcurl + 必需依赖（json、curl、cli）
+          REM --disable-all 加速编译，只编译需要的扩展
+          call configure.js --enable-xhcurl --disable-all --enable-json --with-curl --enable-cli --enable-cgi
+          if errorlevel 1 (
+            echo ::error::configure 失败
+            exit /b 1
+          )
+
+          REM 编译（nmake 使用 MSVC 工具链）
+          nmake
+          if errorlevel 1 (
+            echo ::error::nmake 编译失败
+            exit /b 1
+          )
+
+          echo === Windows 编译成功 ===
+
+      # -----------------------------------------------------------------
+      # 步骤 8: 收集编译产物（.dll 文件）
+      # 重命名为 xhcurl-windows-php{version}-{ts}.dll 格式
       # -----------------------------------------------------------------
       - name: Collect build artifacts
         shell: pwsh
         run: |
-          $phpDir = $env:PHP_DIR
           $distDir = "dist\windows"
           New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-          # 查找生成的 .dll 文件
-          $dllFiles = Get-ChildItem -Path $phpDir -Filter "php_xhcurl.dll" -Recurse -ErrorAction SilentlyContinue
-          
-          foreach ($dll in $dllFiles) {
-            Copy-Item -Path $dll.FullName -Destination $distDir
-            Write-Host "Found: $($dll.FullName)"
+          # 在 Release_TS 或 Release 目录下查找生成的 .dll
+          $searchDirs = @(
+            Join-Path $env:PHP_SRC_DIR "Release_TS"
+            Join-Path $env:PHP_SRC_DIR "Release"
+            Join-Path $env:PHP_SRC_DIR "x64\Release_TS"
+            Join-Path $env:PHP_SRC_DIR "x64\Release"
+          )
+
+          $dllFound = $false
+          foreach ($dir in $searchDirs) {
+            if (Test-Path $dir) {
+              $dll = Get-ChildItem -Path $dir -Filter "php_xhcurl.dll" -ErrorAction SilentlyContinue
+              if ($dll) {
+                # 重命名为包含平台和版本信息的文件名
+                $newName = "xhcurl-windows-php${{ matrix.php-version }}-${{ matrix.ts }}.dll"
+                Copy-Item -Path $dll.FullName -Destination (Join-Path $distDir $newName)
+                Write-Host "Found: $($dll.FullName) -> $newName"
+                $dllFound = $true
+
+                # 同时复制 .pdb 符号文件（用于调试）
+                $pdb = Get-ChildItem -Path $dir -Filter "php_xhcurl.pdb" -ErrorAction SilentlyContinue
+                if ($pdb) {
+                  Copy-Item -Path $pdb.FullName -Destination $distDir
+                }
+                break
+              }
+            }
           }
 
-          # 也查找 .pdb 符号文件（用于调试）
-          $pdbFiles = Get-ChildItem -Path $phpDir -Filter "xhcurl.pdb" -Recurse -ErrorAction SilentlyContinue
-          foreach ($pdb in $pdbFiles) {
-            Copy-Item -Path $pdb.FullName -Destination $distDir
+          if (-not $dllFound) {
+            echo "::error::未找到编译产物 php_xhcurl.dll"
+            echo "::error::搜索目录:"
+            $searchDirs | ForEach-Object { echo "  $_" }
+            exit 1
           }
 
-          Get-ChildItem -Path $distDir
+          Write-Host "=== dist\windows 内容 ==="
+          Get-ChildItem -Path $distDir | Format-Table Name, Length
 
       # -----------------------------------------------------------------
-      # 步骤 6: 上传编译产物
+      # 步骤 9: 上传编译产物
       # -----------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xhcurl-windows-php${{ matrix.php.version }}-${{ matrix.ts }}
+          name: xhcurl-windows-php${{ matrix.php-version }}-${{ matrix.ts }}
           path: dist/windows/*
           retention-days: 30
 
@@ -397,7 +471,7 @@ jobs:
   # =====================================================================
   release:
     name: "Create Release"
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
