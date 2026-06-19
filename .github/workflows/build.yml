@@ -347,12 +347,8 @@ jobs:
       # 步骤 6: configure 配置
       # --enable-xhcurl=shared 生成独立 .dll（不编译进 php.exe）
       # --with-prefix 指向 PHP 安装目录（由 setup-php-sdk 输出）
-      # --with-curl 指向 vcpkg 安装的 libcurl
+      # --with-xhcurl-curl 指向 vcpkg 安装的 libcurl（避免与内置 curl 选项冲突）
       # configure.js 是 JScript 文件，必须用 cscript 运行
-      #
-      # 注意：PHP configure.js 的 --with-curl 会自动在指定目录下
-      # 查找 include/curl/curl.h 和 lib/libcurl.lib
-      # vcpkg x64-windows-static 的目录结构正好匹配
       # -----------------------------------------------------------------
       - name: configure
         shell: cmd
@@ -362,12 +358,8 @@ jobs:
           dir /s /b "%CURL_DIR%\include\curl\curl.h" 2>nul
           dir /s /b "%CURL_DIR%\lib\*.lib" 2>nul
 
-          REM 调试：显示当前目录
-          echo === 当前目录 ===
-          cd
-
           REM 运行 configure
-          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-curl=%CURL_DIR%
+          cscript //nologo configure.js --enable-xhcurl=shared --with-prefix=%PHP_SDK_PREFIX% --with-xhcurl-curl=%CURL_DIR%
         env:
           PHP_SDK_PREFIX: ${{ steps.setup-php-sdk.outputs.prefix }}
 
