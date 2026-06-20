@@ -262,13 +262,15 @@ PHP_METHOD(XHRequest, setJsonBody)
     /* 调用 PHP 内置函数 json_encode 进行编码（避免直接依赖 php_json.h） */
     ZVAL_COPY(&json_args[0], data);
     ZVAL_UNDEF(&json_ret);
-    /* 构造函数名字符串 "json_encode" */
-    zend_string *func_name = zend_string_init(ZEND_STRL("json_encode"), 0);
+    /* call_user_function 要求第3个参数为 zval*，不能直接传 zend_string* */
+    zval func_name_zv;
+    ZVAL_STRING(&func_name_zv, "json_encode");
     /* 调用用户空间 json_encode 函数 */
-    int call_result = call_user_function(EG(function_table), NULL, &json_ret, 
-                                          func_name, 1, json_args);
-    /* 释放函数名字符串 */
-    zend_string_release(func_name);
+    int call_result = call_user_function(EG(function_table), NULL,
+                                          &func_name_zv, &json_ret,
+                                          1, json_args);
+    /* 释放函数名 zval */
+    zval_ptr_dtor(&func_name_zv);
     /* 释放参数 */
     zval_ptr_dtor(&json_args[0]);
 

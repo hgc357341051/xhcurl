@@ -330,12 +330,15 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
  * 处理已完成的请求：提取结果、移除 easy 句柄、释放上下文
  * @param obj      XHMulti 对象
  * @param ctx      请求上下文
- * @param callback 可选的 PHP 回调函数（NULL 表示无回调）
+ * @param fci      回调函数调用信息（fci->size == 0 表示无回调）
+ * @param fcc      回调函数调用缓存
+ * @param has_callback 是否有回调函数
  * @param response_zv 输出的 XHResponse zval（调用方需释放）
  * @return 0 成功，-1 失败
  */
 static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *ctx,
-                                      zval *callback, zval *response_zv)
+                                      zend_fcall_info *fci, zend_fcall_info_cache *fcc,
+                                      zend_bool has_callback, zval *response_zv)
 {
     /* 获取 HTTP 状态码 */
     ctx->status_code = 0;
@@ -390,7 +393,7 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
     ctx->parsed_headers = NULL;
 
     /* 如果有回调函数，立即调用 */
-    if (callback != NULL && !Z_ISUNDEF_P(callback)) {
+    if (has_callback) {
         /* 调用 PHP 回调：callback(XHResponse $response, int $completed, int $total) */
         zval args[3];
         ZVAL_COPY(&args[0], response_zv);                      /* 响应对象 */
@@ -398,8 +401,13 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
         ZVAL_LONG(&args[2], obj->pending_count);               /* 总请求数 */
 
         zval retval;
-        int call_result = call_user_function(CG(function_table), NULL,
-                                              callback, &retval, 3, args);
+        /* 设置 fci 参数 */
+        fci->retval = &retval;          /* 返回值指针 */
+        fci->params = args;             /* 参数数组 */
+        fci->param_count = 3;           /* 参数数量 */
+
+        /* 使用 zend_call_function 调用回调（比 call_user_function 更高效） */
+        int call_result = zend_call_function(fci, fcc);
 
         /* 释放参数和返回值 */
         zval_ptr_dtor(&args[0]);
@@ -552,13 +560,25 @@ PHP_METHOD(XHMulti, add)
  */
 PHP_METHOD(XHMulti, execute)
 {
-    zval *callback = NULL;  /* 可选回调函数 */
+    /* 回调函数调用信息（PHP 8.4+ 要求 Z_PARAM_FUNC_OR_NULL 传 fci + fcc 两个参数） */
+    zend_fcall_info callback_fci;           /* 函数调用信息（含参数计数、返回值等） */
+    zend_fcall_info_cache callback_fcc;     /* 函数调用缓存（加速后续调用） */
+    /* 标记回调是否已设置（fci.size > 0 表示有效） */
+    zend_bool has_callback = 0;
+
+    /* 初始化 fci（清零，避免野指针） */
+    memset(&callback_fci, 0, sizeof(callback_fci));
+    memset(&callback_fcc, 0, sizeof(callback_fcc));
 
     /* 解析参数：可选的回调函数 */
+    /* Z_PARAM_FUNC_OR_NULL 在 PHP 8.4+ 需要 fci 和 fcc 两个参数 */
     ZEND_PARSE_PARAMETERS_START(0, 1)
         Z_PARAM_OPTIONAL
-        Z_PARAM_FUNC_OR_NULL(callback)
+        Z_PARAM_FUNC_OR_NULL(callback_fci, callback_fcc)
     ZEND_PARSE_PARAMETERS_END();
+
+    /* 检查回调是否有效（fci.size > 0 表示用户传入了回调函数） */
+    has_callback = (callback_fci.size > 0);
 
     /* 获取 XHMulti 对象 */
     xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
@@ -631,10 +651,11 @@ PHP_METHOD(XHMulti, execute)
             /* 处理已完成的请求：提取结果 */
             zval response_zv;
             ZVAL_UNDEF(&response_zv);
-            int process_result = xhmulti_process_completed(obj, ctx, callback, &response_zv);
+            int process_result = xhmulti_process_completed(obj, ctx,
+                &callback_fci, &callback_fcc, has_callback, &response_zv);
 
             if (process_result == 0 && !Z_ISUNDEF(response_zv)) {
-                if (callback != NULL && !Z_ISUNDEF_P(callback)) {
+                if (has_callback) {
                     /* 有回调：回调已在 process_completed 中调用，释放响应对象 */
                     zval_ptr_dtor(&response_zv);
                 } else {
@@ -696,7 +717,7 @@ PHP_METHOD(XHMulti, execute)
     xhcurl_easy_map_init(&obj->easy_map);
 
     /* --- 阶段 4：构建返回值 --- */
-    if (callback != NULL && !Z_ISUNDEF_P(callback)) {
+    if (has_callback) {
         /* 有回调模式：返回已完成数和总数 ['completed' => N, 'total' => M] */
         array_init(return_value);
         add_assoc_long(return_value, "completed", obj->result_count);

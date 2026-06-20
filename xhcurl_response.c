@@ -346,10 +346,13 @@ PHP_METHOD(XHResponse, toJsonArray)
         call_result = (EG(exception) == NULL) ? SUCCESS : FAILURE;
     } else {
         /* 回退方案：通过函数名查找调用 */
-        zend_string *func_name = zend_string_init(ZEND_STRL("json_decode"), 0);
-        call_result = call_user_function(EG(function_table), NULL, &json_ret,
-                                          func_name, 4, json_args);
-        zend_string_release(func_name);
+        /* call_user_function 要求第3个参数为 zval*，不能直接传 zend_string* */
+        zval func_name_zv;
+        ZVAL_STRING(&func_name_zv, "json_decode");
+        call_result = call_user_function(EG(function_table), NULL,
+                                          &func_name_zv, &json_ret,
+                                          4, json_args);
+        zval_ptr_dtor(&func_name_zv);
     }
     /* 释放参数 */
     zval_ptr_dtor(&json_args[0]);
