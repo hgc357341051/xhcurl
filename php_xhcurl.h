@@ -16,6 +16,32 @@
 #include "ext/standard/info.h"
 
 /* +----------------------------------------------------------------------+
+ * | Windows 平台链接库声明                                                |
+ * | 使用 #pragma comment(lib,...) 替代 Makefile 全局 LIBS 修改            |
+ * | 原因：修改全局 LIBS 会导致 php8.dll 链接时也尝试链接这些库，         |
+ * |       但 vcpkg 库目录不在 php8.dll 的搜索路径中，导致 LNK1181 错误    |
+ * | #pragma comment(lib,...) 只影响包含此头文件的编译单元，               |
+ * |       即只有 xhcurl 扩展的 DLL 会链接这些库                           |
+ * +----------------------------------------------------------------------+
+ */
+#ifdef PHP_WIN32
+/* libcurl 核心库（vcpkg 静态链接，使用 schannel/SSPI TLS 后端） */
+#pragma comment(lib, "libcurl.lib")
+/* zlib 压缩库（vcpkg 静态链接，CI 中确保存在 zlib.lib） */
+#pragma comment(lib, "zlib.lib")
+/* Windows 证书存储 API（schannel TLS 依赖） */
+#pragma comment(lib, "crypt32.lib")
+/* Windows 安全支持提供程序接口（SSPI/Schannel 依赖） */
+#pragma comment(lib, "secur32.lib")
+/* Windows IP Helper API（curl 的 if_nametoindex 函数依赖） */
+#pragma comment(lib, "iphlpapi.lib")
+/* Windows 密码学下一代 API（密钥管理依赖） */
+#pragma comment(lib, "ncrypt.lib")
+/* Windows Sockets 2 API（网络通信基础依赖） */
+#pragma comment(lib, "ws2_32.lib")
+#endif /* PHP_WIN32 */
+
+/* +----------------------------------------------------------------------+
  * | 模块版本和名称定义                                                    |
  * +----------------------------------------------------------------------+
  */

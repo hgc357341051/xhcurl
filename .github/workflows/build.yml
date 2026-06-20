@@ -595,6 +595,38 @@ jobs:
             exit 1
           }
 
+          # -----------------------------------------------------------------
+          # 确保 zlib.lib 存在（处理 vcpkg triplet 命名差异）
+          # x64-windows-static-md 下 zlib 命名为 zlibmd.lib
+          # x64-windows-static 下 zlib 命名为 zlib.lib
+          # 我们的 C 代码使用 #pragma comment(lib, "zlib.lib")
+          # 所以需要确保文件名为 zlib.lib
+          # -----------------------------------------------------------------
+          $libDir = "$curlDir\lib"
+          if (Test-Path "$libDir\zlibmd.lib") {
+            Write-Host "检测到 zlibmd.lib，复制为 zlib.lib（兼容 #pragma comment 声明）"
+            Copy-Item "$libDir\zlibmd.lib" "$libDir\zlib.lib" -Force
+          }
+          if (Test-Path "$libDir\zlib.lib") {
+            Write-Host "zlib.lib 已就绪"
+          } else {
+            Write-Host "::error::zlib.lib 和 zlibmd.lib 均不存在"
+            Write-Host "lib 目录内容:"
+            if (Test-Path $libDir) {
+              Get-ChildItem -Path $libDir -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
+            }
+            exit 1
+          }
+
+          # 验证 libcurl.lib 存在
+          if (-not (Test-Path "$libDir\libcurl.lib")) {
+            Write-Host "::error::libcurl.lib 不存在"
+            Write-Host "lib 目录内容:"
+            Get-ChildItem -Path $libDir -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
+            exit 1
+          }
+          Write-Host "libcurl.lib 已就绪"
+
           # 读取 Makefile 内容
           $content = Get-Content -Path $makefile -Raw
 
@@ -606,79 +638,22 @@ jobs:
           $content = $content -replace '(CFLAGS_XHCURL\s*=\s*)', "`$1/I `"$curlDir\include`" "
 
           # 注入 curl 库搜索路径到全局 LDFLAGS
-          # PHP 链接器使用全局 LDFLAGS，不使用 LDFLAGS_XHCURL
+          # /LIBPATH 告诉链接器在指定目录搜索 .lib 文件
+          # 这不会影响 php8.dll 的链接，因为 php8.dll 不引用我们的库
           $content = $content -replace '(LDFLAGS\s*=\s*)', "`$1/LIBPATH:`"$curlDir\lib`" "
 
           # -----------------------------------------------------------------
-          # 动态检测 vcpkg 安装的库文件名
-          # 不同 triplet 下库名可能不同：
-          #   x64-windows-static:    zlib.lib
-          #   x64-windows-static-md: zlibmd.lib（/MD CRT 命名约定）
+          # 重要：不再修改全局 LIBS！
+          #
+          # 之前的问题：将 libcurl.lib zlib.lib 等添加到全局 LIBS 后，
+          # php8.dll 链接时也会尝试链接这些库，但 vcpkg 目录不在
+          # php8.dll 的搜索路径中，导致 LNK1181: cannot open input file 'zlib.lib'
+          #
+          # 现在的方案：使用 #pragma comment(lib, ...) 在 C 代码中声明依赖
+          # #pragma comment(lib,...) 只影响包含该头文件的编译单元
+          # 即只有 xhcurl 扩展的 DLL 会链接这些库，php8.dll 不受影响
+          # 详见 php_xhcurl.h 中的 Windows 平台链接库声明
           # -----------------------------------------------------------------
-          Write-Host "=== 检测 vcpkg 库文件 ==="
-          $libDir = "$curlDir\lib"
-          $libFiles = @()
-          if (Test-Path $libDir) {
-            $libFiles = Get-ChildItem -Path $libDir -Filter "*.lib" | ForEach-Object { $_.Name }
-            Write-Host "找到的 .lib 文件:"
-            $libFiles | ForEach-Object { Write-Host "  $_" }
-          } else {
-            Write-Host "::error::lib 目录不存在: $libDir"
-            exit 1
-          }
-
-          # 检测 zlib 库名（zlib.lib 或 zlibmd.lib）
-          $zlibLib = ""
-          if ($libFiles -contains "zlibmd.lib") {
-            $zlibLib = "zlibmd.lib"
-            Write-Host "检测到 zlib 库: $zlibLib (x64-windows-static-md 命名)"
-          } elseif ($libFiles -contains "zlib.lib") {
-            $zlibLib = "zlib.lib"
-            Write-Host "检测到 zlib 库: $zlibLib (x64-windows-static 命名)"
-          } else {
-            # 尝试模糊匹配
-            $zlibMatch = $libFiles | Where-Object { $_ -match "^zlib" } | Select-Object -First 1
-            if ($zlibMatch) {
-              $zlibLib = $zlibMatch
-              Write-Host "模糊匹配 zlib 库: $zlibLib"
-            } else {
-              Write-Host "::warning::未找到 zlib 库文件，尝试使用 zlib.lib"
-              $zlibLib = "zlib.lib"
-            }
-          }
-
-          # 检测 libcurl 库名（libcurl.lib 或 libcurl_a.lib）
-          $curlLib = ""
-          if ($libFiles -contains "libcurl.lib") {
-            $curlLib = "libcurl.lib"
-          } elseif ($libFiles -contains "libcurl_a.lib") {
-            $curlLib = "libcurl_a.lib"
-          } else {
-            # 尝试模糊匹配
-            $curlMatch = $libFiles | Where-Object { $_ -match "curl" } | Select-Object -First 1
-            if ($curlMatch) {
-              $curlLib = $curlMatch
-            } else {
-              Write-Host "::error::未找到 libcurl 库文件"
-              exit 1
-            }
-          }
-          Write-Host "检测到 libcurl 库: $curlLib"
-
-          # 注入 libcurl 及其传递依赖到全局 LIBS
-          # 静态链接 libcurl 时必须显式链接所有传递依赖
-          #
-          # schannel/SSPI 模式（Windows 原生 TLS，零外部 DLL 依赖）：
-          #   $curlLib    - curl 核心库（使用 schannel/SSPI TLS 后端）
-          #   $zlibLib    - zlib 压缩库（库名因 triplet 而异）
-          #   crypt32.lib - Windows 证书存储 API（schannel 依赖）
-          #   secur32.lib - Windows 安全支持提供程序（SSPI 依赖）
-          #   iphlpapi.lib - Windows IP Helper API（if_nametoindex 依赖）
-          #   ncrypt.lib  - Windows 密码学 API（密钥管理依赖）
-          #   ws2_32.lib  - Windows Sockets API
-          #
-          # 注意：schannel 模式下不需要 OpenSSL 相关库
-          $content = $content -replace '(LIBS\s*=\s*)', "`$1$curlLib $zlibLib crypt32.lib secur32.lib iphlpapi.lib ncrypt.lib ws2_32.lib "
 
           # CRT 冲突处理：
           # 如果使用 x64-windows-static（/MT 静态 CRT），必须加 /NODEFAULTLIB:LIBCMT
