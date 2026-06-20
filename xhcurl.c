@@ -460,7 +460,22 @@ PHP_METHOD(XHCurl, setRetry)
 
     /* 设置重试参数 */
     obj->retry_count = count;
-    obj->retry_delay_ms = (delay_ms > 0) ? delay_ms : 100;
+    /* +--------------------------------------------------------------+
+     * | 如果用户未提供 delay_ms 参数（ZEND_PARSE_PARAMETERS 未设置   |
+     * | 可选参数），则使用默认值 100ms。                              |
+     * | 如果用户显式提供了 delay_ms（包括 0），则使用用户提供的值。   |
+     * | 注意：ZEND_PARSE_PARAMETERS_START(1, 2) 中第2个参数是可选的， |
+     * | 无法区分"未提供"和"提供了0"。但 0ms 间隔是合理的（如快速    |
+     * | 重试），所以仅在未提供可选参数时使用默认值。                  |
+     * +--------------------------------------------------------------+
+     */
+    if (ZEND_NUM_ARGS() < 2) {
+        /* 用户未提供 delay_ms 参数，使用默认值 */
+        obj->retry_delay_ms = 100;
+    } else {
+        /* 用户显式提供了 delay_ms，使用用户提供的值（包括 0） */
+        obj->retry_delay_ms = delay_ms;
+    }
 
     /* 返回 $this 支持链式调用 */
     RETURN_ZVAL(getThis(), 1, 0);
@@ -904,6 +919,22 @@ PHP_FUNCTION(xhcurl_version)
     RETURN_STRING(PHP_XHCURL_VERSION);
 }
 
+/* xhcurl_version 函数参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_version, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* +--------------------------------------------------------------+
+ * | 全局函数注册表                                                |
+ * | xhcurl_version() 全局函数需要在此注册才能被 PHP 调用          |
+ * +--------------------------------------------------------------+
+ */
+static const zend_function_entry xhcurl_functions[] = {
+    /* 获取扩展版本号 */
+    PHP_FE(xhcurl_version, arginfo_xhcurl_version)
+    /* 结束标记 */
+    PHP_FE_END
+};
+
 /* +----------------------------------------------------------------------+
  * | 模块入口结构体                                                        |
  * | PHP 通过此结构体识别和加载扩展                                        |
@@ -912,7 +943,7 @@ PHP_FUNCTION(xhcurl_version)
 zend_module_entry xhcurl_module_entry = {
     STANDARD_MODULE_HEADER,             /* 标准模块头 */
     PHP_XHCURL_EXTNAME,                 /* 扩展名称 */
-    NULL,                               /* 函数列表（使用类方法，无需全局函数） */
+    xhcurl_functions,                   /* 全局函数列表 */
     PHP_MINIT(xhcurl),                  /* 模块初始化 */
     PHP_MSHUTDOWN(xhcurl),             /* 模块关闭 */
     PHP_RINIT(xhcurl),                  /* 请求初始化 */
