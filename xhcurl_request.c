@@ -345,6 +345,19 @@ PHP_METHOD(XHRequest, setTimeout)
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
+    /* +--------------------------------------------------------------+
+     * | 验证超时值：负数会导致 curl 行为不确定                        |
+     * | 负数超时在 curl 中可能被解释为无限等待或立即超时，            |
+     * | 与用户预期不符。0 表示无限等待（curl 文档），                |
+     * | 但通常用户期望 0 表示"使用默认值"，由 xhcurl_context_create  |
+     * | 中的 (timeout > 0) 判断实现。                                |
+     * +--------------------------------------------------------------+
+     */
+    if (seconds < 0) {
+        zend_throw_exception(xhcurl_exception_ce, "Timeout must be non-negative", 0);
+        return;
+    }
+
     /* 设置超时时间 */
     obj->timeout = (long)seconds;
 
@@ -367,6 +380,12 @@ PHP_METHOD(XHRequest, setConnectTimeout)
 
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 验证连接超时值：负数会导致 curl 行为不确定 */
+    if (seconds < 0) {
+        zend_throw_exception(xhcurl_exception_ce, "Connect timeout must be non-negative", 0);
+        return;
+    }
 
     /* 设置连接超时 */
     obj->connect_timeout = (long)seconds;
@@ -393,6 +412,12 @@ PHP_METHOD(XHRequest, setFollowRedirects)
 
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 验证最大重定向次数：负数传给 CURLOPT_MAXREDIRS 会禁用限制 */
+    if (max_redirects < 0) {
+        zend_throw_exception(xhcurl_exception_ce, "Max redirects must be non-negative", 0);
+        return;
+    }
 
     /* 设置重定向跟随 */
     obj->follow_redirects = follow;

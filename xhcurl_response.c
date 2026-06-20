@@ -344,26 +344,25 @@ PHP_METHOD(XHResponse, toJsonArray)
         RETURN_NULL();
     }
 
-    /* 将响应体数据作为 PHP 字符串（需要添加 null 终止符） */
-    char *json_str = (char *)ecalloc(1, obj->body->size + 1);
-    memcpy(json_str, obj->body->data, obj->body->size);
-    json_str[obj->body->size] = '\0';
-
-    /* 调用 PHP 内置函数 json_decode 进行解析（避免直接依赖 php_json.h） */
+    /* +--------------------------------------------------------------+
+     * | 优化：直接使用 ZVAL_STRINGL 从 body 缓冲区创建字符串         |
+     * | 原实现先用 ecalloc+memcpy 复制到 json_str，再用 ZVAL_STRING  |
+     * | 再次复制到 zval，导致双重拷贝（对大响应体浪费内存和时间）。   |
+     * | 新实现：ZVAL_STRINGL 直接从 body->data 创建指定长度的字符串， |
+     * | 只需一次内存分配和拷贝。ZVAL_STRINGL 会自动添加 null 终止符。 |
+     * +--------------------------------------------------------------+
+     */
     zval json_ret;       /* json_decode 返回值 */
     zval json_args[4];   /* json_decode 参数：json, assoc, depth, flags */
     ZVAL_UNDEF(&json_ret);
-    /* 参数1：JSON 字符串 */
-    ZVAL_STRING(&json_args[0], json_str);
+    /* 参数1：JSON 字符串（直接从 body 缓冲区创建，避免双重拷贝） */
+    ZVAL_STRINGL(&json_args[0], obj->body->data, obj->body->size);
     /* 参数2：assoc=true，返回数组而非对象 */
     ZVAL_TRUE(&json_args[1]);
     /* 参数3：递归深度，使用默认值 512 */
     ZVAL_LONG(&json_args[2], 512);
     /* 参数4：flags=0 */
     ZVAL_LONG(&json_args[3], 0);
-
-    /* 释放临时 JSON 字符串 */
-    efree(json_str);
 
     /* 调用 json_decode 函数（优先使用 MINIT 阶段缓存的函数指针） */
     int call_result = FAILURE;

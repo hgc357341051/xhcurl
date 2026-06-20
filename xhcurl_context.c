@@ -26,6 +26,16 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
         return NULL;
     }
 
+    /* +--------------------------------------------------------------+
+     * | URL 和 Method 是必需字段，缺失时无法创建有效请求             |
+     * | URL 为 NULL 时 curl_easy_perform 会返回 CURLE_URL_MALFORMAT |
+     * | Method 为 NULL 时 strcmp 会导致段错误                        |
+     * +--------------------------------------------------------------+
+     */
+    if (req_obj->url == NULL || req_obj->method == NULL) {
+        return NULL;
+    }
+
     /* 分配上下文内存，使用 ecalloc 确保初始化为零 */
     xhcurl_req_context_t *ctx = (xhcurl_req_context_t *)ecalloc(1, sizeof(xhcurl_req_context_t));
     if (ctx == NULL) {
@@ -78,8 +88,15 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     /* 使用 CURLOPT_COPYPOSTFIELDS 让 curl 复制数据，避免 XHRequest 修改 body 后指针悬空 */
     if (req_obj->body != NULL && req_obj->body_len > 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_COPYPOSTFIELDS, req_obj->body);
-        /* COPYPOSTFIELDS 使用 strlen 确定长度，对于含 null 字节的数据需显式设置大小 */
-        curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE, (long)req_obj->body_len);
+        /* +--------------------------------------------------------------+
+         * | 使用 CURLOPT_POSTFIELDSIZE_LARGE 替代 CURLOPT_POSTFIELDSIZE |
+         * | CURLOPT_POSTFIELDSIZE 接受 long 类型（32位平台为 2GB 限制），|
+         * | 大文件上传时 body_len 可能超过 LONG_MAX 导致截断。           |
+         * | CURLOPT_POSTFIELDSIZE_LARGE 接受 curl_off_t（64位），       |
+         * | 支持超大请求体。                                             |
+         * +--------------------------------------------------------------+
+         */
+        curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
     }
 
     /* 设置超时时间（请求级优先，否则使用全局默认值） */
@@ -201,7 +218,11 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
             size_t name_len = strlen(gc->name);
             size_t value_len = strlen(gc->value);
             /* 计算总长度：域名 + \t + FALSE + \t + 路径 + \t + FALSE + \t + 0 + \t + 名称 + \t + 值 + \0 */
-            size_t line_len = domain_len + 1 + 5 + 1 + path_len + 1 + 5 + 1 + 1 + 1 + name_len + 1 + value_len + 1;
+            /* 注意：domain_len 为 0 时使用 "localhost"（9字节），需预留足够空间 */
+            /* 注意：path_len 为 0 时使用 "/"（1字节），已在计算中覆盖 */
+            size_t domain_alloc = (domain_len > 0) ? domain_len : 9; /* "localhost" = 9 */
+            size_t path_alloc = (path_len > 0) ? path_len : 1;      /* "/" = 1 */
+            size_t line_len = domain_alloc + 1 + 5 + 1 + path_alloc + 1 + 5 + 1 + 1 + 1 + name_len + 1 + value_len + 1;
             char *cookie_line = (char *)emalloc(line_len);
             snprintf(cookie_line, line_len, "%s\tFALSE\t%s\tFALSE\t0\t%s\t%s",
                      (domain_len > 0) ? gc->domain : "localhost",
@@ -243,6 +264,17 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
         }
     }
 
+    /* +--------------------------------------------------------------+
+     * | 禁用信号处理（线程安全）                                      |
+     * | CURLOPT_NOSIGNAL = 1 告诉 curl 不使用信号处理超时，          |
+     * | 改用 select/poll 等机制。多线程环境下信号会发送到进程的       |
+     * | 任意线程，导致不可预测行为（如请求超时失效、崩溃等）。        |
+     * | 即使在单线程的 curl_multi 场景中也应启用，因为 curl_multi     |
+     * | 使用的是基于 select 的事件循环，不依赖信号。                  |
+     * +--------------------------------------------------------------+
+     */
+    curl_easy_setopt(ctx->easy, CURLOPT_NOSIGNAL, 1L);
+
     /* 设置写数据回调（响应体） */
     curl_easy_setopt(ctx->easy, CURLOPT_WRITEFUNCTION, xhcurl_write_callback);
     curl_easy_setopt(ctx->easy, CURLOPT_WRITEDATA, ctx);
@@ -267,6 +299,7 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     /* 初始化其他字段 */
     ctx->parsed_headers = NULL;
     ctx->status_code = 0;
+    ctx->curl_code = CURLE_OK;   /* 初始化为成功，工作线程或 execute 中更新 */
     ctx->content_type = NULL;
 
     return ctx;
@@ -355,6 +388,17 @@ size_t xhcurl_write_callback(void *contents, size_t size, size_t nmemb, void *us
 {
     /* 获取请求上下文 */
     xhcurl_req_context_t *ctx = (xhcurl_req_context_t *)userp;
+
+    /* +--------------------------------------------------------------+
+     * | 整数溢出检查：size * nmemb 可能超过 SIZE_MAX                  |
+     * | 虽然 curl 文档保证 size 总是 1，但作为防御性编程，            |
+     * | 仍然检查乘法溢出，防止极端情况下的内存越界。                  |
+     * +--------------------------------------------------------------+
+     */
+    if (size != 0 && nmemb > SIZE_MAX / size) {
+        /* 乘法溢出，中止传输 */
+        return 0;
+    }
     /* 计算总数据大小 */
     size_t total_size = size * nmemb;
 
@@ -403,11 +447,28 @@ size_t xhcurl_header_callback(void *contents, size_t size, size_t nmemb, void *u
 {
     /* 获取请求上下文 */
     xhcurl_req_context_t *ctx = (xhcurl_req_context_t *)userp;
+
+    /* 整数溢出检查：size * nmemb 可能超过 SIZE_MAX */
+    if (size != 0 && nmemb > SIZE_MAX / size) {
+        /* 乘法溢出，中止传输 */
+        return 0;
+    }
     /* 计算总数据大小 */
     size_t total_size = size * nmemb;
 
     /* 将头部原始数据写入缓冲区（后续统一解析） */
-    xhcurl_buffer_write(&ctx->header_buf, (const char *)contents, total_size);
+    /* +--------------------------------------------------------------+
+     * | 检查 header_buf 写入结果                                     |
+     * | 修复：原实现不检查返回值，当 header_buf 超过最大限制时，      |
+     * | 头部数据被部分丢弃但回调仍返回 total_size，                  |
+     * | 导致 curl 继续传输，后续解析头部时得到不完整的结果。          |
+     * | 新实现：写入失败时返回 0 中止传输，与 write_callback 行为一致。|
+     * +--------------------------------------------------------------+
+     */
+    if (xhcurl_buffer_write(&ctx->header_buf, (const char *)contents, total_size) != 0) {
+        /* 缓冲区写入失败（超过最大限制），中止传输 */
+        return 0;
+    }
 
     /* 如果注册了头部回调，则调用 PHP 回调函数 */
     if (!Z_ISUNDEF(ctx->header_callback)) {

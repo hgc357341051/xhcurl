@@ -53,11 +53,16 @@ static void xhcurl_free_obj(zend_object *object)
         obj->share = NULL;
     }
 
-    /* 释放全局头部列表（curl_slist 格式） */
-    if (obj->global_headers != NULL) {
-        curl_slist_free_all(obj->global_headers);
-        obj->global_headers = NULL;
-    }
+    /* +--------------------------------------------------------------+
+     * | 优化：移除冗余的 global_headers curl_slist                   |
+     * | 原实现同时维护 global_headers（curl_slist）和                |
+     * | global_headers_raw（键值对链表）两个数据结构，               |
+     * | 但 xhcurl_context_create 只使用 global_headers_raw，         |
+     * | global_headers slist 从未被读取，完全是冗余的。              |
+     * | 移除后：setGlobalHeader 只需更新 raw 列表，无需重建 slist，  |
+     * | 设置 N 个头部从 O(n²) 降为 O(N)。                           |
+     * +--------------------------------------------------------------+
+     */
 
     /* 释放全局头部链表（原始键值对格式） */
     if (obj->global_headers_raw != NULL) {
@@ -110,7 +115,6 @@ static zend_object *xhcurl_create_obj(zend_class_entry *class_type)
     curl_share_setopt(obj->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
 
     /* 初始化全局配置为默认值 */
-    obj->global_headers = NULL;                         /* 无全局头部 */
     obj->global_headers_raw = NULL;                     /* 无全局头部（原始格式） */
     obj->global_cookies = NULL;                         /* 无全局 Cookie */
     obj->timeout = XHCURL_DEFAULT_TIMEOUT;              /* 默认超时 30 秒 */
@@ -171,45 +175,15 @@ PHP_METHOD(XHCurl, setGlobalHeader)
     /* 设置到原始头部链表（同名头部替换旧值，避免重复） */
     xhcurl_header_set(&obj->global_headers_raw, name, value);
 
-    /* 从 curl_slist 中移除同名头部（避免重复发送） */
-    /* curl_slist 不支持直接删除，需要重建 */
-    struct curl_slist *new_slist = NULL;   /* 新的 slist */
-    struct curl_slist *current = obj->global_headers;  /* 遍历旧 slist */
-    /* 构建查找键：小写化的头部名称 + 冒号 */
-    char *lower_name = estrdup(name);
-    xhcurl_str_tolower(lower_name, strlen(lower_name));
-    size_t lower_name_len = strlen(lower_name);
-
-    while (current != NULL) {
-        /* 检查当前 slist 节点是否是同名头部 */
-        /* slist 格式为 "Name: Value"，比较冒号前的部分 */
-        const char *colon = strchr(current->data, ':');
-        if (colon != NULL) {
-            size_t node_name_len = (size_t)(colon - current->data);
-            /* 跳过名称长度不匹配的 */
-            if (node_name_len == lower_name_len &&
-                strncasecmp(current->data, lower_name, lower_name_len) == 0) {
-                /* 同名头部，跳过不添加到新 slist */
-                current = current->next;
-                continue;
-            }
-        }
-        /* 非同名头部，添加到新 slist */
-        new_slist = curl_slist_append(new_slist, current->data);
-        current = current->next;
-    }
-    efree(lower_name);
-
-    /* 释放旧 slist */
-    curl_slist_free_all(obj->global_headers);
-    /* 添加新的头部值（动态分配，避免固定缓冲区截断超长头部） */
-    size_t header_line_len = name_len + 2 + value_len + 1; /* name + ": " + value + '\0' */
-    char *header_line = (char *)emalloc(header_line_len);
-    snprintf(header_line, header_line_len, "%s: %s", name, value);
-    new_slist = curl_slist_append(new_slist, header_line);
-    efree(header_line);
-    /* 更新 slist 指针 */
-    obj->global_headers = new_slist;
+    /* +--------------------------------------------------------------+
+     * | 优化：移除冗余的 curl_slist 重建                              |
+     * | 原实现每次 setGlobalHeader 都重建整个 curl_slist，            |
+     * | 但 xhcurl_context_create 只使用 global_headers_raw，         |
+     * | global_headers slist 从未被读取，完全是冗余的。              |
+     * | 新实现：只更新 raw 列表即可，无需维护 slist。                 |
+     * | 设置 N 个头部从 O(n²) 降为 O(N)。                           |
+     * +--------------------------------------------------------------+
+     */
 
     /* 返回 $this 支持链式调用 */
     RETURN_ZVAL(getThis(), 1, 0);
@@ -272,6 +246,12 @@ PHP_METHOD(XHCurl, setTimeout)
     /* 获取当前对象 */
     xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
+    /* 验证超时值：负数会导致 curl 行为不确定 */
+    if (seconds < 0) {
+        zend_argument_value_error(1, "must be non-negative");
+        RETURN_THROWS();
+    }
+
     /* 设置超时时间 */
     obj->timeout = (long)seconds;
 
@@ -294,6 +274,12 @@ PHP_METHOD(XHCurl, setConnectTimeout)
 
     /* 获取当前对象 */
     xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 验证连接超时值：负数会导致 curl 行为不确定 */
+    if (seconds < 0) {
+        zend_argument_value_error(1, "must be non-negative");
+        RETURN_THROWS();
+    }
 
     /* 设置连接超时 */
     obj->connect_timeout = (long)seconds;
@@ -402,6 +388,12 @@ PHP_METHOD(XHCurl, setMaxResponseSize)
 
     /* 获取当前对象 */
     xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 验证最大响应大小：负数转为 size_t 会变成极大值，导致内存保护失效 */
+    if (bytes < 0) {
+        zend_argument_value_error(1, "must be non-negative");
+        RETURN_THROWS();
+    }
 
     /* 设置最大响应体大小 */
     obj->max_response_size = (size_t)bytes;
@@ -594,6 +586,23 @@ PHP_METHOD(XHCurl, exec)
 
     /* 创建 XHResponse PHP 对象 */
     object_init_ex(return_value, xhresponse_ce);
+    /* +--------------------------------------------------------------+
+     * | 检查 object_init_ex 是否成功                                |
+     * | object_init_ex 可能因内存不足等原因失败，此时 return_value  |
+     * | 不是 IS_OBJECT 类型，Z_OBJ_P 会返回无效指针导致崩溃。      |
+     * | 失败时直接返回（PHP 引擎会处理异常传播）。                   |
+     * +--------------------------------------------------------------+
+     */
+    if (Z_TYPE_P(return_value) != IS_OBJECT) {
+        /* +----------------------------------------------------------+
+         * | object_init_ex 失败时需要释放上下文资源                   |
+         * | 此时 body_buf.data 尚未被转移（转移逻辑在后面），         |
+         * | xhcurl_context_free 会正确释放所有资源。                 |
+         * +----------------------------------------------------------+
+         */
+        xhcurl_context_free(ctx);
+        return;
+    }
     xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(return_value));
 
     /* 填充响应数据 */

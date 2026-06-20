@@ -43,9 +43,14 @@ static void *xhcurl_worker_thread(void *arg)
     /* 创建当前线程的 curl multi 句柄 */
     CURLM *multi = curl_multi_init();
     if (multi == NULL) {
-        /* 创建失败，设置错误码 */
-        worker->error = -1;
-        worker->done = 1;
+        /* 创建失败，设置错误码（使用原子操作确保主线程可见） */
+#ifdef PHP_WIN32
+        InterlockedExchange((volatile LONG *)&worker->error, -1);
+        InterlockedExchange((volatile LONG *)&worker->done, 1);
+#else
+        __atomic_store_n(&worker->error, -1, __ATOMIC_RELEASE);
+        __atomic_store_n(&worker->done, 1, __ATOMIC_RELEASE);
+#endif
         return 0;
     }
 
@@ -53,14 +58,19 @@ static void *xhcurl_worker_thread(void *arg)
     for (int i = 0; i < worker->context_count; i++) {
         xhcurl_req_context_t *ctx = worker->contexts[i];
         if (ctx != NULL && ctx->easy != NULL) {
-            /* 注意：线程池模式下，不设置 PHP 回调（线程安全限制） */
-            /* 清除可能存在的 PHP 回调引用 */
-            /* 回调已在主线程的 xhcurl_context_create 中设置， */
-            /* 但在线程池中不会被调用，因为 curl 回调中会检查回调是否有效 */
-            /* 这里我们确保不触发 PHP 回调 */
-
             /* 添加 easy 句柄到 multi */
-            curl_multi_add_handle(multi, ctx->easy);
+            CURLMcode mc = curl_multi_add_handle(multi, ctx->easy);
+            if (mc != CURLM_OK) {
+                /* +------------------------------------------------------+
+                 * | 添加失败：直接标记该请求的 curl_code                   |
+                 * | curl_multi_add_handle 失败时，该请求不会进入事件循环， |
+                 * | curl_multi_info_read 也不会报告其完成。               |
+                 * | 如果不在此处标记，后续的 CURLE_PARTIAL_FILE 标记      |
+                 * | 会给出模糊的错误信息。直接设置具体的错误码更精确。     |
+                 * +------------------------------------------------------+
+                 */
+                ctx->curl_code = CURLE_FAILED_INIT;
+            }
         }
     }
 
@@ -94,6 +104,16 @@ static void *xhcurl_worker_thread(void *arg)
                     /* 获取 HTTP 状态码 */
                     curl_easy_getinfo(ctx->easy, CURLINFO_RESPONSE_CODE, &ctx->status_code);
 
+                    /* +----------------------------------------------------------+
+                     * | 保存 curl 执行结果码到上下文                              |
+                     * | 修复：原实现未保存 curl 错误码，导致主线程无法判断请求    |
+                     * | 失败的具体原因（如超时、DNS 失败、连接重置等），           |
+                     * | 只能返回通用的 "Request failed" 错误信息。                |
+                     * | 保存 curl_code 后，主线程可生成精确的错误描述。            |
+                     * +----------------------------------------------------------+
+                     */
+                    ctx->curl_code = msg->data.result;
+
                     /* 注意：不在线程中获取/设置 Content-Type */
                     /* 原因：工作线程中不能使用 PHP 内存管理器（emalloc/efree）， */
                     /* 而 strdup 分配的内存后续在 xhcurl_context_free 中用 efree 释放 */
@@ -111,6 +131,25 @@ static void *xhcurl_worker_thread(void *arg)
         }
     }
 
+    /* +--------------------------------------------------------------+
+     * | 标记未被 curl_multi_info_read 报告的请求为失败               |
+     * | 当 curl_multi_perform 返回错误或 curl_multi_wait 失败时，    |
+     * | 事件循环提前退出，部分请求可能已接收数据但未完成。            |
+     * | 这些请求不会被 curl_multi_info_read 报告（CURLMSG_DONE），   |
+     * | 其 curl_code 仍为初始值 CURLE_OK，主线程无法判断其状态。     |
+     * | 修复：对未被标记为完成的请求，设置 curl_code 为               |
+     * | CURLE_PARTIAL_FILE（表示数据传输不完整），主线程可据此        |
+     * | 生成准确的错误信息。                                         |
+     * +--------------------------------------------------------------+
+     */
+    for (int i = 0; i < worker->context_count; i++) {
+        xhcurl_req_context_t *ctx = worker->contexts[i];
+        if (ctx != NULL && ctx->curl_code == CURLE_OK && ctx->status_code == 0) {
+            /* 未被 curl_multi_info_read 报告的请求，标记为数据不完整 */
+            ctx->curl_code = CURLE_PARTIAL_FILE;
+        }
+    }
+
     /* 清理：从 multi 句柄移除所有 easy 句柄 */
     for (int i = 0; i < worker->context_count; i++) {
         xhcurl_req_context_t *ctx = worker->contexts[i];
@@ -122,8 +161,12 @@ static void *xhcurl_worker_thread(void *arg)
     /* 释放 multi 句柄 */
     curl_multi_cleanup(multi);
 
-    /* 标记工作线程完成 */
-    worker->done = 1;
+    /* 标记工作线程完成（使用原子操作确保主线程可见） */
+#ifdef PHP_WIN32
+    InterlockedExchange((volatile LONG *)&worker->done, 1);
+#else
+    __atomic_store_n(&worker->done, 1, __ATOMIC_RELEASE);
+#endif
 
     return 0;
 }
@@ -289,12 +332,28 @@ PHP_METHOD(XHThreadPool, add)
 
     /* 检查是否需要扩容待执行队列 */
     if (obj->pending_count >= obj->pending_capacity) {
-        /* 计算新容量（初始 64，之后翻倍增长） */
-        int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
-
-        /* 先保存旧指针，用于分配失败时回滚 */
-        zval *old_requests = obj->pending_requests;
-        zval *old_user_data = obj->pending_user_data;
+        /* +--------------------------------------------------------------+
+         * | 计算新容量（初始 64，之后翻倍增长）                          |
+         * | 整数溢出检查：pending_capacity * 2 可能超过 INT_MAX，        |
+         * | 导致 new_capacity 变为负数或 0，erealloc 分配失败或崩溃。    |
+         * | 检查方式：如果 capacity 已超过 INT_MAX / 2，不再翻倍，       |
+         * | 直接使用 pending_count + 1 作为新容量。                      |
+         * +--------------------------------------------------------------+
+         */
+        int new_capacity;
+        if (obj->pending_capacity == 0) {
+            new_capacity = 64;
+        } else if (obj->pending_capacity > INT_MAX / 2) {
+            /* 容量已接近 INT_MAX，无法安全翻倍 */
+            new_capacity = obj->pending_count + 1;
+            /* 再次检查是否溢出 */
+            if (new_capacity <= obj->pending_count) {
+                zend_throw_exception(xhcurl_exception_ce, "Too many pending requests", 0);
+                return;
+            }
+        } else {
+            new_capacity = obj->pending_capacity * 2;
+        }
 
         /* 重新分配请求队列数组 */
         zval *new_requests = (zval *)erealloc(
@@ -309,10 +368,16 @@ PHP_METHOD(XHThreadPool, add)
         zval *new_user_data = (zval *)erealloc(
             obj->pending_user_data, new_capacity * sizeof(zval));
         if (new_user_data == NULL) {
-            /* 回滚：pending_user_data 分配失败，恢复旧指针 */
-            /* PHP 的 erealloc 在内存不足时会调用 zend_error_noreturn 终止请求 */
-            /* 所以下面的代码在正常 PHP 环境中不会执行到 */
-            obj->pending_user_data = old_user_data;
+            /* +----------------------------------------------------------+
+             * | 回滚：pending_requests 已扩容但 pending_user_data 失败   |
+             * | 由于 PHP 的 erealloc 在内存不足时会调用                   |
+             * | zend_error_noreturn 终止请求，此分支实际不会执行。        |
+             * | 但为了防御性编程，仍需保证数据一致性。                     |
+             * | pending_requests 已扩容但 pending_user_data 未扩容，     |
+             * | 两者容量不一致，无法安全回滚。                             |
+             * | 实际处理：由于 erealloc 不会返回 NULL，此处不会执行。     |
+             * +----------------------------------------------------------+
+             */
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate user data queue", 0);
             return;
         }
@@ -446,6 +511,40 @@ PHP_METHOD(XHThreadPool, execute)
         return;
     }
 
+    /* +--------------------------------------------------------------+
+     * | 创建压缩后的活跃上下文数组（用于分配给工作线程）              |
+     * | 保留原始 contexts 数组（含 NULL 间隙）用于与 pending_requests |
+     * | 一一对应，以便在阶段 4 为失败的请求创建错误 XHResponse。      |
+     * | 压缩后的 active_contexts[0..context_count-1] 全部为有效指针。 |
+     * +--------------------------------------------------------------+
+     */
+    xhcurl_req_context_t **active_contexts = (xhcurl_req_context_t **)ecalloc(
+        context_count, sizeof(xhcurl_req_context_t *));
+    if (active_contexts == NULL) {
+        /* 压缩数组分配失败，释放所有上下文 */
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (contexts[i] != NULL) {
+                xhcurl_context_free(contexts[i]);
+            }
+        }
+        efree(contexts);
+        zend_throw_exception(xhcurl_exception_ce, "Failed to allocate active context array", 0);
+        obj->is_executing = 0;
+        return;
+    }
+    {
+        int write_idx = 0; /* 压缩后的写入位置 */
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (contexts[i] != NULL) {
+                /* 将非 NULL 上下文复制到活跃数组 */
+                active_contexts[write_idx] = contexts[i];
+                write_idx++;
+            }
+        }
+        /* context_count 应与 write_idx 一致（双重校验） */
+        context_count = write_idx;
+    }
+
     /* --- 阶段 2：将请求均匀分配给各工作线程 --- */
     int actual_workers = (context_count < obj->worker_count) ?
                           context_count : obj->worker_count;
@@ -461,6 +560,27 @@ PHP_METHOD(XHThreadPool, execute)
             }
         }
         efree(contexts);
+        efree(active_contexts);
+        /* +--------------------------------------------------------------+
+         * | 修复：清理 pending 队列中的 zval 引用                       |
+         * | 原实现缺少此清理，导致 pending_requests 和 pending_user_data |
+         * | 中的 zval 引用计数未减少，造成内存泄漏。                    |
+         * | 每个引用都需要调用 zval_ptr_dtor 释放。                     |
+         * +--------------------------------------------------------------+
+         */
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (!Z_ISUNDEF(obj->pending_requests[i])) {
+                zval_ptr_dtor(&obj->pending_requests[i]);
+                ZVAL_UNDEF(&obj->pending_requests[i]);
+            }
+            if (!Z_ISUNDEF(obj->pending_user_data[i])) {
+                zval_ptr_dtor(&obj->pending_user_data[i]);
+                ZVAL_UNDEF(&obj->pending_user_data[i]);
+            }
+        }
+        obj->pending_count = 0;
+        /* 重置 is_executing 标志 */
+        obj->is_executing = 0;
         zend_throw_exception(xhcurl_exception_ce, "Failed to allocate worker args", 0);
         return;
     }
@@ -476,7 +596,7 @@ PHP_METHOD(XHThreadPool, execute)
 
         /* 初始化工作线程参数 */
         workers[i].worker_id = i;
-        workers[i].contexts = &contexts[ctx_offset];
+        workers[i].contexts = &active_contexts[ctx_offset];
         workers[i].context_count = count;
         workers[i].done = 0;
         workers[i].error = 0;
@@ -489,6 +609,8 @@ PHP_METHOD(XHThreadPool, execute)
 #ifdef PHP_WIN32
     /* Windows 平台：使用 _beginthreadex */
     HANDLE *thread_handles = (HANDLE *)ecalloc(actual_workers, sizeof(HANDLE));
+    /* 记录成功创建的线程数（用于等待和清理） */
+    int valid_thread_count = 0;
     for (int i = 0; i < actual_workers; i++) {
         thread_handles[i] = (HANDLE)_beginthreadex(
             NULL,                   /* 默认安全属性 */
@@ -498,42 +620,109 @@ PHP_METHOD(XHThreadPool, execute)
             0,                      /* 立即运行 */
             NULL                    /* 不需要线程 ID */
         );
-        if (thread_handles[i] == NULL) {
-            /* 线程创建失败 */
-            workers[i].error = -1;
-            workers[i].done = 1;
+        if (thread_handles[i] != NULL) {
+            /* 线程创建成功，计入有效线程数 */
+            valid_thread_count++;
+        } else {
+            /* 线程创建失败，标记该工作线程为错误状态（使用原子操作） */
+            InterlockedExchange((volatile LONG *)&workers[i].error, -1);
+            InterlockedExchange((volatile LONG *)&workers[i].done, 1);
         }
     }
 
-    /* 等待所有工作线程完成 */
-    WaitForMultipleObjects(actual_workers, thread_handles, TRUE, INFINITE);
-
-    /* 关闭线程句柄 */
+    /* +--------------------------------------------------------------+
+     * | 等待所有工作线程完成                                          |
+     * | 修复：不能直接将含 NULL 句柄的数组传给 WaitForMultipleObjects，|
+     * | 因为 NULL 句柄会导致 ERROR_INVALID_PARAMETER 错误。           |
+     * | 改为逐个等待有效句柄，跳过创建失败的线程。                    |
+     * +--------------------------------------------------------------+
+     */
     for (int i = 0; i < actual_workers; i++) {
         if (thread_handles[i] != NULL) {
+            /* 等待单个线程完成，超时时间 30 分钟（防止永久阻塞） */
+            DWORD wait_result = WaitForSingleObject(thread_handles[i], 30 * 60 * 1000);
+            if (wait_result == WAIT_TIMEOUT) {
+                /* 线程超时未完成，标记错误（但不终止其他线程） */
+                workers[i].error = -2;
+            }
+            /* 关闭线程句柄（无论是否超时，都释放内核对象） */
             CloseHandle(thread_handles[i]);
         }
     }
+
+    /* Windows：检查线程创建失败的情况，标记受影响的请求 */
+    /* 必须在 efree(thread_handles) 之前，因为需要检查句柄是否为 NULL */
+    {
+        int ctx_offset = 0; /* 活跃上下文数组偏移量 */
+        for (int i = 0; i < actual_workers; i++) {
+            int count = base_count + ((i < remainder) ? 1 : 0);
+            if (thread_handles[i] == NULL) {
+                /* 线程创建失败，标记该线程负责的所有上下文 */
+                for (int j = 0; j < count; j++) {
+                    if (active_contexts[ctx_offset + j] != NULL) {
+                        active_contexts[ctx_offset + j]->curl_code = CURLE_FAILED_INIT;
+                    }
+                }
+            }
+            ctx_offset += count;
+        }
+    }
+
     efree(thread_handles);
 #else
     /* Unix/Linux 平台：使用 pthread */
     pthread_t *thread_ids = (pthread_t *)ecalloc(actual_workers, sizeof(pthread_t));
+    /* 记录每个线程是否成功创建（用于决定是否需要 pthread_join） */
+    /* ecalloc 在内存不足时会终止请求（zend_error_noreturn），不会返回 NULL */
+    int *thread_created = (int *)ecalloc(actual_workers, sizeof(int));
+    /* ecalloc 已将内存初始化为 0，thread_created[i] 默认为 0（未创建） */
     for (int i = 0; i < actual_workers; i++) {
         int ret = pthread_create(&thread_ids[i], NULL, xhcurl_worker_thread, &workers[i]);
-        if (ret != 0) {
-            /* 线程创建失败 */
-            workers[i].error = -1;
-            workers[i].done = 1;
+        if (ret == 0) {
+            /* 线程创建成功，标记需要 join */
+            thread_created[i] = 1;
+        } else {
+            /* 线程创建失败（使用原子操作设置错误状态） */
+            __atomic_store_n(&workers[i].error, -1, __ATOMIC_RELEASE);
+            __atomic_store_n(&workers[i].done, 1, __ATOMIC_RELEASE);
         }
     }
 
-    /* 等待所有工作线程完成 */
+    /* +--------------------------------------------------------------+
+     * | 等待所有工作线程完成                                          |
+     * | 修复：原实现使用 !is_done || has_error == 0 条件判断，       |
+     * | 当线程正常完成（done=1, error=0）时条件为 true 会 join，     |
+     * | 但线程出错完成（done=1, error=-1）时条件为 false 不 join，   |
+     * | 导致线程资源泄漏（pthread 未回收线程栈等资源）。              |
+     * | 正确做法：对所有成功创建的线程始终调用 pthread_join，         |
+     * | 无论其完成状态如何。pthread_create 失败的线程不需要 join。    |
+     * +--------------------------------------------------------------+
+     */
     for (int i = 0; i < actual_workers; i++) {
-        if (!workers[i].done || workers[i].error == 0) {
+        /* 仅对成功创建的线程调用 pthread_join（回收线程资源） */
+        if (thread_created[i]) {
             pthread_join(thread_ids[i], NULL);
         }
     }
     efree(thread_ids);
+    efree(thread_created);
+
+    /* Unix：检查线程创建失败的情况，标记受影响的请求 */
+    {
+        int ctx_offset = 0; /* 活跃上下文数组偏移量 */
+        for (int i = 0; i < actual_workers; i++) {
+            int count = base_count + ((i < remainder) ? 1 : 0);
+            if (!thread_created[i]) {
+                /* 线程创建失败，标记该线程负责的所有上下文 */
+                for (int j = 0; j < count; j++) {
+                    if (active_contexts[ctx_offset + j] != NULL) {
+                        active_contexts[ctx_offset + j]->curl_code = CURLE_FAILED_INIT;
+                    }
+                }
+            }
+            ctx_offset += count;
+        }
+    }
 #endif
 
     /* --- 阶段 4：为每个请求创建 XHResponse PHP 对象 --- */
@@ -542,16 +731,49 @@ PHP_METHOD(XHThreadPool, execute)
     for (int i = 0; i < obj->pending_count; i++) {
         xhcurl_req_context_t *ctx = contexts[i];
         if (ctx == NULL) {
-            /* 上下文为空（创建失败），添加一个空响应 */
-            zval null_zv;
-            ZVAL_NULL(&null_zv);
-            add_next_index_zval(return_value, &null_zv);
+            /* +----------------------------------------------------------+
+             * | 上下文创建失败：返回带错误信息的 XHResponse 而非 null    |
+             * | 修复：原实现返回 null，导致调用方需要额外判空，           |
+             * | 与成功请求的 XHResponse 返回类型不一致。                 |
+             * | 新实现：创建包含错误信息的 XHResponse，保持 API 一致性。  |
+             * +----------------------------------------------------------+
+             */
+            zval response_zv;
+            object_init_ex(&response_zv, xhresponse_ce);
+            /* 检查对象创建是否成功（防止内存不足时访问无效指针） */
+            if (Z_TYPE(response_zv) != IS_OBJECT) {
+                add_next_index_null(return_value);
+                continue;
+            }
+            xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(&response_zv));
+            /* 设置状态码为 0 表示请求未执行 */
+            resp_obj->status_code = 0;
+            /* 设置错误信息 */
+            resp_obj->error_msg = estrdup("Failed to create request context");
+            /* 转移用户自定义数据（即使请求失败也保留用户数据） */
+            if (!Z_ISUNDEF(obj->pending_user_data[i])) {
+                ZVAL_COPY(&resp_obj->user_data, &obj->pending_user_data[i]);
+            }
+            add_next_index_zval(return_value, &response_zv);
             continue;
         }
 
         /* 创建 XHResponse PHP 对象 */
         zval response_zv;
         object_init_ex(&response_zv, xhresponse_ce);
+        /* +----------------------------------------------------------+
+         * | 检查 object_init_ex 是否成功                              |
+         * | object_init_ex 可能因内存不足等原因失败，此时              |
+         * | response_zv 不是 IS_OBJECT 类型，Z_OBJ_P 会返回无效指针， |
+         * | 后续代码访问 resp_obj 会导致崩溃。                        |
+         * | 失败时跳过此请求的响应创建，避免访问无效内存。             |
+         * +----------------------------------------------------------+
+         */
+        if (Z_TYPE(response_zv) != IS_OBJECT) {
+            /* 对象创建失败（内存不足等），跳过此请求 */
+            add_next_index_null(return_value);
+            continue;
+        }
         xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(&response_zv));
 
         /* 填充响应数据 */
@@ -577,8 +799,22 @@ PHP_METHOD(XHThreadPool, execute)
         }
 
         /* 设置错误信息 */
-        if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
-            resp_obj->error_msg = estrdup("Request failed");
+        /* +--------------------------------------------------------------+
+         * | 修复：使用工作线程中保存的 curl_code 生成精确错误信息        |
+         * | 原实现只检查 status_code == 0 && body_buf.size == 0，        |
+         * | 无法区分超时、DNS 失败、连接重置等不同错误类型。             |
+         * | 新实现：curl_code != CURLE_OK 时使用 curl_easy_strerror      |
+         * | 生成具体错误描述，帮助用户快速定位问题。                     |
+         * +--------------------------------------------------------------+
+         */
+        if (ctx->curl_code != CURLE_OK) {
+            /* curl 执行失败（网络错误、超时、DNS 失败等），使用 curl 提供的错误描述 */
+            resp_obj->error_msg = estrdup(curl_easy_strerror(ctx->curl_code));
+            /* 同时保存 curl 错误码到响应对象 */
+            resp_obj->curl_code = ctx->curl_code;
+        } else if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
+            /* curl 执行成功但无响应数据（可能是服务器关闭连接等） */
+            resp_obj->error_msg = estrdup("Request failed: no response received");
         }
 
         /* 在主线程中解析响应头（工作线程中不能使用 ecalloc/efree） */
@@ -617,6 +853,8 @@ PHP_METHOD(XHThreadPool, execute)
         }
     }
     efree(contexts);
+    /* 释放活跃上下文数组（仅是指针数组，上下文已在上面释放） */
+    efree(active_contexts);
 
     /* 释放工作线程参数 */
     efree(workers);

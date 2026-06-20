@@ -59,9 +59,46 @@ int xhcurl_buffer_write(xhcurl_buffer_t *buf, const char *data, size_t len)
         return 0;  /* 空写入视为成功 */
     }
 
-    /* 检查写入后是否超过最大允许大小 */
+    /* +--------------------------------------------------------------+
+     * | 整数溢出检查：buf->size + len 可能超过 SIZE_MAX              |
+     * | size_t 是无符号类型，溢出时会回绕到很小的值，                |
+     * | 导致后续的容量检查和内存分配出现严重错误。                    |
+     * | 检查方式：如果 size + len < size，说明发生了回绕（溢出）。    |
+     * +--------------------------------------------------------------+
+     */
+    if (buf->size + len < buf->size) {
+        /* 整数溢出，无法容纳这么多数据 */
+        return -1;
+    }
+
+    /* +--------------------------------------------------------------+
+     * | 检查写入后是否超过最大允许大小                                |
+     * | 修复：原实现整块拒绝超过 max_size 的写入，导致已接收的有效   |
+     * | 数据被丢弃。新实现先写入 max_size 以内的部分数据，再返回错误，|
+     * | 确保不丢失已到达的有效数据。                                  |
+     * +--------------------------------------------------------------+
+     */
     if (buf->max_size > 0 && (buf->size + len) > buf->max_size) {
-        /* 超过最大限制，拒绝写入，防止内存溢出 */
+        /* 计算还能写入多少字节（不超过 max_size） */
+        size_t remaining = buf->max_size - buf->size;
+        if (remaining > 0) {
+            /* 还有剩余空间，先写入部分数据 */
+            /* 检查当前容量是否足够 */
+            if (buf->capacity < buf->max_size) {
+                /* 扩容到 max_size（不再翻倍，因为已到上限） */
+                char *new_data = (char *)realloc(buf->data, buf->max_size);
+                if (new_data != NULL) {
+                    buf->data = new_data;
+                    buf->capacity = buf->max_size;
+                }
+            }
+            /* 写入部分数据（不超过剩余容量） */
+            if (buf->size + remaining <= buf->capacity) {
+                memcpy(buf->data + buf->size, data, remaining);
+                buf->size += remaining;
+            }
+        }
+        /* 超过最大限制，返回 -1 通知调用方（curl 回调会中止传输） */
         return -1;
     }
 
@@ -107,53 +144,6 @@ int xhcurl_buffer_write(xhcurl_buffer_t *buf, const char *data, size_t len)
     memcpy(buf->data + buf->size, data, len);
     /* 更新已写入数据大小 */
     buf->size += len;
-
-    return 0;
-}
-
-/**
- * 从缓冲区读取指定范围的数据
- * @param buf      缓冲区指针
- * @param offset   读取起始偏移量（字节）
- * @param length   读取长度（字节）
- * @param out_data 输出数据指针（需调用方 free 释放）
- * @param out_len  输出数据实际长度
- * @return 0 成功，-1 参数错误或内存分配失败
- */
-int xhcurl_buffer_read(xhcurl_buffer_t *buf, size_t offset, size_t length,
-                        char **out_data, size_t *out_len)
-{
-    /* 参数有效性检查 */
-    if (buf == NULL || out_data == NULL || out_len == NULL) {
-        return -1;
-    }
-
-    /* 检查偏移量是否超出缓冲区范围 */
-    if (offset >= buf->size) {
-        /* 偏移量超出范围，返回空数据 */
-        *out_data = NULL;
-        *out_len = 0;
-        return 0;
-    }
-
-    /* 计算实际可读取的长度（防止越界） */
-    size_t available = buf->size - offset;
-    size_t read_len = (length < available) ? length : available;
-
-    /* 分配输出缓冲区，使用 emalloc 因为返回给 PHP 使用 */
-    char *result = (char *)emalloc(read_len + 1);
-    if (result == NULL) {
-        return -1;
-    }
-
-    /* 复制数据到输出缓冲区 */
-    memcpy(result, buf->data + offset, read_len);
-    /* 添加 null 终止符（便于作为 PHP 字符串使用） */
-    result[read_len] = '\0';
-
-    /* 设置输出参数 */
-    *out_data = result;
-    *out_len = read_len;
 
     return 0;
 }

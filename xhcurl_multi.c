@@ -274,7 +274,8 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
 /**
  * 从待执行队列中取出下一个请求并创建上下文，添加到 multi 句柄
  * @param obj XHMulti 对象
- * @return 新创建的上下文指针，无待执行请求时返回 NULL
+ * @return 新创建的上下文指针，无待执行请求或创建失败时返回 NULL
+ *         注意：即使创建失败，pending_head 也会前进，避免无限重试
  */
 static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
 {
@@ -286,6 +287,12 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
     /* 从队列中取出下一个 XHRequest 的 zval */
     zval *request_zv = &obj->pending_requests[obj->pending_head];
     if (Z_TYPE_P(request_zv) == IS_UNDEF) {
+        /* +--------------------------------------------------------------+
+         * | 修复：无效引用时也前进 pending_head                          |
+         * | 原实现直接返回 NULL 但未前进指针，导致无限重试无效请求       |
+         * +--------------------------------------------------------------+
+         */
+        obj->pending_head++;
         return NULL; /* 无效引用 */
     }
 
@@ -295,6 +302,15 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
     /* 创建请求执行上下文（此时才创建 curl easy 句柄） */
     xhcurl_req_context_t *ctx = xhcurl_context_create(obj->curl_obj, req_obj);
     if (ctx == NULL) {
+        /* +--------------------------------------------------------------+
+         * | 修复：上下文创建失败时前进 pending_head                      |
+         * | 原实现直接返回 NULL 但未前进指针，导致调用方反复重试同一个   |
+         * | 失败请求，在事件循环中形成无限重试（CPU 空转）。             |
+         * | 新实现：即使创建失败也前进指针，跳过该请求。                 |
+         * | 调用方通过检查返回值 NULL 来为该请求创建错误 XHResponse。    |
+         * +--------------------------------------------------------------+
+         */
+        obj->pending_head++;
         return NULL; /* 创建失败 */
     }
 
@@ -311,6 +327,8 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
     if (mres != CURLM_OK) {
         /* 添加失败，释放上下文 */
         xhcurl_context_free(ctx);
+        /* 前进 pending_head，避免无限重试 */
+        obj->pending_head++;
         return NULL;
     }
 
@@ -319,16 +337,33 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
 
     /* 检查是否需要扩容活跃上下文数组 */
     if (obj->context_count >= obj->context_capacity) {
-        /* 计算新容量（初始 16，之后翻倍增长） */
-        int new_capacity = (obj->context_capacity == 0) ? 16 : obj->context_capacity * 2;
+        /* 计算新容量（初始 16，之后翻倍增长，含整数溢出检查） */
+        int new_capacity;
+        if (obj->context_capacity == 0) {
+            new_capacity = 16;
+        } else if (obj->context_capacity > INT_MAX / 2) {
+            new_capacity = obj->context_count + 1;
+            if (new_capacity <= obj->context_count) {
+                /* 溢出，无法扩容 */
+                curl_multi_remove_handle(obj->multi, ctx->easy);
+                xhcurl_easy_map_remove(&obj->easy_map, ctx->easy);
+                xhcurl_context_free(ctx);
+                obj->pending_head++;
+                return NULL;
+            }
+        } else {
+            new_capacity = obj->context_capacity * 2;
+        }
         /* 重新分配数组 */
         obj->contexts = (xhcurl_req_context_t **)erealloc(
             obj->contexts, new_capacity * sizeof(xhcurl_req_context_t *));
         if (obj->contexts == NULL) {
-            /* 扩容失败，回滚 */
+            /* 扩容失败，回滚：从 multi 移除并释放上下文 */
             curl_multi_remove_handle(obj->multi, ctx->easy);
             xhcurl_easy_map_remove(&obj->easy_map, ctx->easy);
             xhcurl_context_free(ctx);
+            /* 前进 pending_head，避免无限重试 */
+            obj->pending_head++;
             return NULL;
         }
         /* 初始化新分配的空间为 NULL */
@@ -381,6 +416,16 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
 
     /* 创建 XHResponse PHP 对象 */
     object_init_ex(response_zv, xhresponse_ce);
+    /* +--------------------------------------------------------------+
+     * | 检查 object_init_ex 是否成功                                |
+     * | object_init_ex 可能因内存不足等原因失败，此时 response_zv   |
+     * | 不是 IS_OBJECT 类型，Z_OBJ_P 会返回无效指针导致崩溃。      |
+     * | 失败时返回 -1 通知调用方跳过此请求。                        |
+     * +--------------------------------------------------------------+
+     */
+    if (Z_TYPE_P(response_zv) != IS_OBJECT) {
+        return -1;
+    }
     xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(response_zv));
 
     /* 填充响应数据 */
@@ -480,10 +525,25 @@ static void xhmulti_cleanup_context(xhmulti_obj_t *obj, xhcurl_req_context_t *ct
     /* 从哈希表移除 */
     xhcurl_easy_map_remove(&obj->easy_map, ctx->easy);
 
-    /* 从活跃上下文数组中查找并清除指针（防止 use-after-free） */
+    /* +--------------------------------------------------------------+
+     * | 从活跃上下文数组中移除该上下文                                |
+     * | 修复：原实现仅将 slots[i] 设为 NULL 但不减少 context_count， |
+     * | 导致数组中出现 NULL 间隙，后续遍历时需额外判空，              |
+     * | 且 context_count 不能准确反映活跃请求数。                     |
+     * | 新实现：将末尾元素移到被移除的位置，然后减少计数，            |
+     * | 保证 contexts[0..context_count-1] 全部为有效指针。            |
+     * +--------------------------------------------------------------+
+     */
     for (int i = 0; i < obj->context_count; i++) {
         if (obj->contexts[i] == ctx) {
-            obj->contexts[i] = NULL;
+            /* 找到目标，用末尾元素覆盖当前位置（避免数组间隙） */
+            obj->context_count--;
+            if (i < obj->context_count) {
+                /* 被移除的不是最后一个元素，将末尾元素移到当前位置 */
+                obj->contexts[i] = obj->contexts[obj->context_count];
+            }
+            /* 将末尾位置清空（已移走） */
+            obj->contexts[obj->context_count] = NULL;
             break;
         }
     }
@@ -582,12 +642,28 @@ PHP_METHOD(XHMulti, add)
 
     /* 检查是否需要扩容待执行队列 */
     if (obj->pending_count >= obj->pending_capacity) {
-        /* 计算新容量（初始 64，之后翻倍增长） */
-        int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
-
-        /* 先保存旧指针，用于分配失败时回滚 */
-        zval *old_requests = obj->pending_requests;
-        zval *old_user_data = obj->pending_user_data;
+        /* +--------------------------------------------------------------+
+         * | 计算新容量（初始 64，之后翻倍增长）                          |
+         * | 整数溢出检查：pending_capacity * 2 可能超过 INT_MAX，        |
+         * | 导致 new_capacity 变为负数或 0，erealloc 分配失败或崩溃。    |
+         * | 检查方式：如果 capacity 已超过 INT_MAX / 2，不再翻倍，       |
+         * | 直接使用 pending_count + 1 作为新容量。                      |
+         * +--------------------------------------------------------------+
+         */
+        int new_capacity;
+        if (obj->pending_capacity == 0) {
+            new_capacity = 64;
+        } else if (obj->pending_capacity > INT_MAX / 2) {
+            /* 容量已接近 INT_MAX，无法安全翻倍 */
+            new_capacity = obj->pending_count + 1;
+            /* 再次检查是否溢出 */
+            if (new_capacity <= obj->pending_count) {
+                zend_throw_exception(xhcurl_exception_ce, "Too many pending requests", 0);
+                return;
+            }
+        } else {
+            new_capacity = obj->pending_capacity * 2;
+        }
 
         /* 重新分配请求队列数组 */
         zval *new_requests = (zval *)erealloc(
@@ -602,14 +678,18 @@ PHP_METHOD(XHMulti, add)
         zval *new_user_data = (zval *)erealloc(
             obj->pending_user_data, new_capacity * sizeof(zval));
         if (new_user_data == NULL) {
-            /* 回滚：将 pending_requests 恢复为旧指针 */
-            /* 注意：erealloc 成功后旧指针已失效，new_requests 就是正确的指针 */
-            /* 但 pending_user_data 分配失败，需要恢复 pending_requests 到扩容前状态 */
-            /* 由于 erealloc 可能已移动内存，无法回滚，只能将 new_requests 缩回 */
-            /* 实际上 erealloc 不会返回 NULL 时影响旧指针，这里直接报错即可 */
-            /* PHP 的 erealloc 在内存不足时会调用 zend_error_noreturn 终止请求 */
-            /* 所以下面的代码在正常 PHP 环境中不会执行到 */
-            obj->pending_user_data = old_user_data;
+            /* +----------------------------------------------------------+
+             * | 回滚：pending_requests 已扩容但 pending_user_data 失败   |
+             * | 由于 PHP 的 erealloc 在内存不足时会调用                   |
+             * | zend_error_noreturn 终止请求，此分支实际不会执行。        |
+             * | 但为了防御性编程，仍需保证数据一致性：                     |
+             * | pending_requests 已扩容但 pending_user_data 未扩容，     |
+             * | 两者容量不一致。此时应将 pending_requests 也回滚，       |
+             * | 但 erealloc 可能已移动内存，旧指针已失效。               |
+             * | 实际处理：由于 erealloc 不会返回 NULL，此处不会执行。     |
+             * | 如果真的执行到，抛出异常让调用方处理。                     |
+             * +----------------------------------------------------------+
+             */
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate user data queue", 0);
             return;
         }
@@ -685,6 +765,18 @@ PHP_METHOD(XHMulti, execute)
         return;
     }
 
+    /* +--------------------------------------------------------------+
+     * | 检查 curl multi 句柄是否有效                                 |
+     * | 如果构造函数中 curl_multi_init 失败，obj->multi 为 NULL，   |
+     * | 后续 curl_multi_add_handle 等调用会传入 NULL 导致崩溃。     |
+     * | 此处提前检查，抛出异常通知调用方。                           |
+     * +--------------------------------------------------------------+
+     */
+    if (obj->multi == NULL) {
+        zend_throw_exception(xhcurl_exception_ce, "curl multi handle is not initialized", 0);
+        return;
+    }
+
     /* 重置队列头部索引（从头开始消费） */
     obj->pending_head = 0;
 
@@ -716,9 +808,87 @@ PHP_METHOD(XHMulti, execute)
     int initial_batch = (obj->max_concurrent < obj->pending_count) ?
                          obj->max_concurrent : obj->pending_count;
     for (int i = 0; i < initial_batch; i++) {
-        if (xhmulti_dispatch_next(obj) == NULL) {
-            /* 调度失败（可能是内存不足），跳过 */
-            break;
+        xhcurl_req_context_t *next_ctx = xhmulti_dispatch_next(obj);
+        if (next_ctx == NULL) {
+            /* +----------------------------------------------------------+
+             * | dispatch_next 失败：为该请求创建错误 XHResponse            |
+             * | 修复：原实现仅 break 跳过，失败的请求被静默丢弃，          |
+             * | 导致返回数组中的响应数量少于请求数量，且无错误提示。        |
+             * | 新实现：为失败的请求创建包含错误信息的 XHResponse，         |
+             * | 保持返回数组与请求数组一一对应。                            |
+             * +----------------------------------------------------------+
+             */
+            obj->completed_count++;
+
+            /* 创建错误 XHResponse */
+            zval error_response_zv;
+            object_init_ex(&error_response_zv, xhresponse_ce);
+            /* 检查对象创建是否成功（防止内存不足时访问无效指针） */
+            if (Z_TYPE(error_response_zv) != IS_OBJECT) {
+                /* 对象创建失败，跳过此请求 */
+                continue;
+            }
+            xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(&error_response_zv));
+            resp_obj->status_code = 0;
+            resp_obj->error_msg = estrdup("Failed to create request context");
+            /* 转移用户自定义数据到错误响应中（与滑动窗口中的处理一致） */
+            if (obj->pending_head > 0 &&
+                !Z_ISUNDEF(obj->pending_user_data[obj->pending_head - 1])) {
+                ZVAL_COPY(&resp_obj->user_data,
+                          &obj->pending_user_data[obj->pending_head - 1]);
+                zval_ptr_dtor(&obj->pending_user_data[obj->pending_head - 1]);
+                ZVAL_UNDEF(&obj->pending_user_data[obj->pending_head - 1]);
+            }
+
+            if (has_callback) {
+                /* 有回调：立即通知调用方该请求失败 */
+                zval args[4];
+                ZVAL_COPY(&args[0], &error_response_zv);
+                ZVAL_LONG(&args[1], obj->completed_count);
+                ZVAL_LONG(&args[2], obj->pending_count);
+                /* 传递用户自定义数据（已转移到 resp_obj->user_data） */
+                if (!Z_ISUNDEF(resp_obj->user_data)) {
+                    ZVAL_COPY(&args[3], &resp_obj->user_data);
+                } else {
+                    ZVAL_NULL(&args[3]);
+                }
+
+                zval retval;
+                callback_fci.retval = &retval;
+                callback_fci.params = args;
+                callback_fci.param_count = 4;
+
+                int call_result = zend_call_function(&callback_fci, &callback_fcc);
+                zval_ptr_dtor(&args[0]);
+                zval_ptr_dtor(&args[3]);
+                if (call_result == SUCCESS) {
+                    zval_ptr_dtor(&retval);
+                }
+                /* 释放错误响应（回调模式不需要保留） */
+                zval_ptr_dtor(&error_response_zv);
+
+                /* 回调抛出异常时中断 */
+                if (EG(exception) != NULL) {
+                    break;
+                }
+            } else {
+                /* 无回调：将错误响应存入结果数组 */
+                if (obj->result_count < obj->result_capacity) {
+                    ZVAL_COPY_VALUE(&obj->results[obj->result_count], &error_response_zv);
+                } else {
+                    /* 扩容结果数组（含整数溢出保护） */
+                    int new_cap = (obj->result_capacity > INT_MAX / 2) ?
+                                  obj->result_count + 1 : obj->result_capacity * 2;
+                    obj->results = (zval *)erealloc(obj->results, new_cap * sizeof(zval));
+                    for (int j = obj->result_capacity; j < new_cap; j++) {
+                        ZVAL_UNDEF(&obj->results[j]);
+                    }
+                    ZVAL_COPY_VALUE(&obj->results[obj->result_count], &error_response_zv);
+                    obj->result_capacity = new_cap;
+                }
+                obj->result_count++;
+            }
+            /* 继续尝试调度下一个请求（不 break，因为某个请求失败不代表其他请求也会失败） */
         }
     }
 
@@ -766,8 +936,9 @@ PHP_METHOD(XHMulti, execute)
                     if (obj->result_count < obj->result_capacity) {
                         ZVAL_COPY_VALUE(&obj->results[obj->result_count], &response_zv);
                     } else {
-                        /* 结果数组已满，需要扩容 */
-                        int new_cap = obj->result_capacity * 2;
+                        /* 结果数组已满，需要扩容（含整数溢出保护） */
+                        int new_cap = (obj->result_capacity > INT_MAX / 2) ?
+                                      obj->result_count + 1 : obj->result_capacity * 2;
                         obj->results = (zval *)erealloc(obj->results, new_cap * sizeof(zval));
                         /* 初始化新分配的空间为 UNDEF，防止异常路径中 zval_ptr_dtor 访问未初始化的 zval */
                         for (int j = obj->result_capacity; j < new_cap; j++) {
@@ -786,14 +957,114 @@ PHP_METHOD(XHMulti, execute)
             /* 清理已完成的上下文 */
             xhmulti_cleanup_context(obj, ctx);
 
-            /* 回调抛出异常时立即中断事件循环，避免异常堆积 */
-            if (process_result != 0 && EG(exception) != NULL) {
+            /* 回调抛出异常或响应创建失败时立即中断事件循环 */
+            /* +----------------------------------------------------------+
+             * | 修复：process_result != 0 时无论是否有异常都应中断       |
+             * | 原实现仅在有异常时中断，但 object_init_ex 失败时         |
+             * | process_result 为 -1 且 EG(exception) 可能为 NULL，     |
+             * | 导致事件循环继续但该请求结果丢失。                       |
+             * | 新实现：process_result != 0 时始终中断，避免数据丢失。   |
+             * +----------------------------------------------------------+
+             */
+            if (process_result != 0) {
                 break;
             }
 
             /* 滑动窗口：从 pending 队列取下一个请求补充窗口 */
             if (obj->pending_head < obj->pending_count) {
-                xhmulti_dispatch_next(obj);
+                xhcurl_req_context_t *next_ctx = xhmulti_dispatch_next(obj);
+                if (next_ctx == NULL) {
+                    /* +----------------------------------------------------------+
+                     * | dispatch_next 失败：为该请求创建错误 XHResponse            |
+                     * | 修复：原实现不检查返回值，失败的请求被静默丢弃，            |
+                     * | 导致返回数组中的响应数量少于请求数量，且无错误提示。        |
+                     * | 新实现：为失败的请求创建包含错误信息的 XHResponse，         |
+                     * | 保持返回数组与请求数组一一对应。                            |
+                     * +----------------------------------------------------------+
+                     */
+                    obj->completed_count++;
+
+                    /* 创建错误 XHResponse */
+                    zval error_response_zv;
+                    object_init_ex(&error_response_zv, xhresponse_ce);
+                    /* +----------------------------------------------------------+
+                     * | 检查 object_init_ex 是否成功                              |
+                     * | object_init_ex 可能因内存不足等原因失败，此时              |
+                     * | error_response_zv 不是 IS_OBJECT 类型，                   |
+                     * | Z_OBJ_P 会返回无效指针导致崩溃。                          |
+                     * | 失败时跳过此请求，避免访问无效内存。                       |
+                     * +----------------------------------------------------------+
+                     */
+                    if (Z_TYPE(error_response_zv) != IS_OBJECT) {
+                        continue;
+                    }
+                    xhresponse_obj_t *resp_obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(&error_response_zv));
+                    resp_obj->status_code = 0;
+                    resp_obj->error_msg = estrdup("Failed to create request context");
+                    /* +----------------------------------------------------------+
+                     * | 转移用户自定义数据到错误响应中                            |
+                     * | xhmulti_dispatch_next 已前进 pending_head，              |
+                     * | 所以当前请求的 user_data 在 pending_head - 1 位置。      |
+                     * | 转移后清除原引用，防止清理阶段重复释放。                   |
+                     * +----------------------------------------------------------+
+                     */
+                    if (obj->pending_head > 0 &&
+                        !Z_ISUNDEF(obj->pending_user_data[obj->pending_head - 1])) {
+                        ZVAL_COPY(&resp_obj->user_data,
+                                  &obj->pending_user_data[obj->pending_head - 1]);
+                        zval_ptr_dtor(&obj->pending_user_data[obj->pending_head - 1]);
+                        ZVAL_UNDEF(&obj->pending_user_data[obj->pending_head - 1]);
+                    }
+
+                    if (has_callback) {
+                        /* 有回调：立即通知调用方该请求失败 */
+                        zval args[4];
+                        ZVAL_COPY(&args[0], &error_response_zv);
+                        ZVAL_LONG(&args[1], obj->completed_count);
+                        ZVAL_LONG(&args[2], obj->pending_count);
+                        /* 传递用户自定义数据（已转移到 resp_obj->user_data） */
+                        if (!Z_ISUNDEF(resp_obj->user_data)) {
+                            ZVAL_COPY(&args[3], &resp_obj->user_data);
+                        } else {
+                            ZVAL_NULL(&args[3]);
+                        }
+
+                        zval retval;
+                        callback_fci.retval = &retval;
+                        callback_fci.params = args;
+                        callback_fci.param_count = 4;
+
+                        int call_result = zend_call_function(&callback_fci, &callback_fcc);
+                        zval_ptr_dtor(&args[0]);
+                        zval_ptr_dtor(&args[3]);
+                        if (call_result == SUCCESS) {
+                            zval_ptr_dtor(&retval);
+                        }
+                        /* 释放错误响应（回调模式不需要保留） */
+                        zval_ptr_dtor(&error_response_zv);
+
+                        /* 回调抛出异常时中断 */
+                        if (EG(exception) != NULL) {
+                            break;
+                        }
+                    } else {
+                        /* 无回调：将错误响应存入结果数组 */
+                        if (obj->result_count < obj->result_capacity) {
+                            ZVAL_COPY_VALUE(&obj->results[obj->result_count], &error_response_zv);
+                        } else {
+                            /* 扩容结果数组（含整数溢出保护） */
+                            int new_cap = (obj->result_capacity > INT_MAX / 2) ?
+                                          obj->result_count + 1 : obj->result_capacity * 2;
+                            obj->results = (zval *)erealloc(obj->results, new_cap * sizeof(zval));
+                            for (int j = obj->result_capacity; j < new_cap; j++) {
+                                ZVAL_UNDEF(&obj->results[j]);
+                            }
+                            ZVAL_COPY_VALUE(&obj->results[obj->result_count], &error_response_zv);
+                            obj->result_capacity = new_cap;
+                        }
+                        obj->result_count++;
+                    }
+                }
             }
         }
 

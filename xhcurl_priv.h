@@ -150,7 +150,6 @@ typedef struct _xhcurl_cookie {
  */
 typedef struct _xhcurl_obj {
     CURLSH             *share;              /* curl 共享句柄，用于共享 DNS/SSL/Cookie */
-    struct curl_slist  *global_headers;     /* 全局请求头列表（curl_slist 格式） */
     xhcurl_header_t    *global_headers_raw; /* 全局请求头列表（原始键值对格式，用于合并） */
     xhcurl_cookie_t    *global_cookies;     /* 全局 Cookie 列表 */
     long                timeout;            /* 默认请求超时时间（秒） */
@@ -218,6 +217,7 @@ typedef struct _xhcurl_req_context {
     zval                request_zval;        /* 关联的 XHRequest PHP 对象引用 */
     zval                user_data;           /* 用户自定义数据（add 时传入，回调时原样返回） */
     long                status_code;         /* HTTP 状态码 */
+    CURLcode            curl_code;           /* curl 执行结果码（CURLE_OK 表示成功，工作线程中保存） */
     char               *content_type;        /* Content-Type 值 */
     struct curl_slist  *request_headers;     /* curl_slist 格式的请求头 */
 } xhcurl_req_context_t;
@@ -301,8 +301,8 @@ typedef struct _xhcurl_worker_arg {
     int                         worker_id;       /* 工作线程编号 */
     xhcurl_req_context_t      **contexts;        /* 该线程负责的请求上下文数组 */
     int                         context_count;   /* 请求上下文数量 */
-    volatile int                done;            /* 完成标志（0=运行中，1=已完成） */
-    int                         error;           /* 错误码（0=无错误） */
+    volatile int                done;            /* 完成标志（0=运行中，1=已完成），使用原子操作写入 */
+    int                         error;           /* 错误码（0=无错误），使用原子操作写入 */
 #ifdef PHP_WIN32
     HANDLE                      thread_handle;   /* Windows 线程句柄 */
 #else
@@ -418,10 +418,6 @@ int  xhcurl_buffer_init(xhcurl_buffer_t *buf, size_t initial_cap, size_t max_sz)
 
 /* 向缓冲区追加数据，返回 0 成功，-1 表示超过最大限制 */
 int  xhcurl_buffer_write(xhcurl_buffer_t *buf, const char *data, size_t len);
-
-/* 从缓冲区读取指定范围的数据，返回读取的字节数，-1 表示参数错误 */
-int  xhcurl_buffer_read(xhcurl_buffer_t *buf, size_t offset, size_t length,
-                         char **out_data, size_t *out_len);
 
 /* 释放缓冲区资源 */
 void xhcurl_buffer_free(xhcurl_buffer_t *buf);
