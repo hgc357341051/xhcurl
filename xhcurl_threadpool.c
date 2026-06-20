@@ -77,17 +77,39 @@ static void *xhcurl_worker_thread(void *arg)
     /* 运行 curl_multi 事件循环 */
     int still_running = 0;
     do {
-        /* 执行一次 multi 操作 */
+        /* +--------------------------------------------------------------+
+         * | 执行 multi 操作                                              |
+         * | 旧版 libcurl 可能返回 CURLM_CALL_MULTI_PERFORM，            |
+         * | 表示需要立即再次调用（已弃用但需兼容）。                     |
+         * | 新版 libcurl 始终返回 CURLM_OK。                            |
+         * +--------------------------------------------------------------+
+         */
         CURLMcode mc = curl_multi_perform(multi, &still_running);
-        if (mc != CURLM_OK) {
+        if (mc != CURLM_OK && mc != CURLM_CALL_MULTI_PERFORM) {
+            /* multi 操作失败（非 CALL_MULTI_PERFORM 的错误） */
             break;
         }
 
-        /* 等待活动（最多 100ms），避免 CPU 空转 */
+        /* +--------------------------------------------------------------+
+         * | 等待活动（最多 100ms），避免 CPU 空转                        |
+         * | 修复：numfds==0 时需要短暂休眠，让 DNS 解析等               |
+         * | 非 socket 操作有机会完成（curl 官方推荐做法）。             |
+         * | 参考：https://curl.se/libcurl/c/curl_multi_wait.html        |
+         * +--------------------------------------------------------------+
+         */
         if (still_running > 0) {
-            mc = curl_multi_wait(multi, NULL, 0, 100, NULL);
+            int numfds = 0;
+            mc = curl_multi_wait(multi, NULL, 0, 100, &numfds);
             if (mc != CURLM_OK) {
                 break;
+            }
+            /* numfds==0 时短暂休眠，避免 CPU 空转 */
+            if (numfds == 0) {
+#ifdef PHP_WIN32
+                Sleep(10);
+#else
+                usleep(10000);
+#endif
             }
         }
     } while (still_running > 0);

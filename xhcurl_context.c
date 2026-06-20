@@ -119,8 +119,25 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
         curl_easy_setopt(ctx->easy, CURLOPT_USERAGENT, curl_obj->user_agent);
     }
 
-    /* 设置代理 */
-    if (curl_obj->proxy != NULL) {
+    /* +--------------------------------------------------------------+
+     * | 设置代理（请求级优先，与 Cookie 优先级模式一致）             |
+     * | 优先级：                                                     |
+     * | 1. 请求级代理（req_obj->proxy）                              |
+     * |    - 非空字符串：使用请求级代理（覆盖全局代理）               |
+     * |    - 空字符串 ""：禁用代理（即使全局设置了代理也不使用）      |
+     * | 2. 全局代理（curl_obj->proxy）                               |
+     * |    - 仅当请求级代理为 NULL（未设置）时使用                   |
+     * +--------------------------------------------------------------+
+     */
+    if (req_obj->proxy != NULL) {
+        /* 请求级代理已设置 */
+        if (req_obj->proxy[0] != '\0') {
+            /* 非空字符串：使用请求级代理 */
+            curl_easy_setopt(ctx->easy, CURLOPT_PROXY, req_obj->proxy);
+        }
+        /* 空字符串：不设置 CURLOPT_PROXY，等价于禁用代理 */
+    } else if (curl_obj->proxy != NULL) {
+        /* 请求级未设置，使用全局代理 */
         curl_easy_setopt(ctx->easy, CURLOPT_PROXY, curl_obj->proxy);
     }
 

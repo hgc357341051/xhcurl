@@ -180,6 +180,7 @@ typedef struct _xhrequest_obj {
     long                connect_timeout;    /* 连接超时（0 表示使用全局默认值） */
     zend_bool           follow_redirects;   /* 是否跟随重定向 */
     long                max_redirects;      /* 最大重定向次数 */
+    char               *proxy;              /* 请求级代理（NULL=使用全局，""=禁用代理） */
     zval                chunk_callback;     /* 流式数据回调（PHP callable） */
     zval                header_callback;    /* 响应头回调（PHP callable） */
     zend_object         std;                /* PHP 对象标准头（必须放在最后） */

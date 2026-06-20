@@ -57,6 +57,12 @@ static void xhrequest_free_obj(zend_object *object)
         obj->body = NULL;
     }
 
+    /* 释放请求级代理地址 */
+    if (obj->proxy != NULL) {
+        efree(obj->proxy);
+        obj->proxy = NULL;
+    }
+
     /* 释放流式数据回调引用 */
     if (!Z_ISUNDEF(obj->chunk_callback)) {
         zval_ptr_dtor(&obj->chunk_callback);
@@ -99,6 +105,7 @@ static zend_object *xhrequest_create_obj(zend_class_entry *class_type)
     obj->connect_timeout = 0;           /* 0 表示使用全局默认值 */
     obj->follow_redirects = 1;          /* 默认跟随重定向 */
     obj->max_redirects = XHCURL_DEFAULT_MAX_REDIRECTS; /* 默认最大重定向次数 */
+    obj->proxy = NULL;                  /* NULL 表示使用全局代理 */
     ZVAL_UNDEF(&obj->chunk_callback);   /* 无流式回调 */
     ZVAL_UNDEF(&obj->header_callback);  /* 无头部回调 */
 
@@ -254,6 +261,54 @@ PHP_METHOD(XHRequest, setBody)
 }
 
 /**
+ * 设置请求级代理
+ * XHRequest::setProxy(string $proxy): static
+ *
+ * 设置请求级代理，覆盖全局代理设置。
+ * - 非空字符串：使用指定代理（如 "http://proxy:8080"）
+ * - 空字符串 ""：禁用代理（即使全局设置了代理也不使用）
+ * - 未调用此方法：使用全局代理（XHCurl::setProxy 设置的值）
+ *
+ * 与全局 Cookie / 请求级 Cookie 的优先级模式一致：
+ * 请求级设置覆盖全局设置，空值表示"显式禁用"。
+ *
+ * @param string $proxy 代理地址（空字符串 = 禁用代理）
+ */
+PHP_METHOD(XHRequest, setProxy)
+{
+    char *proxy;        /* 代理地址参数 */
+    size_t proxy_len;   /* 代理地址长度 */
+
+    /* 解析参数 */
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(proxy, proxy_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 获取当前对象 */
+    xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 释放旧的代理地址 */
+    if (obj->proxy != NULL) {
+        efree(obj->proxy);
+        obj->proxy = NULL;
+    }
+
+    /* +--------------------------------------------------------------+
+     * | 代理地址语义：                                               |
+     * | - 非空字符串：复制为请求级代理（覆盖全局代理）               |
+     * | - 空字符串 ""：复制为请求级代理（显式禁用代理）              |
+     * |   空字符串在 xhcurl_context_create 中会被特殊处理：          |
+     * |   检测到 proxy_len == 0 时不设置 CURLOPT_PROXY，             |
+     * |   同时跳过全局代理，实现"禁用代理"语义                       |
+     * +--------------------------------------------------------------+
+     */
+    obj->proxy = estrndup(proxy, proxy_len);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+
+/**
  * 设置 JSON 格式请求体
  * XHRequest::setJsonBody(array $data): static
  * 自动将数组转为 JSON 字符串并设置 Content-Type
@@ -321,8 +376,21 @@ PHP_METHOD(XHRequest, setJsonBody)
     /* 释放 json_encode 返回值 */
     zval_ptr_dtor(&json_ret);
 
-    /* 自动设置 Content-Type 为 application/json（使用 set 去重，避免重复添加） */
-    xhcurl_header_set(&obj->headers, "Content-Type", "application/json");
+    /* +--------------------------------------------------------------+
+     * | 自动设置 Content-Type 为 application/json                    |
+     * | 仅当用户未通过 setHeader 手动设置 Content-Type 时才自动设置，|
+     * | 用户显式设置优先级高于便捷方法的自动设置。                   |
+     * | 场景：                                                       |
+     * |   setHeader('Content-Type', 'text/html') → setJsonBody()    |
+     * |   → 保留 'text/html'，不覆盖为 'application/json'           |
+     * |   setJsonBody() → setHeader('Content-Type', 'text/html')    |
+     * |   → 覆盖为 'text/html'（用户最后设置者生效）                |
+     * +--------------------------------------------------------------+
+     */
+    if (xhcurl_header_find(obj->headers, "Content-Type") == NULL) {
+        /* 用户未手动设置 Content-Type，自动设置 */
+        xhcurl_header_set(&obj->headers, "Content-Type", "application/json");
+    }
 
     /* 返回 $this 支持链式调用 */
     RETURN_ZVAL(getThis(), 1, 0);
@@ -552,6 +620,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setBody, 0, 0, 1)
     ZEND_ARG_INFO(0, body)        /* 请求体（必填） */
 ZEND_END_ARG_INFO()
 
+/* setProxy 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setProxy, 0, 0, 1)
+    ZEND_ARG_INFO(0, proxy)       /* 代理地址（必填，空字符串=禁用代理） */
+ZEND_END_ARG_INFO()
+
 /* setJsonBody 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setJsonBody, 0, 0, 1)
     ZEND_ARG_INFO(0, data)        /* 数组数据（必填） */
@@ -598,6 +671,8 @@ static const zend_function_entry xhrequest_methods[] = {
     PHP_ME(XHRequest, setCookie, arginfo_xhrequest_setCookie, ZEND_ACC_PUBLIC)
     /* 设置请求体 */
     PHP_ME(XHRequest, setBody, arginfo_xhrequest_setBody, ZEND_ACC_PUBLIC)
+    /* 设置请求级代理 */
+    PHP_ME(XHRequest, setProxy, arginfo_xhrequest_setProxy, ZEND_ACC_PUBLIC)
     /* 设置 JSON 请求体 */
     PHP_ME(XHRequest, setJsonBody, arginfo_xhrequest_setJsonBody, ZEND_ACC_PUBLIC)
     /* 设置超时时间 */
