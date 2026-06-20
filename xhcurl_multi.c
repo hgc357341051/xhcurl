@@ -784,6 +784,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_execute, 0, 0, 0)
     ZEND_ARG_INFO(0, callback)        /* 可选回调函数 */
 ZEND_END_ARG_INFO()
 
+/* count 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_count, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry xhmulti_methods[] = {
     /* 构造函数 */
     PHP_ME(XHMulti, __construct, arginfo_xhmulti_construct, ZEND_ACC_PUBLIC)
@@ -792,7 +796,7 @@ static const zend_function_entry xhmulti_methods[] = {
     /* 执行所有请求（滑动窗口模式） */
     PHP_ME(XHMulti, execute, arginfo_xhmulti_execute, ZEND_ACC_PUBLIC)
     /* 获取请求数量 */
-    PHP_ME(XHMulti, count, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHMulti, count, arginfo_xhmulti_count, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };

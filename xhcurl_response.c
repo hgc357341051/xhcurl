@@ -411,32 +411,86 @@ PHP_METHOD(XHResponse, getTotalTime)
 }
 
 /* +----------------------------------------------------------------------+
+ * | 参数信息定义（arginfo）                                                |
+ * | PHP 8+ 要求所有方法必须声明参数信息，否则产生 Missing arginfo 警告     |
+ * +----------------------------------------------------------------------+
+ */
+
+/* getStatusCode 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getStatusCode, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* getHeader 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getHeader, 0, 0, 1)
+    ZEND_ARG_INFO(0, name)        /* 头部名称（必填） */
+ZEND_END_ARG_INFO()
+
+/* getHeaders 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getHeaders, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* hasHeader 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_hasHeader, 0, 0, 1)
+    ZEND_ARG_INFO(0, name)        /* 头部名称（必填） */
+ZEND_END_ARG_INFO()
+
+/* getBodyChunk 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBodyChunk, 0, 0, 1)
+    ZEND_ARG_INFO(0, offset)      /* 偏移量（必填） */
+    ZEND_ARG_INFO(0, length)      /* 读取长度（可选） */
+ZEND_END_ARG_INFO()
+
+/* getBodyLength 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBodyLength, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* getContentType 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getContentType, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* isJson 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_isJson, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* toJsonArray 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_toJsonArray, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* getError 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getError, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* getTotalTime 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getTotalTime, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* +----------------------------------------------------------------------+
  * | 方法注册表                                                            |
  * +----------------------------------------------------------------------+
  */
 static const zend_function_entry xhresponse_methods[] = {
     /* 获取 HTTP 状态码 */
-    PHP_ME(XHResponse, getStatusCode, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getStatusCode, arginfo_xhresponse_getStatusCode, ZEND_ACC_PUBLIC)
     /* 获取指定响应头 */
-    PHP_ME(XHResponse, getHeader, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getHeader, arginfo_xhresponse_getHeader, ZEND_ACC_PUBLIC)
     /* 获取所有响应头（慎用） */
-    PHP_ME(XHResponse, getHeaders, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getHeaders, arginfo_xhresponse_getHeaders, ZEND_ACC_PUBLIC)
     /* 检查响应头是否存在 */
-    PHP_ME(XHResponse, hasHeader, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, hasHeader, arginfo_xhresponse_hasHeader, ZEND_ACC_PUBLIC)
     /* 分段读取响应体 */
-    PHP_ME(XHResponse, getBodyChunk, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getBodyChunk, arginfo_xhresponse_getBodyChunk, ZEND_ACC_PUBLIC)
     /* 获取响应体总长度 */
-    PHP_ME(XHResponse, getBodyLength, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getBodyLength, arginfo_xhresponse_getBodyLength, ZEND_ACC_PUBLIC)
     /* 获取 Content-Type */
-    PHP_ME(XHResponse, getContentType, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getContentType, arginfo_xhresponse_getContentType, ZEND_ACC_PUBLIC)
     /* 判断是否为 JSON */
-    PHP_ME(XHResponse, isJson, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, isJson, arginfo_xhresponse_isJson, ZEND_ACC_PUBLIC)
     /* 解析 JSON 为数组 */
-    PHP_ME(XHResponse, toJsonArray, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, toJsonArray, arginfo_xhresponse_toJsonArray, ZEND_ACC_PUBLIC)
     /* 获取错误信息 */
-    PHP_ME(XHResponse, getError, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getError, arginfo_xhresponse_getError, ZEND_ACC_PUBLIC)
     /* 获取请求耗时 */
-    PHP_ME(XHResponse, getTotalTime, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHResponse, getTotalTime, arginfo_xhresponse_getTotalTime, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };

@@ -556,15 +556,23 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhthreadpool_add, 0, 0, 1)
     ZEND_ARG_INFO(0, request)    /* XHRequest 对象（必填） */
 ZEND_END_ARG_INFO()
 
+/* execute 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhthreadpool_execute, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+/* count 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhthreadpool_count, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry xhthreadpool_methods[] = {
     /* 构造函数 */
     PHP_ME(XHThreadPool, __construct, arginfo_xhthreadpool_construct, ZEND_ACC_PUBLIC)
     /* 添加请求 */
     PHP_ME(XHThreadPool, add, arginfo_xhthreadpool_add, ZEND_ACC_PUBLIC)
     /* 执行所有请求（多线程） */
-    PHP_ME(XHThreadPool, execute, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHThreadPool, execute, arginfo_xhthreadpool_execute, ZEND_ACC_PUBLIC)
     /* 获取请求数量 */
-    PHP_ME(XHThreadPool, count, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHThreadPool, count, arginfo_xhthreadpool_count, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };

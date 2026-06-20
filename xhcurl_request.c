@@ -515,6 +515,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_onHeader, 0, 0, 1)
     ZEND_ARG_INFO(0, callback)    /* 回调函数（必填） */
 ZEND_END_ARG_INFO()
 
+/* getUrl 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_getUrl, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry xhrequest_methods[] = {
     /* 构造函数 */
     PHP_ME(XHRequest, __construct, arginfo_xhrequest_construct, ZEND_ACC_PUBLIC)
@@ -539,7 +543,7 @@ static const zend_function_entry xhrequest_methods[] = {
     /* 注册响应头回调 */
     PHP_ME(XHRequest, onHeader, arginfo_xhrequest_onHeader, ZEND_ACC_PUBLIC)
     /* 获取请求 URL */
-    PHP_ME(XHRequest, getUrl, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHRequest, getUrl, arginfo_xhrequest_getUrl, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };

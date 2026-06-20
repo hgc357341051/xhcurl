@@ -554,6 +554,10 @@ PHP_METHOD(XHCurl, exec)
  * +----------------------------------------------------------------------+
  */
 
+/* __construct 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_construct, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* setGlobalHeader 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhcurl_setGlobalHeader, 0, 0, 2)
     ZEND_ARG_INFO(0, name)
@@ -616,7 +620,7 @@ ZEND_END_ARG_INFO()
 
 static const zend_function_entry xhcurl_methods[] = {
     /* 构造函数 */
-    PHP_ME(XHCurl, __construct, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(XHCurl, __construct, arginfo_xhcurl_construct, ZEND_ACC_PUBLIC)
     /* 设置全局请求头 */
     PHP_ME(XHCurl, setGlobalHeader, arginfo_xhcurl_setGlobalHeader, ZEND_ACC_PUBLIC)
     /* 设置全局 Cookie */
