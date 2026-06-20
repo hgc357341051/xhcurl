@@ -221,18 +221,69 @@ typedef struct _xhcurl_req_context {
 } xhcurl_req_context_t;
 
 /* +----------------------------------------------------------------------+
+ * | easy 句柄 → 上下文索引 哈希表节点                                     |
+ * | 用于 O(1) 查找 curl easy 句柄对应的请求上下文                         |
+ * | 替代原来的 O(n) 线性查找，百万级请求时性能差异显著                    |
+ * +----------------------------------------------------------------------+
+ */
+typedef struct _xhcurl_easy_map_entry {
+    CURL                        *easy;           /* curl easy 句柄（键） */
+    xhcurl_req_context_t        *context;        /* 请求上下文（值） */
+    struct _xhcurl_easy_map_entry *next;         /* 哈希冲突链表下一节点 */
+} xhcurl_easy_map_entry_t;
+
+/* +----------------------------------------------------------------------+
+ * | easy 句柄 → 上下文 哈希表                                             |
+ * | 固定桶数的开链哈希表，适合 curl_multi 场景                            |
+ * | 桶数取 2 的幂次，用位运算替代取模加速                                 |
+ * +----------------------------------------------------------------------+
+ */
+#define XHCURL_EASY_MAP_BUCKETS 1024  /* 哈希桶数（2 的幂次） */
+
+typedef struct _xhcurl_easy_map {
+    xhcurl_easy_map_entry_t    *buckets[XHCURL_EASY_MAP_BUCKETS]; /* 桶数组 */
+    int                         size;            /* 已存储的键值对数量 */
+} xhcurl_easy_map_t;
+
+/* +----------------------------------------------------------------------+
  * | XHMulti 批量异步执行器对象（PHP 对象内部数据）                        |
  * | 基于 curl_multi 接口，FPM 和 CLI 模式通用                            |
+ * |                                                                      |
+ * | 滑动窗口设计：                                                        |
+ * |   - add() 时仅将 XHRequest 引用存入 pending 队列                     |
+ * |   - execute() 时按 max_concurrent 窗口大小分批创建上下文              |
+ * |   - 一个请求完成立即从 pending 取下一个补充，保持满窗并发             |
+ * |   - 有 callback 时实时回调 + 释放已完成响应，内存恒定                 |
+ * |   - 无 callback 时返回全量数组（兼容旧 API）                          |
  * +----------------------------------------------------------------------+
  */
 typedef struct _xhmulti_obj {
     CURLM                      *multi;           /* curl multi 句柄 */
     xhcurl_obj_t               *curl_obj;        /* 关联的 XHCurl 全局管理器引用 */
-    xhcurl_req_context_t      **contexts;        /* 请求上下文指针数组（按添加顺序） */
-    int                         context_count;   /* 已添加的请求上下文数量 */
-    int                         context_capacity;/* 上下文数组已分配容量 */
     zval                        curl_zval;       /* XHCurl PHP 对象引用（防止 GC 回收） */
-    int                         request_count;   /* 已添加的请求数量（兼容旧字段） */
+
+    /* --- 待执行请求队列（add 时入队，execute 时消费） --- */
+    zval                       *pending_requests;/* 待执行请求的 XHRequest zval 数组 */
+    int                         pending_count;   /* 待执行请求数量 */
+    int                         pending_capacity;/* 待执行数组容量 */
+    int                         pending_head;    /* 队列头部索引（下一个要执行的） */
+
+    /* --- 活跃请求上下文（execute 期间使用） --- */
+    xhcurl_req_context_t      **contexts;        /* 活跃请求上下文指针数组 */
+    int                         context_count;   /* 活跃请求上下文数量 */
+    int                         context_capacity;/* 上下文数组已分配容量 */
+
+    /* --- 并发控制 --- */
+    int                         max_concurrent;  /* 最大并发数（滑动窗口大小） */
+
+    /* --- easy → context 哈希表（O(1) 查找） --- */
+    xhcurl_easy_map_t           easy_map;        /* easy 句柄到上下文的映射 */
+
+    /* --- 已完成请求结果（无 callback 模式下使用） --- */
+    zval                       *results;         /* 已完成的 XHResponse zval 数组 */
+    int                         result_count;    /* 已完成结果数量 */
+    int                         result_capacity; /* 结果数组容量 */
+
     zend_object                 std;             /* PHP 对象标准头（必须放在最后） */
 } xhmulti_obj_t;
 
@@ -257,15 +308,22 @@ typedef struct _xhcurl_worker_arg {
 /* +----------------------------------------------------------------------+
  * | XHThreadPool CLI线程池对象（PHP 对象内部数据）                        |
  * | 仅在 CLI 模式下可用，使用多线程并发执行请求                           |
+ * |                                                                      |
+ * | 延迟创建设计：                                                        |
+ * |   - add() 仅将 XHRequest 引用存入待执行队列                          |
+ * |   - execute() 时才创建 curl 上下文并分配给工作线程                    |
  * +----------------------------------------------------------------------+
  */
 typedef struct _xhthreadpool_obj {
     xhcurl_obj_t               *curl_obj;        /* 关联的 XHCurl 全局管理器引用 */
     zval                        curl_zval;       /* XHCurl PHP 对象引用（防止 GC 回收） */
     int                         worker_count;    /* 工作线程数量 */
-    xhcurl_req_context_t      **contexts;        /* 所有请求上下文数组 */
-    int                         context_count;   /* 请求上下文总数 */
-    int                         context_capacity;/* 请求上下文数组容量 */
+
+    /* --- 待执行请求队列（add 时入队，execute 时消费） --- */
+    zval                       *pending_requests;/* 待执行请求的 XHRequest zval 数组 */
+    int                         pending_count;   /* 待执行请求数量 */
+    int                         pending_capacity;/* 待执行数组容量 */
+
     zend_object                 std;             /* PHP 对象标准头（必须放在最后） */
 } xhthreadpool_obj_t;
 

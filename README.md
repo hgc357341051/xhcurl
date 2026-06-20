@@ -44,6 +44,8 @@ git push origin v1.0.0
 | **FPM/CLI 通用** | `XHMulti` 基于 `curl_multi` 单进程异步 I/O，FPM 和 CLI 均安全可用 |
 | **CLI 多线程** | `XHThreadPool` 真多线程并发，仅 CLI 模式可用，避免 FPM 线程安全问题 |
 | **内存安全** | 响应体存储在 C 侧 `malloc` 缓冲区，不计入 PHP `memory_limit`，通过 `max_response_size` 限制 |
+| **滑动窗口并发** | `XHMulti` 支持滑动窗口调度，`setMaxConcurrent()` 控制同时活跃请求数，百万级请求内存恒定 |
+| **实时回调** | `execute(callback)` 支持逐条回调结果，完成后立即释放内存，无需等待全部请求结束 |
 | **共享会话** | 基于 `curl_share` 在多个请求间共享 DNS 缓存、SSL 会话、Cookie |
 | **JSON 函数缓存** | MINIT 阶段缓存 `json_encode`/`json_decode` 函数指针，避免每次哈希查找 |
 
@@ -60,6 +62,7 @@ git push origin v1.0.0
 > **注意**：
 > - `XHThreadPool` 在所有平台上仅 CLI 模式可用。
 > - Windows PHP 8.0-8.3 使用 VS 2019 v142 工具集编译，PHP 8.4 使用 VS 2022 v143 工具集编译，确保与官方 PHP Windows 二进制包的编译器版本一致。
+> - Windows 版本使用 Schannel（Windows 原生 TLS）替代 OpenSSL，编译出的 DLL 无外部依赖，无需额外安装 OpenSSL DLL 文件。
 
 ---
 
@@ -104,11 +107,30 @@ php -r "echo xhcurl_version();"
 Windows 编译较复杂，建议直接从 [GitHub Releases](https://github.com/hgc357341051/xhcurl/releases) 下载预编译的 DLL。
 
 ```powershell
-# 1. 下载对应 PHP 版本的 php_xhcurl.dll
-# 2. 复制到 PHP 扩展目录（如 C:\php\ext\）
+# 1. 下载对应 PHP 版本的 DLL 文件
+#    文件名格式：php_xhcurl-windows-php{版本}-nts.dll
+#    例如：php_xhcurl-windows-php8.2-nts.dll
+#    注意：文件名必须以 php_ 开头，这是 Windows 上 PHP 加载扩展的命名要求
+
+# 2. 复制到 PHP 扩展目录
+#    例如：D:\phpEnv\php\php-8.2\ext\
+copy php_xhcurl-windows-php8.2-nts.dll D:\phpEnv\php\php-8.2\ext\
+
 # 3. 在 php.ini 中添加
-# extension=xhcurl
+#    extension= 后的名称 = 文件名去掉 php_ 前缀和 .dll 后缀
+#    php_xhcurl-windows-php8.2-nts.dll → xhcurl-windows-php8.2-nts
+extension=xhcurl-windows-php8.2-nts
+
+# 4. 验证安装
+php -m | findstr xhcurl
 ```
+
+> **Windows DLL 说明**：
+> - DLL 使用 Schannel（Windows 原生 TLS）编译，**无外部 DLL 依赖**，无需安装 OpenSSL
+> - 文件名必须以 `php_` 开头，因为 Windows 上 PHP 加载扩展时会自动添加 `php_` 前缀和 `.dll` 后缀
+> - 如果遇到 "找不到指定的模块" 错误，请确认 PHP 版本和线程安全模式（NTS/TS）是否匹配
+> - 使用 `php -v` 查看 PHP 版本和线程安全信息（NTS = Non Thread Safe）
+> - DLL 文件名中的 `nts` 表示 Non Thread Safe，必须与 PHP 的线程安全模式一致
 
 ### 方式二：从 GitHub Releases 下载预编译包
 
@@ -182,18 +204,27 @@ $curl->setTimeout(10);
 // 创建批量执行器
 $multi = new XHMulti($curl);
 
+// 设置最大并发数（滑动窗口大小，默认 100）
+$multi->setMaxConcurrent(50);
+
 // 添加多个请求
 $multi->add(new XHRequest('https://httpbin.org/get?id=1'));
 $multi->add(new XHRequest('https://httpbin.org/get?id=2'));
 $multi->add(new XHRequest('https://httpbin.org/get?id=3'));
 
-// 并发执行所有请求（基于 curl_multi，单进程异步 I/O）
+// 方式 1：返回全量结果数组
 $responses = $multi->execute();
 
 foreach ($responses as $i => $response) {
     echo "请求 $i: 状态码=" . $response->getStatusCode() 
          . ", 耗时=" . $response->getTotalTime() . "s\n";
 }
+
+// 方式 2：回调模式（推荐，内存恒定）
+$multi->execute(function(XHResponse $response, int $index): void {
+    echo "请求 $index: 状态码=" . $response->getStatusCode() . "\n";
+    // 回调后响应内存立即释放
+});
 ```
 
 ### 示例 3：多线程并发（仅 CLI）
@@ -486,20 +517,45 @@ while ($offset < $totalLen) {
 
 基于 `curl_multi` 接口的批量并发执行器，**FPM 和 CLI 模式通用**。
 
+采用**滑动窗口调度算法**：`add()` 仅将请求引用存入待执行队列，`execute()` 时按 `maxConcurrent` 窗口大小分批创建上下文，一个请求完成立即从队列取下一个补充，保持满窗并发。
+
 #### 方法
 
 | 方法 | 说明 |
 |------|------|
 | `__construct(XHCurl $curl)` | 构造函数，关联全局管理器 |
-| `add(XHRequest $request): void` | 添加请求到批量队列 |
-| `execute(): array` | 并发执行所有请求，返回 `XHResponse[]` |
+| `add(XHRequest $request): void` | 添加请求到待执行队列（延迟创建上下文，节省内存） |
+| `execute(?callable $callback = null): array` | 滑动窗口并发执行，可选回调逐条处理结果 |
+| `setMaxConcurrent(int $max): void` | 设置最大并发数（滑动窗口大小，默认 100） |
+| `getMaxConcurrent(): int` | 获取当前最大并发数 |
 | `count(): int` | 获取已添加的请求数量 |
+
+#### execute() 回调模式
+
+```php
+// 无回调：返回全量结果数组（兼容旧 API，注意内存）
+$responses = $multi->execute();
+
+// 有回调：每完成一个请求立即回调，完成后释放响应内存（推荐）
+$multi->execute(function(XHResponse $response, int $index): void {
+    // $response 是刚完成的请求结果
+    // $index 是请求在队列中的序号
+    // 回调后 $response 的 C 侧缓冲区立即释放，内存恒定
+    if ($response->getStatusCode() === 200) {
+        $data = $response->toJsonArray();
+        // 处理数据（写入数据库、文件等）
+    }
+});
+```
+
+> **百万级请求推荐**：使用回调模式 + `setMaxConcurrent()` 控制并发窗口，内存占用仅与并发窗口大小相关，与总请求数无关。
 
 #### 特点
 
 - 单进程异步 I/O 多路复用，无线程安全问题
+- 滑动窗口调度：内存占用仅与 `maxConcurrent` 相关，与总请求数无关
 - 支持 `onChunk` / `onHeader` 流式回调
-- 请求按添加顺序返回响应
+- 哈希表 O(1) 查找请求上下文，避免线性扫描
 - 执行后自动清空队列，可重复使用
 
 #### 示例
@@ -508,22 +564,74 @@ while ($offset < $totalLen) {
 $curl = new XHCurl();
 $multi = new XHMulti($curl);
 
+// 设置最大并发数（滑动窗口大小）
+$multi->setMaxConcurrent(50); // 同时最多 50 个活跃请求
+
 // 添加请求
 for ($i = 0; $i < 10; $i++) {
     $multi->add(new XHRequest("https://httpbin.org/get?id=$i"));
 }
 
 echo "待执行请求数: " . $multi->count() . "\n";
+echo "最大并发数: " . $multi->getMaxConcurrent() . "\n";
 
-// 并发执行
+// 方式 1：无回调，返回全量结果数组
 $responses = $multi->execute();
 
 foreach ($responses as $i => $response) {
     echo "[$i] 状态码: " . $response->getStatusCode() . "\n";
 }
 
+// 方式 2：回调模式（推荐，内存恒定）
+$multi->execute(function(XHResponse $response, int $index): void {
+    echo "[$index] 状态码: " . $response->getStatusCode() . "\n";
+    // 回调后响应内存立即释放
+});
+
 // 队列已清空，可继续添加新请求
 echo "执行后请求数: " . $multi->count() . "\n"; // 0
+```
+
+#### 百万级请求示例
+
+```php
+<?php
+$curl = new XHCurl();
+$curl->setTimeout(10);
+$curl->setMaxResponseSize(1024 * 1024); // 限制单响应 1MB
+
+$multi = new XHMulti($curl);
+$multi->setMaxConcurrent(200); // 滑动窗口：同时 200 个活跃请求
+
+// 模拟 100 万个请求
+for ($i = 0; $i < 1000000; $i++) {
+    $multi->add(new XHRequest("https://api.example.com/data?id=$i"));
+}
+
+echo "总请求数: " . $multi->count() . "\n";
+
+$processed = 0;
+$failed = 0;
+
+// 回调模式：每完成一个请求立即处理 + 释放内存
+// 内存占用 ≈ 200 个并发请求的上下文 ≈ 几十 MB（与总请求数无关）
+$multi->execute(function(XHResponse $response, int $index) use (&$processed, &$failed): void {
+    if ($response->getStatusCode() === 200) {
+        $data = $response->toJsonArray();
+        // 写入数据库或文件
+        // ...
+        $processed++;
+    } else {
+        $failed++;
+    }
+
+    // 每 10000 个请求输出进度
+    if (($processed + $failed) % 10000 === 0) {
+        echo "进度: " . ($processed + $failed) . " / 1000000\n";
+    }
+});
+
+echo "完成: $processed, 失败: $failed\n";
 ```
 
 ---
@@ -532,12 +640,14 @@ echo "执行后请求数: " . $multi->count() . "\n"; // 0
 
 基于多线程的并发执行器，**仅 CLI 模式可用**，提供真正的并行处理能力。
 
+采用**延迟上下文创建**：`add()` 仅将请求引用存入待执行队列，`execute()` 时按工作线程数分配创建上下文，减少内存占用。
+
 #### 方法
 
 | 方法 | 说明 |
 |------|------|
 | `__construct(XHCurl $curl, int $workers = 4)` | 构造函数，指定工作线程数（1-64） |
-| `add(XHRequest $request): void` | 添加请求到线程池队列 |
+| `add(XHRequest $request): void` | 添加请求到线程池队列（延迟创建上下文） |
 | `execute(): array` | 多线程并发执行，返回 `XHResponse[]` |
 | `count(): int` | 获取已添加的请求数量 |
 
@@ -704,15 +814,33 @@ while ($offset < $response->getBodyLength()) {
 
 `onChunk` 回调在数据到达时实时触发，可以立即写入文件或数据库，内存占用恒定，与响应体大小无关。
 
-### 5. 缓冲区扩容策略
+### 5. 滑动窗口并发控制
+
+`XHMulti` 采用滑动窗口调度算法，内存占用仅与 `maxConcurrent`（并发窗口大小）相关，与总请求数无关：
+
+- `add()` 仅存储请求引用（zval），不创建 curl 上下文
+- `execute()` 按窗口大小分批创建上下文，一个完成立即补充下一个
+- 回调模式下，完成的请求结果立即释放，内存恒定
+- 哈希表 O(1) 查找请求上下文，避免线性扫描
+
+```
+内存占用 ≈ maxConcurrent × 单请求上下文大小
+例如：maxConcurrent=200，单上下文约 50KB → 总内存约 10MB（无论总请求数是 100 还是 100 万）
+```
+
+### 6. 延迟上下文创建
+
+`XHThreadPool` 的 `add()` 仅将请求引用存入待执行队列，`execute()` 时按工作线程数分配创建上下文，避免一次性为所有请求分配资源。
+
+### 7. 缓冲区扩容策略
 
 C 侧缓冲区采用指数增长策略（每次翻倍），减少频繁 `realloc` 调用。
 
-### 6. HTTP/2 多路复用
+### 8. HTTP/2 多路复用
 
 启用 HTTP/2 后，对同一主机的多个请求复用单个 TCP 连接，减少连接建立开销和内存占用。`XHMulti` 批量请求场景下性能提升尤为明显。
 
-### 7. JSON 函数指针缓存
+### 9. JSON 函数指针缓存
 
 在 `MINIT` 阶段一次性查找 `json_encode`/`json_decode` 函数指针并缓存，后续调用直接使用 `zend_call_known_function`，避免每次调用都做函数表哈希查找。
 
@@ -738,6 +866,7 @@ C 侧缓冲区采用指数增长策略（每次翻倍），减少频繁 `realloc
 | **可用功能** | 所有功能，包括 `XHThreadPool` |
 | **多线程** | `XHThreadPool` 真多线程，工作线程不调用 PHP 函数（线程安全） |
 | **流式回调** | `onChunk`/`onHeader` 仅在 `exec` 和 `XHMulti` 中可用，`XHThreadPool` 中无效 |
+| **高并发** | `XHMulti` 支持滑动窗口 + 回调模式，百万级请求内存恒定 |
 | **长时间运行** | 适合批量任务、爬虫、数据同步等场景 |
 | **资源释放** | 脚本结束时自动释放所有资源 |
 
@@ -796,6 +925,63 @@ A:
 **Q: 多线程模式下流式回调不触发**
 
 A: `XHThreadPool` 模式下不支持流式回调（线程安全限制）。如需流式处理，请使用 `XHMulti` 或 `exec`。
+
+**Q: Windows 加载 DLL 报错 "找不到指定的模块"**
+
+A: 此错误通常由以下原因导致：
+
+1. **PHP 版本不匹配**：DLL 文件名中的 PHP 版本必须与实际 PHP 版本一致。使用 `php -v` 确认版本。
+   ```
+   # 正确：PHP 8.2 NTS → xhcurl-windows-php8.2-nts.dll
+   # 错误：PHP 8.2 NTS → xhcurl-windows-php8.3-nts.dll（版本不匹配）
+   ```
+
+2. **线程安全模式不匹配**：NTS（Non Thread Safe）PHP 只能加载 NTS 编译的 DLL。使用 `php -v` 查看：
+   ```
+   # NTS 版本（显示 NTS）：
+   PHP 8.2.0 (cli) (NTS Visual C++ 2019 x64)
+   # TS 版本（显示 ZTS）：
+   PHP 8.2.0 (cli) (ZTS Visual C++ 2019 x64)
+   ```
+
+3. **php.ini 中 extension 名称错误**：`extension=` 后的名称必须与 ext 目录中的文件名一致（不含 .dll 后缀）
+   ```ini
+   ; 如果文件名是 xhcurl-windows-php8.2-nts.dll：
+   extension=xhcurl-windows-php8.2-nts
+
+   ; 如果文件名是 php_xhcurl.dll：
+   extension=php_xhcurl
+   ```
+
+4. **缺少依赖 DLL**（已修复）：v1.0.0 之前的版本可能依赖 OpenSSL DLL。v1.0.0+ 使用 Schannel 编译，无外部依赖。
+
+5. **排查步骤**：
+   ```powershell
+   # 1. 确认 PHP 版本和线程安全模式
+   php -v
+
+   # 2. 确认 DLL 文件存在于扩展目录
+   dir D:\phpEnv\php\php-8.2\ext\xhcurl*
+
+   # 3. 检查 DLL 依赖（需要 Visual Studio 开发者命令提示符）
+   dumpbin /dependents xhcurl-windows-php8.2-nts.dll
+   # 正常应只看到系统 DLL（KERNEL32.dll, WS2_32.dll 等）和 php8.dll
+   # 如果看到 libssl-3-x64.dll 或 libcrypto-3-x64.dll，说明需要安装 OpenSSL
+   ```
+
+**Q: 百万级请求内存溢出怎么办？**
+
+A: 使用 `XHMulti` 的回调模式 + `setMaxConcurrent()` 控制并发窗口：
+```php
+$multi = new XHMulti($curl);
+$multi->setMaxConcurrent(200); // 同时最多 200 个活跃请求
+
+// 回调模式：每完成一个请求立即处理 + 释放内存
+$multi->execute(function(XHResponse $response, int $index): void {
+    // 处理结果后内存立即释放
+});
+```
+内存占用仅与 `maxConcurrent` 相关，与总请求数无关。
 
 ---
 

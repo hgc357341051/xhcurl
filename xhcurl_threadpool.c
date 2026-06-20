@@ -2,6 +2,8 @@
  * | XHCurl 扩展 - XHThreadPool CLI线程池类实现                           |
  * | 仅在 CLI 模式下可用，使用多线程并发执行请求                           |
  * | 核心设计：                                                            |
+ * |   - add() 仅入队 XHRequest 引用，延迟创建 curl 上下文                |
+ * |   - execute() 时才创建上下文并分配给工作线程                          |
  * |   - 每个工作线程独立运行 curl_multi 事件循环                          |
  * |   - 工作线程中不调用任何 PHP 函数（线程安全限制）                     |
  * |   - 请求结果在工作线程中缓冲，完成后由主线程创建 XHResponse 对象      |
@@ -137,16 +139,16 @@ static void xhthreadpool_free_obj(zend_object *object)
     /* 从 zend_object 获取 XHThreadPool 对象 */
     xhthreadpool_obj_t *obj = XHTHREADPOOL_OBJ_FROM_ZOBJ(object);
 
-    /* 释放所有请求上下文 */
-    if (obj->contexts != NULL) {
-        for (int i = 0; i < obj->context_count; i++) {
-            if (obj->contexts[i] != NULL) {
-                xhcurl_context_free(obj->contexts[i]);
-                obj->contexts[i] = NULL;
+    /* 释放待执行请求队列中的 XHRequest 引用 */
+    if (obj->pending_requests != NULL) {
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (!Z_ISUNDEF(obj->pending_requests[i])) {
+                zval_ptr_dtor(&obj->pending_requests[i]);
+                ZVAL_UNDEF(&obj->pending_requests[i]);
             }
         }
-        efree(obj->contexts);
-        obj->contexts = NULL;
+        efree(obj->pending_requests);
+        obj->pending_requests = NULL;
     }
 
     /* 释放 XHCurl PHP 对象引用 */
@@ -178,9 +180,9 @@ static zend_object *xhthreadpool_create_obj(zend_class_entry *class_type)
     /* 初始化自定义字段 */
     obj->curl_obj = NULL;               /* XHCurl 引用在构造函数中设置 */
     obj->worker_count = XHCURL_DEFAULT_THREAD_POOL_SIZE; /* 默认 4 个工作线程 */
-    obj->contexts = NULL;               /* 请求上下文数组在首次 add 时分配 */
-    obj->context_count = 0;             /* 初始请求数为 0 */
-    obj->context_capacity = 0;          /* 初始容量为 0 */
+    obj->pending_requests = NULL;       /* 待执行队列在首次 add 时分配 */
+    obj->pending_count = 0;             /* 初始待执行数为 0 */
+    obj->pending_capacity = 0;          /* 初始容量为 0 */
     ZVAL_UNDEF(&obj->curl_zval);        /* 初始化 XHCurl 引用 */
 
     /* 设置对象释放函数 */
@@ -241,6 +243,9 @@ PHP_METHOD(XHThreadPool, __construct)
 /**
  * 添加请求到线程池
  * XHThreadPool::add(XHRequest $request): void
+ *
+ * 延迟创建模式：add() 仅将 XHRequest 引用存入待执行队列，
+ * 不创建 curl 上下文。上下文在 execute() 时按需创建。
  * 注意：线程池模式下 onChunk/onHeader 回调无效
  */
 PHP_METHOD(XHThreadPool, add)
@@ -254,44 +259,41 @@ PHP_METHOD(XHThreadPool, add)
 
     /* 获取 XHThreadPool 对象 */
     xhthreadpool_obj_t *obj = XHTHREADPOOL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
-    /* 获取 XHRequest 对象 */
-    xhrequest_obj_t *req_obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(request_zv));
 
-    /* 创建请求执行上下文 */
-    xhcurl_req_context_t *ctx = xhcurl_context_create(obj->curl_obj, req_obj);
-    if (ctx == NULL) {
-        zend_throw_exception(xhcurl_exception_ce, "Failed to create request context", 0);
-        return;
-    }
-
-    /* 检查是否需要扩容 */
-    if (obj->context_count >= obj->context_capacity) {
-        /* 计算新容量（初始 16，之后翻倍增长） */
-        int new_capacity = (obj->context_capacity == 0) ? 16 : obj->context_capacity * 2;
-        /* 重新分配上下文数组 */
-        obj->contexts = (xhcurl_req_context_t **)erealloc(
-            obj->contexts, new_capacity * sizeof(xhcurl_req_context_t *));
-        if (obj->contexts == NULL) {
-            xhcurl_context_free(ctx);
-            zend_throw_exception(xhcurl_exception_ce, "Failed to allocate context array", 0);
+    /* 检查是否需要扩容待执行队列 */
+    if (obj->pending_count >= obj->pending_capacity) {
+        /* 计算新容量（初始 64，之后翻倍增长） */
+        int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
+        /* 重新分配队列数组 */
+        obj->pending_requests = (zval *)erealloc(
+            obj->pending_requests, new_capacity * sizeof(zval));
+        if (obj->pending_requests == NULL) {
+            zend_throw_exception(xhcurl_exception_ce, "Failed to allocate pending queue", 0);
             return;
         }
-        /* 初始化新分配的空间为 NULL */
-        for (int i = obj->context_capacity; i < new_capacity; i++) {
-            obj->contexts[i] = NULL;
+        /* 初始化新分配的空间 */
+        for (int i = obj->pending_count; i < new_capacity; i++) {
+            ZVAL_UNDEF(&obj->pending_requests[i]);
         }
-        obj->context_capacity = new_capacity;
+        obj->pending_capacity = new_capacity;
     }
 
-    /* 将上下文添加到数组 */
-    obj->contexts[obj->context_count] = ctx;
-    obj->context_count++;
+    /* 将 XHRequest 引用存入待执行队列（仅增加引用计数，不创建 curl 上下文） */
+    ZVAL_COPY(&obj->pending_requests[obj->pending_count], request_zv);
+    obj->pending_count++;
 }
 
 /**
  * 执行所有已添加的请求（多线程并发）
  * XHThreadPool::execute(): array
- * 阻塞等待所有工作线程完成，返回 XHResponse 对象数组
+ *
+ * 执行流程：
+ *   1. 从 pending 队列创建所有请求上下文（此时才创建 curl 句柄）
+ *   2. 将上下文均匀分配给各工作线程
+ *   3. 启动所有工作线程并发执行
+ *   4. 等待所有线程完成
+ *   5. 为每个请求创建 XHResponse 对象
+ *   6. 释放所有上下文资源
  */
 PHP_METHOD(XHThreadPool, execute)
 {
@@ -302,27 +304,79 @@ PHP_METHOD(XHThreadPool, execute)
     xhthreadpool_obj_t *obj = XHTHREADPOOL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
     /* 检查是否有请求需要执行 */
-    if (obj->context_count == 0) {
+    if (obj->pending_count == 0) {
         array_init(return_value);
         return;
     }
 
-    /* 计算每个工作线程分配的请求数量 */
-    int actual_workers = (obj->context_count < obj->worker_count) ?
-                          obj->context_count : obj->worker_count;
+    /* --- 阶段 1：从 pending 队列创建所有请求上下文 --- */
+    /* 此时才创建 curl easy 句柄，分配网络资源 */
+    xhcurl_req_context_t **contexts = (xhcurl_req_context_t **)ecalloc(
+        obj->pending_count, sizeof(xhcurl_req_context_t *));
+    if (contexts == NULL) {
+        zend_throw_exception(xhcurl_exception_ce, "Failed to allocate context array", 0);
+        return;
+    }
+
+    int context_count = 0; /* 成功创建的上下文数量 */
+    for (int i = 0; i < obj->pending_count; i++) {
+        /* 获取 XHRequest 内部对象 */
+        xhrequest_obj_t *req_obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(&obj->pending_requests[i]));
+
+        /* 创建请求执行上下文 */
+        xhcurl_req_context_t *ctx = xhcurl_context_create(obj->curl_obj, req_obj);
+        if (ctx == NULL) {
+            /* 创建失败，跳过此请求 */
+            contexts[i] = NULL;
+            continue;
+        }
+
+        /* 保存 XHRequest PHP 对象引用 */
+        ZVAL_COPY(&ctx->request_zval, &obj->pending_requests[i]);
+
+        contexts[i] = ctx;
+        context_count++;
+    }
+
+    /* 检查是否有成功创建的上下文 */
+    if (context_count == 0) {
+        /* 所有上下文创建失败 */
+        efree(contexts);
+        array_init(return_value);
+        /* 清理 pending 队列 */
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (!Z_ISUNDEF(obj->pending_requests[i])) {
+                zval_ptr_dtor(&obj->pending_requests[i]);
+                ZVAL_UNDEF(&obj->pending_requests[i]);
+            }
+        }
+        obj->pending_count = 0;
+        return;
+    }
+
+    /* --- 阶段 2：将请求均匀分配给各工作线程 --- */
+    int actual_workers = (context_count < obj->worker_count) ?
+                          context_count : obj->worker_count;
 
     /* 分配工作线程参数数组 */
     xhcurl_worker_arg_t *workers = (xhcurl_worker_arg_t *)ecalloc(
         actual_workers, sizeof(xhcurl_worker_arg_t));
     if (workers == NULL) {
+        /* 分配失败，释放所有上下文 */
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (contexts[i] != NULL) {
+                xhcurl_context_free(contexts[i]);
+            }
+        }
+        efree(contexts);
         zend_throw_exception(xhcurl_exception_ce, "Failed to allocate worker args", 0);
         return;
     }
 
     /* 将请求均匀分配给各工作线程 */
-    int base_count = obj->context_count / actual_workers;   /* 每个线程的基础请求数 */
-    int remainder = obj->context_count % actual_workers;     /* 余数（前 remainder 个线程多处理一个） */
-    int ctx_offset = 0;                                      /* 请求上下文数组偏移量 */
+    int base_count = context_count / actual_workers;   /* 每个线程的基础请求数 */
+    int remainder = context_count % actual_workers;     /* 余数（前 remainder 个线程多处理一个） */
+    int ctx_offset = 0;                                 /* 请求上下文数组偏移量 */
 
     for (int i = 0; i < actual_workers; i++) {
         /* 计算当前线程负责的请求数量 */
@@ -330,7 +384,7 @@ PHP_METHOD(XHThreadPool, execute)
 
         /* 初始化工作线程参数 */
         workers[i].worker_id = i;
-        workers[i].contexts = &obj->contexts[ctx_offset];
+        workers[i].contexts = &contexts[ctx_offset];
         workers[i].context_count = count;
         workers[i].done = 0;
         workers[i].error = 0;
@@ -339,7 +393,7 @@ PHP_METHOD(XHThreadPool, execute)
         ctx_offset += count;
     }
 
-    /* 创建并启动工作线程 */
+    /* --- 阶段 3：创建并启动工作线程 --- */
 #ifdef PHP_WIN32
     /* Windows 平台：使用 _beginthreadex */
     HANDLE *thread_handles = (HANDLE *)ecalloc(actual_workers, sizeof(HANDLE));
@@ -390,13 +444,13 @@ PHP_METHOD(XHThreadPool, execute)
     efree(thread_ids);
 #endif
 
-    /* 为每个请求创建 XHResponse PHP 对象 */
-    array_init_size(return_value, obj->context_count);
+    /* --- 阶段 4：为每个请求创建 XHResponse PHP 对象 --- */
+    array_init_size(return_value, obj->pending_count);
 
-    for (int i = 0; i < obj->context_count; i++) {
-        xhcurl_req_context_t *ctx = obj->contexts[i];
+    for (int i = 0; i < obj->pending_count; i++) {
+        xhcurl_req_context_t *ctx = contexts[i];
         if (ctx == NULL) {
-            /* 上下文为空，添加一个空响应 */
+            /* 上下文为空（创建失败），添加一个空响应 */
             zval null_zv;
             ZVAL_NULL(&null_zv);
             add_next_index_zval(return_value, &null_zv);
@@ -449,20 +503,25 @@ PHP_METHOD(XHThreadPool, execute)
         add_next_index_zval(return_value, &response_zv);
     }
 
-    /* 释放所有请求上下文 */
-    for (int i = 0; i < obj->context_count; i++) {
-        if (obj->contexts[i] != NULL) {
-            xhcurl_context_free(obj->contexts[i]);
-            obj->contexts[i] = NULL;
+    /* --- 阶段 5：释放所有请求上下文 --- */
+    for (int i = 0; i < obj->pending_count; i++) {
+        if (contexts[i] != NULL) {
+            xhcurl_context_free(contexts[i]);
         }
     }
-
-    /* 重置请求数量和容量 */
-    obj->context_count = 0;
-    /* 注意：不重置 context_capacity，保留已分配的内存供下次使用 */
+    efree(contexts);
 
     /* 释放工作线程参数 */
     efree(workers);
+
+    /* 清理 pending 队列 */
+    for (int i = 0; i < obj->pending_count; i++) {
+        if (!Z_ISUNDEF(obj->pending_requests[i])) {
+            zval_ptr_dtor(&obj->pending_requests[i]);
+            ZVAL_UNDEF(&obj->pending_requests[i]);
+        }
+    }
+    obj->pending_count = 0;
 }
 
 /**
@@ -477,8 +536,8 @@ PHP_METHOD(XHThreadPool, count)
     /* 获取 XHThreadPool 对象 */
     xhthreadpool_obj_t *obj = XHTHREADPOOL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 返回请求数量 */
-    RETURN_LONG(obj->context_count);
+    /* 返回待执行请求数量 */
+    RETURN_LONG(obj->pending_count);
 }
 
 /* +----------------------------------------------------------------------+
