@@ -389,7 +389,7 @@ jobs:
       # 步骤 5: 安装 libcurl 开发库（通过 vcpkg）
       # vcpkg 是 Microsoft 的 C++ 包管理器，预装在 GitHub runner 上
       #
-      # 关键设计决策：使用 schannel（Windows 原生 TLS）替代 OpenSSL
+      # 关键设计决策：使用 SSPI/Schannel（Windows 原生 TLS）替代 OpenSSL
       # 为什么？
       #   1. 完全静态链接：schannel 是 Windows 系统组件，不需要额外 DLL
       #      OpenSSL 静态链接后仍可能依赖 libssl-3-x64.dll / libcrypto-3-x64.dll
@@ -398,8 +398,10 @@ jobs:
       #   3. 零依赖体验：用户只需下载一个 DLL 文件即可使用
       #
       # vcpkg curl 特性选择：
-      #   curl[schannel]  - 使用 Windows Schannel TLS（无外部 DLL 依赖）
+      #   curl[sspi]      - Windows SSPI 支持（包含 Schannel TLS，无外部 DLL 依赖）
+      #   curl[ssl]       - 默认 SSL（Windows 上自动选择 sspi，非 Windows 选择 openssl）
       #   curl[openssl]   - 使用 OpenSSL（需要额外 DLL，不推荐 Windows 部署）
+      #   注意：curl[schannel] 不是 vcpkg 的有效特性名！
       #
       # Triplet 选择：
       #   x64-windows-static-md - 静态链接 + 动态 CRT /MD（与 PHP 匹配，首选）
@@ -408,26 +410,55 @@ jobs:
       - name: Install libcurl via vcpkg
         shell: pwsh
         run: |
-          # 使用 schannel 特性安装 curl（Windows 原生 TLS，无外部 DLL 依赖）
+          # 先更新 vcpkg 到最新版本（确保 triplet 和特性可用）
+          Write-Host "=== 更新 vcpkg ==="
+          git -C C:\vcpkg pull 2>&1 | Select-Object -Last 3
+          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics 2>&1 | Select-Object -Last 3
+
+          # 使用 SSPI/Schannel 特性安装 curl（Windows 原生 TLS，无外部 DLL 依赖）
+          # curl[sspi] 在 Windows 上启用 Schannel TLS 后端
           # 优先使用 x64-windows-static-md（静态链接 + 动态 CRT /MD，与 PHP 匹配）
-          $triplet = "x64-windows-static-md"
+          $triplet = ""
           $installOk = $false
+
+          # 尝试 1: x64-windows-static-md + sspi
+          $triplet = "x64-windows-static-md"
+          Write-Host "=== 尝试安装 curl[sspi]:$triplet ==="
           try {
-            Write-Host "尝试安装 curl[schannel]:$triplet ..."
-            vcpkg install "curl[schannel]:$triplet" 2>&1 | Out-Null
+            vcpkg install "curl[sspi]:$triplet" 2>&1 | Select-Object -Last 5
             if ($LASTEXITCODE -eq 0) {
               $installOk = $true
               Write-Host "成功使用 triplet: $triplet"
             }
           } catch {
-            Write-Host "curl[schannel]:$triplet 安装失败"
+            Write-Host "curl[sspi]:$triplet 安装失败"
           }
 
-          # 如果 static-md 不可用，回退到 x64-windows-static
+          # 尝试 2: x64-windows-static + sspi（回退）
           if (-not $installOk) {
             $triplet = "x64-windows-static"
-            Write-Host "回退到 triplet: $triplet"
-            vcpkg install "curl[schannel]:$triplet"
+            Write-Host "=== 回退到 curl[sspi]:$triplet ==="
+            vcpkg install "curl[sspi]:$triplet" 2>&1 | Select-Object -Last 5
+            if ($LASTEXITCODE -eq 0) {
+              $installOk = $true
+              Write-Host "成功使用 triplet: $triplet"
+            }
+          }
+
+          # 尝试 3: x64-windows-static + ssl（最终回退，Windows 上 ssl 默认选 sspi）
+          if (-not $installOk) {
+            $triplet = "x64-windows-static"
+            Write-Host "=== 最终回退到 curl[ssl]:$triplet ==="
+            vcpkg install "curl[ssl]:$triplet" 2>&1 | Select-Object -Last 5
+            if ($LASTEXITCODE -eq 0) {
+              $installOk = $true
+              Write-Host "成功使用 triplet: $triplet"
+            }
+          }
+
+          if (-not $installOk) {
+            Write-Host "::error::所有 vcpkg 安装尝试均失败"
+            exit 1
           }
 
           # 集成到 MSVC 构建系统
@@ -436,8 +467,14 @@ jobs:
           # 根据 triplet 确定安装路径
           $curlDir = "C:\vcpkg\installed\$triplet"
           if (-not (Test-Path $curlDir)) {
-            # 回退：尝试 x64-windows-static 路径
-            $curlDir = "C:\vcpkg\installed\x64-windows-static"
+            # 尝试其他可能的路径
+            $altPaths = @("C:\vcpkg\installed\x64-windows-static-md", "C:\vcpkg\installed\x64-windows-static")
+            foreach ($alt in $altPaths) {
+              if (Test-Path "$alt\include\curl\curl.h") {
+                $curlDir = $alt
+                break
+              }
+            }
           }
           echo "CURL_DIR=$curlDir" >> $env:GITHUB_ENV
           echo "VCPKG_TRIPLET=$triplet" >> $env:GITHUB_ENV
@@ -447,7 +484,9 @@ jobs:
           if (Test-Path "$curlDir\include\curl\curl.h") {
             Write-Host "curl.h 找到"
           } else {
-            Write-Host "::error::curl.h 未找到"
+            Write-Host "::error::curl.h 未找到，列出已安装的 vcpkg 包"
+            vcpkg list
+            Get-ChildItem -Path "C:\vcpkg\installed" -Recurse -Filter "curl.h" | ForEach-Object { Write-Host "  找到: $($_.FullName)" }
             exit 1
           }
 
@@ -456,20 +495,23 @@ jobs:
             Write-Host "libcurl.lib 找到"
           } else {
             Write-Host "::warning::libcurl.lib 未找到，列出 lib 目录内容"
-            Get-ChildItem -Path "$curlDir\lib" -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
+            if (Test-Path "$curlDir\lib") {
+              Get-ChildItem -Path "$curlDir\lib" -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
+            } else {
+              Write-Host "lib 目录不存在"
+            }
           }
 
-          # 验证 schannel 后端：检查 libcurl.lib 中是否包含 Schannel 相关符号
-          # 如果链接了 OpenSSL，则说明 schannel 特性未生效
+          # 验证 Schannel 后端：检查 libcurl.lib 中是否包含 Schannel 相关符号
+          # 如果链接了 OpenSSL，则说明 sspi 特性未生效
           Write-Host "=== 验证 curl TLS 后端 ==="
           $libPath = "$curlDir\lib\libcurl.lib"
           if (Test-Path $libPath) {
-            # 检查 libcurl.lib 依赖的 DLL（静态库应无外部 DLL 依赖）
-            $dumpbinOutput = & dumpbin /rawdata:1 "$libPath" 2>&1 | Select-String -Pattern "openssl|libssl|libcrypto|schannel" -CaseSensitive:$false
+            $dumpbinOutput = & dumpbin /rawdata:1 "$libPath" 2>&1 | Select-String -Pattern "openssl|libssl|libcrypto|schannel|sspi" -CaseSensitive:$false
             if ($dumpbinOutput -match "openssl|libssl|libcrypto") {
               Write-Host "::warning::检测到 OpenSSL 依赖，DLL 可能需要额外的 OpenSSL DLL 文件"
-            } elseif ($dumpbinOutput -match "schannel") {
-              Write-Host "确认使用 Schannel 后端（Windows 原生 TLS，零外部依赖）"
+            } elseif ($dumpbinOutput -match "schannel|sspi") {
+              Write-Host "确认使用 Schannel/SSPI 后端（Windows 原生 TLS，零外部依赖）"
             } else {
               Write-Host "无法确定 TLS 后端，将在编译后通过 dumpbin /dependents 验证"
             }
