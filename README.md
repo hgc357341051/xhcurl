@@ -19,6 +19,7 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
   - [XHResponse - 懒加载响应](#xhresponse---懒加载响应)
   - [XHMulti - 批量异步执行器](#xhmulti---批量异步执行器)
   - [XHThreadPool - CLI 线程池](#xhthreadpool---cli-线程池)
+- [链式调用](#链式调用)
 - [使用场景](#使用场景)
 - [内存优化设计](#内存优化设计)
 - [FPM 与 CLI 模式注意事项](#fpm-与-cli-模式注意事项)
@@ -34,6 +35,7 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 | **三种执行模式** | 同步单次（`exec`）、批量异步（`XHMulti`）、多线程并发（`XHThreadPool`） |
 | **HTTP/2 支持** | 自动协议协商升级，启用多路复用（multiplexing）提升并发性能 |
 | **失败重试** | 网络错误或 HTTP 5xx 自动重试，可配置重试次数和间隔 |
+| **链式调用** | 所有 setter 方法返回 `$this`，支持流畅的链式 API |
 | **流式回调** | `onChunk()` / `onHeader()` 实时处理响应数据，避免一次性加载到内存 |
 | **懒加载响应** | `getBodyChunk(offset, length)` 按需分段读取响应体，防止内存溢出 |
 | **两级配置** | 全局配置（`XHCurl`）+ 请求级配置（`XHRequest`），请求级覆盖全局 |
@@ -42,6 +44,7 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 | **内存安全** | 响应体存储在 C 侧 `malloc` 缓冲区，不计入 PHP `memory_limit`，通过 `max_response_size` 限制 |
 | **滑动窗口并发** | `XHMulti` 支持滑动窗口调度，`setMaxConcurrent()` 控制同时活跃请求数，百万级请求内存恒定 |
 | **实时回调** | `execute(callback)` 支持逐条回调结果，完成后立即释放内存，无需等待全部请求结束 |
+| **用户数据传递** | `add()` 支持可选 `userData` 参数，回调中通过 `getUserData()` 获取 |
 | **共享会话** | 基于 `curl_share` 在多个请求间共享 DNS 缓存、SSL 会话、Cookie |
 | **JSON 函数缓存** | MINIT 阶段缓存 `json_encode`/`json_decode` 函数指针，避免每次哈希查找 |
 
@@ -157,15 +160,15 @@ php -r "var_dump(class_exists('XHCurl'));"
 
 ```php
 <?php
-// 创建全局管理器
-$curl = new XHCurl();
-$curl->setTimeout(30);
-$curl->setVerifySsl(false);
-$curl->setUserAgent('MyApp/1.0');
+// 创建全局管理器（链式调用）
+$curl = (new XHCurl())
+    ->setTimeout(30)
+    ->setVerifySsl(false)
+    ->setUserAgent('MyApp/1.0');
 
-// 创建请求
-$request = new XHRequest('https://httpbin.org/get');
-$request->setHeader('X-Custom-Header', 'hello');
+// 创建请求（链式调用）
+$request = (new XHRequest('https://httpbin.org/get'))
+    ->setHeader('X-Custom-Header', 'hello');
 
 // 同步执行
 $response = $curl->exec($request);
@@ -194,32 +197,29 @@ if ($response->isJson()) {
 
 ```php
 <?php
-$curl = new XHCurl();
-$curl->setTimeout(10);
+$curl = (new XHCurl())->setTimeout(10);
 
-// 创建批量执行器
-$multi = new XHMulti($curl);
+// 创建批量执行器（链式设置并发数）
+$multi = (new XHMulti($curl))
+    ->setMaxConcurrent(50);
 
-// 设置最大并发数（滑动窗口大小，默认 100）
-$multi->setMaxConcurrent(50);
-
-// 添加多个请求
-$multi->add(new XHRequest('https://httpbin.org/get?id=1'));
-$multi->add(new XHRequest('https://httpbin.org/get?id=2'));
+// 添加多个请求（可传递 userData）
+$multi->add(new XHRequest('https://httpbin.org/get?id=1'), ['tag' => 'first']);
+$multi->add(new XHRequest('https://httpbin.org/get?id=2'), ['tag' => 'second']);
 $multi->add(new XHRequest('https://httpbin.org/get?id=3'));
 
 // 方式 1：返回全量结果数组
 $responses = $multi->execute();
 
 foreach ($responses as $i => $response) {
-    echo "请求 $i: 状态码=" . $response->getStatusCode() 
+    echo "请求 $i: 状态码=" . $response->getStatusCode()
          . ", 耗时=" . $response->getTotalTime() . "s\n";
 }
 
 // 方式 2：回调模式（推荐，内存恒定）
-$multi->execute(function(XHResponse $response, int $index): void {
-    echo "请求 $index: 状态码=" . $response->getStatusCode() . "\n";
-    // 回调后响应内存立即释放
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
+    $tag = $userData['tag'] ?? 'unknown';
+    echo "[$completed/$total] $tag: 状态码=" . $response->getStatusCode() . "\n";
 });
 ```
 
@@ -253,18 +253,18 @@ echo "完成请求数: " . count($responses) . "\n";
 
 ```php
 <?php
-$curl = new XHCurl();
-$curl->setMaxResponseSize(100 * 1024 * 1024); // 允许 100MB 响应
+$curl = (new XHCurl())
+    ->setMaxResponseSize(100 * 1024 * 1024); // 允许 100MB 响应
 
 $request = new XHRequest('https://example.com/large-file.zip');
 
-// 注册流式回调：每收到一段数据就触发
+// 注册流式回调：每收到一段数据就触发（链式调用）
 $totalReceived = 0;
 $request->onChunk(function($chunk) use (&$totalReceived) {
     $totalReceived += strlen($chunk);
     // 实时写入文件，避免内存堆积
     file_put_contents('download.zip', $chunk, FILE_APPEND);
-    
+
     // 每 1MB 输出进度
     if ($totalReceived % (1024 * 1024) < strlen($chunk)) {
         echo "已下载: " . round($totalReceived / 1024 / 1024, 2) . " MB\n";
@@ -297,6 +297,7 @@ if ($response->getStatusCode() === 201) {
     echo "创建用户成功，ID: " . $user['id'] . "\n";
 } else {
     echo "请求失败: " . $response->getError() . "\n";
+    echo "curl 错误码: " . $response->getCurlCode() . "\n";
 }
 ```
 
@@ -304,19 +305,17 @@ if ($response->getStatusCode() === 201) {
 
 ```php
 <?php
-$curl = new XHCurl();
-
-// 设置全局 Cookie（所有请求都会携带）
-$curl->setGlobalCookie('session_id', 'abc123', 'example.com', '/');
-$curl->setGlobalCookie('tracking', 'xyz789');
+$curl = (new XHCurl())
+    ->setGlobalCookie('session_id', 'abc123', 'example.com', '/')
+    ->setGlobalCookie('tracking', 'xyz789');
 
 // 请求 1：使用全局 Cookie
 $req1 = new XHRequest('https://example.com/api/profile');
 
-// 请求 2：覆盖全局 Cookie + 添加请求级 Cookie
-$req2 = new XHRequest('https://example.com/api/admin');
-$req2->setCookie('session_id', 'admin-session'); // 覆盖全局
-$req2->setCookie('admin_flag', '1');              // 请求级独有
+// 请求 2：覆盖全局 Cookie + 添加请求级 Cookie（链式调用）
+$req2 = (new XHRequest('https://example.com/api/admin'))
+    ->setCookie('session_id', 'admin-session') // 覆盖全局
+    ->setCookie('admin_flag', '1');             // 请求级独有
 
 $multi = new XHMulti($curl);
 $multi->add($req1);
@@ -328,12 +327,9 @@ $responses = $multi->execute();
 
 ```php
 <?php
-$curl = new XHCurl();
-
-// 启用 HTTP/2（默认已启用，对支持的服务器自动升级协议）
-// HTTP/2 多路复用允许在单个 TCP 连接上并发多个请求，大幅提升性能
-$curl->setHttp2(true);
-$curl->setTimeout(10);
+$curl = (new XHCurl())
+    ->setHttp2(true)   // 启用 HTTP/2（默认已启用）
+    ->setTimeout(10);
 
 // 批量请求同一域名，HTTP/2 多路复用将复用同一连接
 $multi = new XHMulti($curl);
@@ -353,14 +349,11 @@ echo "相比 HTTP/1.1 的 20 个串行连接，HTTP/2 多路复用显著降低�
 
 ```php
 <?php
-$curl = new XHCurl();
-
 // 配置重试：网络错误（连接超时、DNS 失败等）或 HTTP 5xx 自动重试
-// 参数1：重试次数（0 = 不重试）
-// 参数2：重试间隔（毫秒，默认 100ms）
-$curl->setRetry(3, 200);
-$curl->setTimeout(5);
-$curl->setConnectTimeout(3);
+$curl = (new XHCurl())
+    ->setRetry(3, 200)     // 最多重试 3 次，间隔 200ms
+    ->setTimeout(5)
+    ->setConnectTimeout(3);
 
 // 对不稳定的服务器发起请求，自动重试最多 3 次
 $request = new XHRequest('https://httpbin.org/status/500');
@@ -369,6 +362,7 @@ $response = $curl->exec($request);
 // 即使重试 3 次后仍为 500，也不会崩溃
 echo "最终状态码: " . $response->getStatusCode() . "\n";
 echo "错误信息: " . ($response->getError() ?? '无') . "\n";
+echo "curl 错误码: " . $response->getCurlCode() . "\n";
 
 // 重试场景示例：
 // 1. 服务器临时 502/503/504 → 重试后可能恢复
@@ -404,6 +398,7 @@ echo "错误信息: " . ($response->getError() ?? '无') . "\n";
 #### 示例
 
 ```php
+// 传统写法
 $curl = new XHCurl();
 $curl->setGlobalHeader('Authorization', 'Bearer token');
 $curl->setGlobalHeader('Accept', 'application/json');
@@ -412,15 +407,20 @@ $curl->setConnectTimeout(10);
 $curl->setVerifySsl(true);
 $curl->setUserAgent('MyApp/2.0');
 $curl->setProxy('http://proxy.example.com:8080');
-$curl->setMaxResponseSize(50 * 1024 * 1024); // 50MB
+$curl->setMaxResponseSize(50 * 1024 * 1024);
+$curl->setRetry(3, 200);
 
-// HTTP/2 配置（默认已启用，对支持 HTTP/2 的服务器自动升级协议）
-$curl->setHttp2(true);  // 启用 HTTP/2 多路复用（默认）
-// $curl->setHttp2(false); // 禁用 HTTP/2，强制使用 HTTP/1.1
-
-// 失败重试配置（网络错误或 HTTP 5xx 自动重试）
-$curl->setRetry(3, 200);  // 最多重试 3 次，间隔 200ms
-// $curl->setRetry(0);     // 禁用重试（默认）
+// 链式调用写法（推荐）
+$curl = (new XHCurl())
+    ->setGlobalHeader('Authorization', 'Bearer token')
+    ->setGlobalHeader('Accept', 'application/json')
+    ->setTimeout(60)
+    ->setConnectTimeout(10)
+    ->setVerifySsl(true)
+    ->setUserAgent('MyApp/2.0')
+    ->setProxy('http://proxy.example.com:8080')
+    ->setMaxResponseSize(50 * 1024 * 1024)
+    ->setRetry(3, 200);
 ```
 
 ---
@@ -434,16 +434,16 @@ $curl->setRetry(3, 200);  // 最多重试 3 次，间隔 200ms
 | 方法 | 说明 |
 |------|------|
 | `__construct(string $url)` | 构造函数，指定请求 URL |
-| `setMethod(string $method): void` | 设置 HTTP 方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS） |
-| `setHeader(string $name, string $value): void` | 设置请求级头部（覆盖全局同名头部） |
-| `setCookie(string $name, string $value): void` | 设置请求级 Cookie（覆盖全局同名 Cookie） |
-| `setBody(string $body): void` | 设置原始请求体 |
-| `setJsonBody(array $data): void` | 设置 JSON 请求体（自动设置 Content-Type） |
-| `setTimeout(int $seconds): void` | 设置请求级超时（0 表示使用全局默认值） |
-| `setConnectTimeout(int $seconds): void` | 设置请求级连接超时 |
-| `setFollowRedirects(bool $follow, int $max = 5): void` | 是否跟随重定向 |
-| `onChunk(callable $callback): void` | 注册流式数据回调（仅 `exec` 和 `XHMulti` 可用） |
-| `onHeader(callable $callback): void` | 注册响应头回调 |
+| `setMethod(string $method): static` | 设置 HTTP 方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS，链式） |
+| `setHeader(string $name, string $value): static` | 设置请求级头部（覆盖全局同名头部，链式） |
+| `setCookie(string $name, string $value): static` | 设置请求级 Cookie（覆盖全局同名 Cookie，链式） |
+| `setBody(string $body): static` | 设置原始请求体（链式） |
+| `setJsonBody(array $data): static` | 设置 JSON 请求体（自动设置 Content-Type，链式） |
+| `setTimeout(int $seconds): static` | 设置请求级超时（0 表示使用全局默认值，链式） |
+| `setConnectTimeout(int $seconds): static` | 设置请求级连接超时（链式） |
+| `setFollowRedirects(bool $follow, int $max = 5): static` | 是否跟随重定向（链式） |
+| `onChunk(callable $callback): static` | 注册流式数据回调（仅 `exec` 和 `XHMulti` 可用，链式） |
+| `onHeader(callable $callback): static` | 注册响应头回调（链式） |
 | `getUrl(): string` | 获取请求 URL |
 
 #### 流式回调签名
@@ -484,6 +484,8 @@ $request->onHeader(function(string $headerLine): void {
 | `toJsonArray(): ?array` | 将响应体解析为 PHP 数组（按需解析） |
 | `getError(): ?string` | 获取错误信息（成功时为 null） |
 | `getTotalTime(): float` | 获取请求总耗时（秒） |
+| `getCurlCode(): int` | 获取 curl 错误码（0 = CURLE_OK 成功，其他值见 [curl 错误码](https://curl.se/libcurl/c/libcurl-errors.html)） |
+| `getUserData(): mixed` | 获取 `add()` 时传递的用户自定义数据（未设置返回 null） |
 
 #### 分段读取示例
 
@@ -499,11 +501,31 @@ $chunkSize = 4096;
 while ($offset < $totalLen) {
     $chunk = $response->getBodyChunk($offset, $chunkSize);
     if ($chunk === '') break;
-    
+
     // 处理 $chunk
     processChunk($chunk);
-    
+
     $offset += strlen($chunk);
+}
+```
+
+#### 错误诊断示例
+
+```php
+$response = $curl->exec($request);
+
+if ($response->getCurlCode() !== 0) {
+    // curl 层面出错（网络错误、超时、DNS 失败等）
+    echo "curl 错误码: " . $response->getCurlCode() . "\n";
+    echo "错误描述: " . $response->getError() . "\n";
+    // 常见错误码：
+    // 6  = CURLE_COULDNT_RESOLVE_HOST（DNS 解析失败）
+    // 7  = CURLE_COULDNT_CONNECT（连接失败）
+    // 28 = CURLE_OPERATION_TIMEDOUT（请求超时）
+    // 35 = CURLE_SSL_CONNECT_ERROR（SSL 握手失败）
+} elseif ($response->getStatusCode() >= 400) {
+    // HTTP 层面出错
+    echo "HTTP 状态码: " . $response->getStatusCode() . "\n";
 }
 ```
 
@@ -520,9 +542,9 @@ while ($offset < $totalLen) {
 | 方法 | 说明 |
 |------|------|
 | `__construct(XHCurl $curl)` | 构造函数，关联全局管理器 |
-| `add(XHRequest $request): void` | 添加请求到待执行队列（延迟创建上下文，节省内存） |
+| `add(XHRequest $request, mixed $userData = null): void` | 添加请求到待执行队列（可选传递用户数据，延迟创建上下文，节省内存） |
 | `execute(?callable $callback = null): array` | 滑动窗口并发执行，可选回调逐条处理结果 |
-| `setMaxConcurrent(int $max): void` | 设置最大并发数（滑动窗口大小，默认 100） |
+| `setMaxConcurrent(int $max): static` | 设置最大并发数（滑动窗口大小，默认 100，链式） |
 | `getMaxConcurrent(): int` | 获取当前最大并发数 |
 | `count(): int` | 获取已添加的请求数量 |
 
@@ -533,14 +555,29 @@ while ($offset < $totalLen) {
 $responses = $multi->execute();
 
 // 有回调：每完成一个请求立即回调，完成后释放响应内存（推荐）
-$multi->execute(function(XHResponse $response, int $index): void {
+// 回调签名：callback(XHResponse $response, int $completed, int $total, mixed $userData)
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
     // $response 是刚完成的请求结果
-    // $index 是请求在队列中的序号
-    // 回调后 $response 的 C 侧缓冲区立即释放，内存恒定
+    // $completed 是已完成请求数
+    // $total 是总请求数
+    // $userData 是 add() 时传递的用户数据（未传则为 null）
     if ($response->getStatusCode() === 200) {
         $data = $response->toJsonArray();
         // 处理数据（写入数据库、文件等）
     }
+});
+
+// add() 时传递 userData，回调中获取
+$multi->add(new XHRequest('https://httpbin.org/get?id=1'), ['db_id' => 1001]);
+$multi->add(new XHRequest('https://httpbin.org/get?id=2'), ['db_id' => 1002]);
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
+    $dbId = $userData['db_id'] ?? null;  // 获取 add 时传递的数据
+    echo "DB ID: $dbId, 状态码: " . $response->getStatusCode() . "\n";
+});
+
+// 也可通过 XHResponse::getUserData() 获取
+$multi->execute(function(XHResponse $response): void {
+    $userData = $response->getUserData();
 });
 ```
 
@@ -553,19 +590,18 @@ $multi->execute(function(XHResponse $response, int $index): void {
 - 支持 `onChunk` / `onHeader` 流式回调
 - 哈希表 O(1) 查找请求上下文，避免线性扫描
 - 执行后自动清空队列，可重复使用
+- 支持用户数据传递（`add()` 第二参数 → 回调第四参数 / `getUserData()`）
 
 #### 示例
 
 ```php
 $curl = new XHCurl();
-$multi = new XHMulti($curl);
+$multi = (new XHMulti($curl))
+    ->setMaxConcurrent(50); // 链式设置最大并发数
 
-// 设置最大并发数（滑动窗口大小）
-$multi->setMaxConcurrent(50); // 同时最多 50 个活跃请求
-
-// 添加请求
+// 添加请求（可带 userData）
 for ($i = 0; $i < 10; $i++) {
-    $multi->add(new XHRequest("https://httpbin.org/get?id=$i"));
+    $multi->add(new XHRequest("https://httpbin.org/get?id=$i"), ['index' => $i]);
 }
 
 echo "待执行请求数: " . $multi->count() . "\n";
@@ -579,118 +615,133 @@ foreach ($responses as $i => $response) {
 }
 
 // 方式 2：回调模式（推荐，内存恒定）
-$multi->execute(function(XHResponse $response, int $index): void {
-    echo "[$index] 状态码: " . $response->getStatusCode() . "\n";
-    // 回调后响应内存立即释放
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
+    $index = $userData['index'] ?? '?';
+    echo "[$completed/$total] index=$index: " . $response->getStatusCode() . "\n";
 });
-
-// 队列已清空，可继续添加新请求
-echo "执行后请求数: " . $multi->count() . "\n"; // 0
-```
-
-#### 百万级请求示例
-
-```php
-<?php
-$curl = new XHCurl();
-$curl->setTimeout(10);
-$curl->setMaxResponseSize(1024 * 1024); // 限制单响应 1MB
-
-$multi = new XHMulti($curl);
-$multi->setMaxConcurrent(200); // 滑动窗口：同时 200 个活跃请求
-
-// 模拟 100 万个请求
-for ($i = 0; $i < 1000000; $i++) {
-    $multi->add(new XHRequest("https://api.example.com/data?id=$i"));
-}
-
-echo "总请求数: " . $multi->count() . "\n";
-
-$processed = 0;
-$failed = 0;
-
-// 回调模式：每完成一个请求立即处理 + 释放内存
-// 内存占用 ≈ 200 个并发请求的上下文 ≈ 几十 MB（与总请求数无关）
-$multi->execute(function(XHResponse $response, int $index) use (&$processed, &$failed): void {
-    if ($response->getStatusCode() === 200) {
-        $data = $response->toJsonArray();
-        // 写入数据库或文件
-        // ...
-        $processed++;
-    } else {
-        $failed++;
-    }
-
-    // 每 10000 个请求输出进度
-    if (($processed + $failed) % 10000 === 0) {
-        echo "进度: " . ($processed + $failed) . " / 1000000\n";
-    }
-});
-
-echo "完成: $processed, 失败: $failed\n";
 ```
 
 ---
 
 ### XHThreadPool - CLI 线程池
 
-基于多线程的并发执行器，**仅 CLI 模式可用**，提供真正的并行处理能力。
-
-采用**延迟上下文创建**：`add()` 仅将请求引用存入待执行队列，`execute()` 时按工作线程数分配创建上下文，减少内存占用。
+基于 POSIX 线程的并发执行器，**仅 CLI 模式可用**。工作线程只执行 C 层面的 curl 操作，不调用 PHP 函数，确保线程安全。
 
 #### 方法
 
 | 方法 | 说明 |
 |------|------|
-| `__construct(XHCurl $curl, int $workers = 4)` | 构造函数，指定工作线程数（1-64） |
-| `add(XHRequest $request): void` | 添加请求到线程池队列（延迟创建上下文） |
-| `execute(): array` | 多线程并发执行，返回 `XHResponse[]` |
-| `count(): int` | 获取已添加的请求数量 |
+| `__construct(XHCurl $curl, int $threads = 4)` | 构造函数，指定工作线程数 |
+| `add(XHRequest $request, mixed $userData = null): void` | 添加请求到待执行队列（可选传递用户数据，延迟创建上下文，节省内存） |
+| `execute(): array` | 多线程并发执行所有请求，返回 XHResponse 数组 |
 
 #### 限制
 
-- **仅 CLI 模式可用**，FPM 下会抛出 `XHCurlException`
-- **不支持流式回调**（`onChunk` / `onHeader` 在线程池模式下无效）
-- 工作线程中不调用任何 PHP 函数，结果回主线程后创建 `XHResponse` 对象
+- **仅 CLI 模式**：FPM 下构造即抛出 `XHCurlException`
+- **不支持流式回调**：`onChunk` / `onHeader` 在线程池中无效
 
 #### 示例
 
 ```php
 <?php
-// 检查 CLI 模式
 if (php_sapi_name() !== 'cli') {
     exit("XHThreadPool 仅 CLI 模式可用\n");
 }
 
 $curl = new XHCurl();
+$pool = new XHThreadPool($curl, 8); // 8 个工作线程
 
-// 创建 8 线程的线程池
-$pool = new XHThreadPool($curl, 8);
-
-// 添加 1000 个请求
-for ($i = 0; $i < 1000; $i++) {
-    $pool->add(new XHRequest("https://httpbin.org/get?id=$i"));
+// 添加请求（可带 userData，通过 XHResponse::getUserData() 获取）
+for ($i = 0; $i < 100; $i++) {
+    $pool->add(new XHRequest("https://httpbin.org/get?id=$i"), ['index' => $i]);
 }
-
-echo "开始执行 " . $pool->count() . " 个请求...\n";
-$start = microtime(true);
 
 $responses = $pool->execute();
 
-$elapsed = microtime(true) - $start;
-echo "完成，耗时: " . round($elapsed, 2) . " 秒\n";
-
-// 统计成功/失败
-$success = 0;
-$failed = 0;
 foreach ($responses as $response) {
+    $userData = $response->getUserData(); // 获取 add() 时传递的用户数据
+    $index = $userData['index'] ?? '?';
     if ($response->getStatusCode() === 200) {
-        $success++;
+        echo "[$index] 请求成功\n";
     } else {
-        $failed++;
+        echo "[$index] 请求失败: " . $response->getError() . "\n";
     }
 }
-echo "成功: $success, 失败: $failed\n";
+```
+
+---
+
+## 链式调用
+
+所有 setter 方法均返回 `$this`，支持链式调用，让代码更简洁优雅。
+
+### XHCurl 链式调用
+
+```php
+// 传统写法
+$curl = new XHCurl();
+$curl->setTimeout(30);
+$curl->setConnectTimeout(10);
+$curl->setVerifySsl(false);
+$curl->setUserAgent('MyApp/1.0');
+$curl->setGlobalHeader('Authorization', 'Bearer token');
+$curl->setGlobalCookie('session', 'abc123');
+$curl->setRetry(3, 200);
+
+// 链式调用写法（推荐）
+$curl = (new XHCurl())
+    ->setTimeout(30)
+    ->setConnectTimeout(10)
+    ->setVerifySsl(false)
+    ->setUserAgent('MyApp/1.0')
+    ->setGlobalHeader('Authorization', 'Bearer token')
+    ->setGlobalCookie('session', 'abc123')
+    ->setRetry(3, 200);
+```
+
+### XHRequest 链式调用
+
+```php
+// 传统写法
+$request = new XHRequest('https://api.example.com/users');
+$request->setMethod('POST');
+$request->setHeader('X-Custom', 'value');
+$request->setJsonBody(['name' => '张三']);
+$request->setTimeout(10);
+$request->setFollowRedirects(true, 3);
+
+// 链式调用写法（推荐）
+$request = (new XHRequest('https://api.example.com/users'))
+    ->setMethod('POST')
+    ->setHeader('X-Custom', 'value')
+    ->setJsonBody(['name' => '张三'])
+    ->setTimeout(10)
+    ->setFollowRedirects(true, 3);
+```
+
+### XHMulti 链式调用
+
+```php
+// 链式设置最大并发数
+$multi = (new XHMulti($curl))
+    ->setMaxConcurrent(50);
+```
+
+### 完整链式调用示例
+
+```php
+// 一步到位：创建管理器 + 请求 + 执行
+$response = (new XHCurl())
+    ->setTimeout(10)
+    ->setVerifySsl(false)
+    ->setRetry(2, 100)
+    ->exec(
+        (new XHRequest('https://httpbin.org/post'))
+            ->setMethod('POST')
+            ->setJsonBody(['key' => 'value'])
+    );
+
+echo $response->getStatusCode(); // 200
 ```
 
 ---
@@ -702,22 +753,22 @@ echo "成功: $success, 失败: $failed\n";
 ```php
 <?php
 // 在 FPM Web 服务中处理多个 API 调用
-$curl = new XHCurl();
-$curl->setGlobalHeader('Authorization', 'Bearer ' . $apiToken);
-$curl->setTimeout(5); // FPM 下建议短超时
+$curl = (new XHCurl())
+    ->setGlobalHeader('Authorization', 'Bearer ' . $apiToken)
+    ->setTimeout(5); // FPM 下建议短超时
 
 $multi = new XHMulti($curl);
 
-// 并发获取用户信息、订单、消息
-$multi->add(new XHRequest("https://api.example.com/user/$userId"));
-$multi->add(new XHRequest("https://api.example.com/orders/$userId"));
-$multi->add(new XHRequest("https://api.example.com/messages/$userId"));
+// 并发获取用户信息、订单、消息（带 userData 标识）
+$multi->add(new XHRequest("https://api.example.com/user/$userId"), ['type' => 'user']);
+$multi->add(new XHRequest("https://api.example.com/orders/$userId"), ['type' => 'orders']);
+$multi->add(new XHRequest("https://api.example.com/messages/$userId"), ['type' => 'messages']);
 
-$responses = $multi->execute();
-
-$user = $responses[0]->toJsonArray();
-$orders = $responses[1]->toJsonArray();
-$messages = $responses[2]->toJsonArray();
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
+    $type = $userData['type'];
+    $data = $response->toJsonArray();
+    // 按 type 分别处理
+});
 ```
 
 ### 场景 2：CLI 批量任务（推荐 XHThreadPool）
@@ -725,9 +776,9 @@ $messages = $responses[2]->toJsonArray();
 ```php
 <?php
 // CLI 脚本批量爬取数据
-$curl = new XHCurl();
-$curl->setProxy('http://proxy:8080');
-$curl->setMaxResponseSize(5 * 1024 * 1024); // 限制 5MB
+$curl = (new XHCurl())
+    ->setProxy('http://proxy:8080')
+    ->setMaxResponseSize(5 * 1024 * 1024); // 限制 5MB
 
 $pool = new XHThreadPool($curl, 16); // 16 线程
 
@@ -756,8 +807,8 @@ foreach ($responses as $i => $response) {
 
 ```php
 <?php
-$curl = new XHCurl();
-$curl->setMaxResponseSize(1024 * 1024 * 1024); // 允许 1GB
+$curl = (new XHCurl())
+    ->setMaxResponseSize(1024 * 1024 * 1024); // 允许 1GB
 
 $request = new XHRequest('https://example.com/huge-file.bin');
 
@@ -922,6 +973,19 @@ A:
 
 A: `XHThreadPool` 模式下不支持流式回调（线程安全限制）。如需流式处理，请使用 `XHMulti` 或 `exec`。
 
+**Q: 如何判断请求是网络错误还是 HTTP 错误？**
+
+A: 使用 `getCurlCode()` 区分：
+```php
+if ($response->getCurlCode() !== 0) {
+    // curl 层面出错（网络错误、超时、DNS 失败等）
+    echo "curl 错误: " . $response->getError() . " (code=" . $response->getCurlCode() . ")\n";
+} elseif ($response->getStatusCode() >= 400) {
+    // HTTP 层面出错（4xx 客户端错误、5xx 服务器错误）
+    echo "HTTP 错误: " . $response->getStatusCode() . "\n";
+}
+```
+
 **Q: Windows 加载 DLL 报错 "找不到指定的模块"**
 
 A: 此错误通常由以下原因导致：
@@ -969,11 +1033,11 @@ A: 此错误通常由以下原因导致：
 
 A: 使用 `XHMulti` 的回调模式 + `setMaxConcurrent()` 控制并发窗口：
 ```php
-$multi = new XHMulti($curl);
-$multi->setMaxConcurrent(200); // 同时最多 200 个活跃请求
+$multi = (new XHMulti($curl))
+    ->setMaxConcurrent(200); // 同时最多 200 个活跃请求
 
 // 回调模式：每完成一个请求立即处理 + 释放内存
-$multi->execute(function(XHResponse $response, int $index): void {
+$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
     // 处理结果后内存立即释放
 });
 ```
