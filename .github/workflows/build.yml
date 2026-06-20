@@ -597,20 +597,25 @@ jobs:
 
           # -----------------------------------------------------------------
           # 确保 zlib.lib 存在（处理 vcpkg triplet 命名差异）
-          # x64-windows-static-md 下 zlib 命名为 zlibmd.lib
-          # x64-windows-static 下 zlib 命名为 zlib.lib
+          # 不同 triplet 下 zlib 库文件名不同：
+          #   x64-windows-static-md: zlibmd.lib（/MD CRT 命名约定）
+          #   x64-windows-static:    zs.lib（vcpkg 短命名约定）
+          #   某些版本:              zlib.lib
           # 我们的 C 代码使用 #pragma comment(lib, "zlib.lib")
-          # 所以需要确保文件名为 zlib.lib
+          # 所以需要将实际文件复制/重命名为 zlib.lib
           # -----------------------------------------------------------------
           $libDir = "$curlDir\lib"
           if (Test-Path "$libDir\zlibmd.lib") {
-            Write-Host "检测到 zlibmd.lib，复制为 zlib.lib（兼容 #pragma comment 声明）"
+            Write-Host "检测到 zlibmd.lib，复制为 zlib.lib（x64-windows-static-md 命名）"
             Copy-Item "$libDir\zlibmd.lib" "$libDir\zlib.lib" -Force
+          } elseif (Test-Path "$libDir\zs.lib") {
+            Write-Host "检测到 zs.lib，复制为 zlib.lib（x64-windows-static 命名）"
+            Copy-Item "$libDir\zs.lib" "$libDir\zlib.lib" -Force
           }
           if (Test-Path "$libDir\zlib.lib") {
             Write-Host "zlib.lib 已就绪"
           } else {
-            Write-Host "::error::zlib.lib 和 zlibmd.lib 均不存在"
+            Write-Host "::error::zlib.lib / zlibmd.lib / zs.lib 均不存在"
             Write-Host "lib 目录内容:"
             if (Test-Path $libDir) {
               Get-ChildItem -Path $libDir -Filter "*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
