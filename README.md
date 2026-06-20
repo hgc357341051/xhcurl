@@ -55,12 +55,11 @@ git push origin v1.0.0
 |------|----------|----------|------|
 | Linux (Ubuntu 22.04) | 8.0, 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
 | macOS 14 | 8.0, 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
-| Windows Server 2019 | 8.0, 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
-| Windows Server 2022 | 8.4 | NTS | ✅ 支持 |
+| Windows (x64) | 8.0, 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
 
 > **注意**：
 > - `XHThreadPool` 在所有平台上仅 CLI 模式可用。
-> - Windows PHP 8.0-8.3 使用 VS 2019 编译（vs16），PHP 8.4 使用 VS 2022 编译（vs17），确保与官方 PHP Windows 二进制包的编译器版本一致。
+> - Windows PHP 8.0-8.3 使用 VS 2019 v142 工具集编译，PHP 8.4 使用 VS 2022 v143 工具集编译，确保与官方 PHP Windows 二进制包的编译器版本一致。
 
 ---
 

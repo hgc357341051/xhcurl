@@ -257,9 +257,15 @@ jobs:
   #   buildconf → configure → nmake
   #
   # Runner 选择策略：
-  #   PHP 8.0-8.3 需要 VS 2019 (vs16) → windows-2019 runner
-  #   PHP 8.4+   需要 VS 2022 (vs17) → windows-2022 runner
-  #   参考：https://wiki.php.net/internals/windows/stepbystepbuild_sdk_2
+  #   统一使用 windows-2022 runner（windows-2019 已被 GitHub 限制，
+  #   排队时间超过 10 小时）
+  #
+  #   windows-2022 预装了 VS 2019 v142 工具集，可通过 toolset 参数
+  #   选择正确的编译器版本：
+  #     PHP 8.0-8.3 → toolset 14.2x（VS 2019 v142 工具集）
+  #     PHP 8.4+    → toolset 14.4x（VS 2022 v143 工具集）
+  #
+  #   参考：https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
   #
   # config.w32 注意事项：
   #   - 只使用 ARG_ENABLE，不使用 ARG_WITH（避免 JScript 冲突）
@@ -273,35 +279,17 @@ jobs:
   # =====================================================================
   build-windows:
     name: "Windows (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
-    # 根据 PHP 版本选择不同的 runner：
-    #   PHP 8.0-8.3 需要 VS 2019 → windows-2019（预装 VS 2019）
-    #   PHP 8.4+   需要 VS 2022 → windows-2022（预装 VS 2022）
-    runs-on: ${{ matrix.runner }}
+    # 统一使用 windows-2022（预装 VS 2019 v142 + VS 2022 v143 工具集）
+    # windows-2019 runner 已被 GitHub 限制，排队时间过长
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        # 每个 PHP 版本对应正确的 runner 和 VS 版本
-        include:
-          # PHP 8.0 需要 VS 2019 (vs16, toolset 14.2)
-          - php-version: '8.0'
-            ts: 'nts'
-            runner: windows-2019
-          # PHP 8.1 需要 VS 2019 (vs16, toolset 14.2)
-          - php-version: '8.1'
-            ts: 'nts'
-            runner: windows-2019
-          # PHP 8.2 需要 VS 2019 (vs16, toolset 14.2)
-          - php-version: '8.2'
-            ts: 'nts'
-            runner: windows-2019
-          # PHP 8.3 需要 VS 2019 (vs16, toolset 14.2)
-          - php-version: '8.3'
-            ts: 'nts'
-            runner: windows-2019
-          # PHP 8.4 需要 VS 2022 (vs17, toolset 14.4)
-          - php-version: '8.4'
-            ts: 'nts'
-            runner: windows-2022
+        # PHP 8.0-8.4 全版本支持
+        # php/setup-php-sdk 会根据版本自动输出正确的 toolset
+        # ilammy/msvc-dev-cmd 使用 toolset 选择对应的 MSVC 编译器
+        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        ts: ['nts']
 
     steps:
       # -----------------------------------------------------------------
