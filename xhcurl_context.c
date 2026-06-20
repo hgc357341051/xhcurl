@@ -138,10 +138,25 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
      */
 #ifdef CURLPIPE_MULTIPLEX
     if (curl_obj->http2_enabled) {
-        /* 启用 HTTP/2（允许服务器协商升级） */
+        /* +--------------------------------------------------------------+
+         * | 启用 HTTP/2 协议协商                                        |
+         * | CURL_HTTP_VERSION_2_0：通过 ALPN 协商升级到 HTTP/2，        |
+         * | 如果服务器不支持则自动回退到 HTTP/1.1，安全可靠。            |
+         * | 不使用 CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE，                |
+         * | 因为它跳过协商直接发送 HTTP/2，对不支持的服务器会失败。      |
+         * +--------------------------------------------------------------+
+         */
         curl_easy_setopt(ctx->easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
-        /* 启用 HTTP/2 多路复用（连接共享） */
-        curl_easy_setopt(ctx->easy, CURLOPT_PIPEWAIT, 1L);
+        /* +--------------------------------------------------------------+
+         * | 注意：不设置 CURLOPT_PIPEWAIT                                |
+         * | CURLOPT_PIPEWAIT 会让请求等待多路复用连接可用，             |
+         * | 但如果服务器不支持 HTTP/2 多路复用（如 HTTP/1.1 服务器），  |
+         * | 请求会一直等待可用连接，导致 curl_multi_perform 返回        |
+         * | still_running=0 但请求未完成，事件循环卡死。               |
+         * | 参考：https://github.com/curl/curl/issues/3813             |
+         * | 不设置 PIPEWAIT 时，curl 会回退到普通 HTTP/1.1 连接。       |
+         * +--------------------------------------------------------------+
+         */
     }
 #endif
 

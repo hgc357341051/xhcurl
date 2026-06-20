@@ -778,7 +778,20 @@ PHP_MINIT_FUNCTION(xhcurl_class)
 PHP_MINIT_FUNCTION(xhcurl)
 {
     /* 全局初始化 libcurl 库 */
-    curl_global_init(CURL_GLOBAL_ALL);
+    /* +--------------------------------------------------------------+
+     * | curl_global_init 必须在多线程环境下最先调用，                |
+     * | 且只能调用一次。它初始化 SSL 库（OpenSSL 等）和 win32 socket。|
+     * | 失败时返回 CURLM 错误码，应检查返回值避免后续 curl 操作异常。 |
+     * +--------------------------------------------------------------+
+     */
+    CURLcode global_init_result = curl_global_init(CURL_GLOBAL_ALL);
+    if (global_init_result != CURLE_OK) {
+        /* 初始化失败：记录错误但继续加载扩展（降级模式） */
+        /* 不返回 FAILURE，避免整个 PHP 进程无法启动 */
+        php_error_docref(NULL, E_WARNING,
+            "curl_global_init failed: %s, curl features may not work properly",
+            curl_easy_strerror(global_init_result));
+    }
 
     /* +--------------------------------------------------------------+
      * | 初始化 XHCurl 自定义对象操作函数表                             |

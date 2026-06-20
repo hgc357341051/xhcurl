@@ -284,6 +284,30 @@ PHP_METHOD(XHResponse, getBodyLength)
 }
 
 /**
+ * 获取完整响应体内容
+ * XHResponse::getBody(): string
+ * 一次性返回整个响应体字符串，适合小响应体场景
+ * 大响应体建议使用 getBodyChunk() 分段读取，避免内存溢出
+ */
+PHP_METHOD(XHResponse, getBody)
+{
+    /* 无参数 */
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    /* 获取当前对象 */
+    xhresponse_obj_t *obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 检查响应体缓冲区是否存在且有数据 */
+    if (obj->body == NULL || obj->body->data == NULL || obj->body->size == 0) {
+        /* 无响应体，返回空字符串 */
+        RETURN_EMPTY_STRING();
+    }
+
+    /* 直接从缓冲区复制数据到 PHP 字符串（单次拷贝） */
+    RETVAL_STRINGL(obj->body->data, obj->body->size);
+}
+
+/**
  * 获取 Content-Type 头部值
  * XHResponse::getContentType(): ?string
  */
@@ -498,6 +522,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBodyLength, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+/* getBody 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBody, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* getContentType 参数信息（无参数） */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getContentType, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -539,6 +567,8 @@ static const zend_function_entry xhresponse_methods[] = {
     PHP_ME(XHResponse, getBodyChunk, arginfo_xhresponse_getBodyChunk, ZEND_ACC_PUBLIC)
     /* 获取响应体总长度 */
     PHP_ME(XHResponse, getBodyLength, arginfo_xhresponse_getBodyLength, ZEND_ACC_PUBLIC)
+    /* 获取完整响应体 */
+    PHP_ME(XHResponse, getBody, arginfo_xhresponse_getBody, ZEND_ACC_PUBLIC)
     /* 获取 Content-Type */
     PHP_ME(XHResponse, getContentType, arginfo_xhresponse_getContentType, ZEND_ACC_PUBLIC)
     /* 判断是否为 JSON */

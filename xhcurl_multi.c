@@ -803,6 +803,9 @@ PHP_METHOD(XHMulti, execute)
     /* 重置活跃上下文计数 */
     obj->context_count = 0;
 
+    /* 重置已完成请求数计数器（阶段 1 和阶段 2 共用） */
+    obj->completed_count = 0;
+
     /* --- 阶段 1：初始填充滑动窗口 --- */
     /* 取 min(maxConcurrent, pendingCount) 个请求开始执行 */
     int initial_batch = (obj->max_concurrent < obj->pending_count) ?
@@ -894,13 +897,24 @@ PHP_METHOD(XHMulti, execute)
 
     /* --- 阶段 2：滑动窗口事件循环 --- */
     int still_running = 0;
-    /* 已完成请求数计数器（存储在对象中，供回调模式和返回值使用） */
-    obj->completed_count = 0;
+    /* +--------------------------------------------------------------+
+     * | 已完成请求数计数器（存储在对象中，供回调模式和返回值使用）    |
+     * | 注意：不在此处重置为 0，因为阶段 1 中 dispatch_next 失败的   |
+     * | 请求已经递增了 completed_count。重置会导致这些失败请求       |
+     * | 在最终返回值中被丢失。                                       |
+     * +--------------------------------------------------------------+
+     */
     do {
-        /* 执行一次 multi 操作 */
+        /* +--------------------------------------------------------------+
+         * | 执行 multi 操作                                              |
+         * | 旧版 libcurl 可能返回 CURLM_CALL_MULTI_PERFORM，            |
+         * | 表示需要立即再次调用（已弃用但需兼容）。                     |
+         * | 新版 libcurl 始终返回 CURLM_OK。                            |
+         * +--------------------------------------------------------------+
+         */
         CURLMcode mc = curl_multi_perform(obj->multi, &still_running);
-        if (mc != CURLM_OK) {
-            /* multi 操作失败 */
+        if (mc != CURLM_OK && mc != CURLM_CALL_MULTI_PERFORM) {
+            /* multi 操作失败（非 CALL_MULTI_PERFORM 的错误） */
             break;
         }
 
@@ -964,6 +978,9 @@ PHP_METHOD(XHMulti, execute)
              * | process_result 为 -1 且 EG(exception) 可能为 NULL，     |
              * | 导致事件循环继续但该请求结果丢失。                       |
              * | 新实现：process_result != 0 时始终中断，避免数据丢失。   |
+             * +----------------------------------------------------------+
+             * | 注意：response_zv 已在上面的 else if 分支中释放，        |
+             * | 此处不需要再次释放，否则会导致双重释放（double free）。  |
              * +----------------------------------------------------------+
              */
             if (process_result != 0) {
@@ -1068,9 +1085,23 @@ PHP_METHOD(XHMulti, execute)
             }
         }
 
-        /* 等待活动（最多 100ms），避免 CPU 空转 */
+        /* +--------------------------------------------------------------+
+         * | 等待活动（最多 100ms），避免 CPU 空转                        |
+         * | 修复：当 still_running == 0 但还有 pending 请求时，         |
+         * | 也需要短暂等待（1ms），让 curl 有时间处理新添加的请求。     |
+         * | 否则 curl_multi_perform 可能立即返回 still_running=0，      |
+         * | 导致无限空转（CPU 100%）。                                  |
+         * +--------------------------------------------------------------+
+         */
         if (still_running > 0) {
             mc = curl_multi_wait(obj->multi, NULL, 0, 100, NULL);
+            if (mc != CURLM_OK) {
+                break;
+            }
+        } else if (obj->pending_head < obj->pending_count) {
+            /* still_running == 0 但还有待执行请求 */
+            /* 短暂等待 1ms，让 curl 处理新添加的 easy 句柄 */
+            mc = curl_multi_wait(obj->multi, NULL, 0, 1, NULL);
             if (mc != CURLM_OK) {
                 break;
             }
