@@ -51,6 +51,12 @@ static void xhresponse_free_obj(zend_object *object)
         obj->content_type = NULL;
     }
 
+    /* 释放用户自定义数据引用 */
+    if (!Z_ISUNDEF(obj->user_data)) {
+        zval_ptr_dtor(&obj->user_data);
+        ZVAL_UNDEF(&obj->user_data);
+    }
+
     /* 调用标准对象释放函数 */
     zend_object_std_dtor(object);
 }
@@ -410,6 +416,31 @@ PHP_METHOD(XHResponse, getTotalTime)
     RETURN_DOUBLE(obj->total_time);
 }
 
+/**
+ * 获取用户自定义数据
+ * XHResponse::getUserData(): mixed
+ *
+ * 返回 add() 时传入的用户自定义数据，未设置时返回 null
+ * 在 XHMulti 回调模式和无回调模式下均可使用
+ *
+ * @return mixed 用户自定义数据，未设置时返回 null
+ */
+PHP_METHOD(XHResponse, getUserData)
+{
+    /* 无参数 */
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    /* 获取当前对象 */
+    xhresponse_obj_t *obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 返回用户自定义数据（未设置则返回 null） */
+    if (!Z_ISUNDEF(obj->user_data)) {
+        RETURN_COPY_VALUE(&obj->user_data);
+    } else {
+        RETURN_NULL();
+    }
+}
+
 /* +----------------------------------------------------------------------+
  * | 参数信息定义（arginfo）                                                |
  * | PHP 8+ 要求所有方法必须声明参数信息，否则产生 Missing arginfo 警告     |
@@ -464,6 +495,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getTotalTime, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+/* getUserData 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getUserData, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* +----------------------------------------------------------------------+
  * | 方法注册表                                                            |
  * +----------------------------------------------------------------------+
@@ -491,6 +526,8 @@ static const zend_function_entry xhresponse_methods[] = {
     PHP_ME(XHResponse, getError, arginfo_xhresponse_getError, ZEND_ACC_PUBLIC)
     /* 获取请求耗时 */
     PHP_ME(XHResponse, getTotalTime, arginfo_xhresponse_getTotalTime, ZEND_ACC_PUBLIC)
+    /* 获取用户自定义数据 */
+    PHP_ME(XHResponse, getUserData, arginfo_xhresponse_getUserData, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };

@@ -199,6 +199,7 @@ typedef struct _xhresponse_obj {
     xhcurl_buffer_t    *body;               /* 响应体缓冲区（C 侧管理，按需读取） */
     char               *content_type;       /* Content-Type 头部值 */
     double              total_time;         /* 请求总耗时（秒） */
+    zval                user_data;          /* 用户自定义数据（add 时传入，可通过 getUserData() 获取） */
     zend_object         std;                /* PHP 对象标准头（必须放在最后） */
 } xhresponse_obj_t;
 
@@ -215,6 +216,7 @@ typedef struct _xhcurl_req_context {
     zval                chunk_callback;      /* 流式数据回调引用 */
     zval                header_callback;     /* 响应头回调引用 */
     zval                request_zval;        /* 关联的 XHRequest PHP 对象引用 */
+    zval                user_data;           /* 用户自定义数据（add 时传入，回调时原样返回） */
     long                status_code;         /* HTTP 状态码 */
     char               *content_type;        /* Content-Type 值 */
     struct curl_slist  *request_headers;     /* curl_slist 格式的请求头 */
@@ -264,6 +266,7 @@ typedef struct _xhmulti_obj {
 
     /* --- 待执行请求队列（add 时入队，execute 时消费） --- */
     zval                       *pending_requests;/* 待执行请求的 XHRequest zval 数组 */
+    zval                       *pending_user_data;/* 待执行请求的用户自定义数据数组（与 pending_requests 一一对应） */
     int                         pending_count;   /* 待执行请求数量 */
     int                         pending_capacity;/* 待执行数组容量 */
     int                         pending_head;    /* 队列头部索引（下一个要执行的） */
@@ -321,6 +324,7 @@ typedef struct _xhthreadpool_obj {
 
     /* --- 待执行请求队列（add 时入队，execute 时消费） --- */
     zval                       *pending_requests;/* 待执行请求的 XHRequest zval 数组 */
+    zval                       *pending_user_data;/* 待执行请求的用户自定义数据数组（与 pending_requests 一一对应） */
     int                         pending_count;   /* 待执行请求数量 */
     int                         pending_capacity;/* 待执行数组容量 */
 

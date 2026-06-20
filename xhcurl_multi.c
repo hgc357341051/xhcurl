@@ -184,6 +184,18 @@ static void xhmulti_free_obj(zend_object *object)
         obj->pending_requests = NULL;
     }
 
+    /* 释放待执行请求队列中的用户自定义数据 */
+    if (obj->pending_user_data != NULL) {
+        for (int i = 0; i < obj->pending_count; i++) {
+            if (!Z_ISUNDEF(obj->pending_user_data[i])) {
+                zval_ptr_dtor(&obj->pending_user_data[i]);
+                ZVAL_UNDEF(&obj->pending_user_data[i]);
+            }
+        }
+        efree(obj->pending_user_data);
+        obj->pending_user_data = NULL;
+    }
+
     /* 释放已完成结果数组 */
     if (obj->results != NULL) {
         for (int i = 0; i < obj->result_count; i++) {
@@ -283,6 +295,11 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
 
     /* 保存 XHRequest PHP 对象引用（防止 GC 回收） */
     ZVAL_COPY(&ctx->request_zval, request_zv);
+
+    /* 将用户自定义数据拷贝到上下文（线程安全：主线程写入，工作线程只读） */
+    if (!Z_ISUNDEF(obj->pending_user_data[obj->pending_head])) {
+        ZVAL_COPY(&ctx->user_data, &obj->pending_user_data[obj->pending_head]);
+    }
 
     /* 将 easy 句柄添加到 multi 句柄 */
     CURLMcode mres = curl_multi_add_handle(obj->multi, ctx->easy);
@@ -392,25 +409,38 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
     resp_obj->headers = ctx->parsed_headers;
     ctx->parsed_headers = NULL;
 
+    /* 将用户自定义数据从上下文转移到响应对象（无回调模式下可通过 getUserData() 获取） */
+    if (!Z_ISUNDEF(ctx->user_data)) {
+        ZVAL_COPY(&resp_obj->user_data, &ctx->user_data);
+    }
+
     /* 如果有回调函数，立即调用 */
     if (has_callback) {
-        /* 调用 PHP 回调：callback(XHResponse $response, int $completed, int $total) */
-        zval args[3];
+        /* 调用 PHP 回调：callback(XHResponse $response, int $completed, int $total, mixed $userData) */
+        zval args[4];
         ZVAL_COPY(&args[0], response_zv);                      /* 响应对象 */
         ZVAL_LONG(&args[1], obj->result_count + 1);            /* 已完成数 */
         ZVAL_LONG(&args[2], obj->pending_count);               /* 总请求数 */
+
+        /* 第4个参数：用户自定义数据（未设置则传 null） */
+        if (!Z_ISUNDEF(ctx->user_data)) {
+            ZVAL_COPY(&args[3], &ctx->user_data);              /* 用户数据 */
+        } else {
+            ZVAL_NULL(&args[3]);                                /* 无用户数据则传 null */
+        }
 
         zval retval;
         /* 设置 fci 参数 */
         fci->retval = &retval;          /* 返回值指针 */
         fci->params = args;             /* 参数数组 */
-        fci->param_count = 3;           /* 参数数量 */
+        fci->param_count = 4;           /* 参数数量（含 userData） */
 
         /* 使用 zend_call_function 调用回调（比 call_user_function 更高效） */
         int call_result = zend_call_function(fci, fcc);
 
         /* 释放参数和返回值 */
-        zval_ptr_dtor(&args[0]);
+        zval_ptr_dtor(&args[0]);    /* 释放 response 引用 */
+        zval_ptr_dtor(&args[3]);    /* 释放 userData 引用 */
         if (call_result == SUCCESS) {
             zval_ptr_dtor(&retval);
         }
@@ -508,11 +538,14 @@ PHP_METHOD(XHMulti, __construct)
  */
 PHP_METHOD(XHMulti, add)
 {
-    zval *request_zv;   /* XHRequest 对象参数 */
+    zval *request_zv;       /* XHRequest 对象参数 */
+    zval *user_data_zv = NULL; /* 用户自定义数据（可选） */
 
-    /* 解析参数 */
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    /* 解析参数：XHRequest 必填，mixed $userData 可选 */
+    ZEND_PARSE_PARAMETERS_START(1, 2)
         Z_PARAM_OBJECT_OF_CLASS(request_zv, xhrequest_ce)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(user_data_zv)
     ZEND_PARSE_PARAMETERS_END();
 
     /* 获取 XHMulti 对象 */
@@ -522,22 +555,38 @@ PHP_METHOD(XHMulti, add)
     if (obj->pending_count >= obj->pending_capacity) {
         /* 计算新容量（初始 64，之后翻倍增长） */
         int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
-        /* 重新分配队列数组 */
+        /* 重新分配请求队列数组 */
         obj->pending_requests = (zval *)erealloc(
             obj->pending_requests, new_capacity * sizeof(zval));
         if (obj->pending_requests == NULL) {
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate pending queue", 0);
             return;
         }
+        /* 重新分配用户数据数组（与请求队列一一对应） */
+        obj->pending_user_data = (zval *)erealloc(
+            obj->pending_user_data, new_capacity * sizeof(zval));
+        if (obj->pending_user_data == NULL) {
+            zend_throw_exception(xhcurl_exception_ce, "Failed to allocate user data queue", 0);
+            return;
+        }
         /* 初始化新分配的空间 */
         for (int i = obj->pending_count; i < new_capacity; i++) {
             ZVAL_UNDEF(&obj->pending_requests[i]);
+            ZVAL_UNDEF(&obj->pending_user_data[i]);
         }
         obj->pending_capacity = new_capacity;
     }
 
     /* 将 XHRequest 引用存入待执行队列（仅增加引用计数，不创建 curl 句柄） */
     ZVAL_COPY(&obj->pending_requests[obj->pending_count], request_zv);
+
+    /* 将用户自定义数据存入对应位置（可选参数，未传则设为 UNDEF） */
+    if (user_data_zv != NULL) {
+        ZVAL_COPY(&obj->pending_user_data[obj->pending_count], user_data_zv);
+    } else {
+        ZVAL_UNDEF(&obj->pending_user_data[obj->pending_count]);
+    }
+
     obj->pending_count++;
 }
 
@@ -742,6 +791,11 @@ PHP_METHOD(XHMulti, execute)
             zval_ptr_dtor(&obj->pending_requests[i]);
             ZVAL_UNDEF(&obj->pending_requests[i]);
         }
+        /* 释放待执行队列中的用户自定义数据 */
+        if (!Z_ISUNDEF(obj->pending_user_data[i])) {
+            zval_ptr_dtor(&obj->pending_user_data[i]);
+            ZVAL_UNDEF(&obj->pending_user_data[i]);
+        }
     }
     obj->pending_count = 0;
     obj->pending_head = 0;
@@ -777,6 +831,7 @@ ZEND_END_ARG_INFO()
 /* add 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_add, 0, 0, 1)
     ZEND_ARG_INFO(0, request)         /* XHRequest 对象（必填） */
+    ZEND_ARG_INFO(0, userData)        /* 用户自定义数据（可选，回调时原样返回） */
 ZEND_END_ARG_INFO()
 
 /* execute 参数信息 */

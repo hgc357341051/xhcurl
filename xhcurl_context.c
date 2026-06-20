@@ -269,6 +269,12 @@ void xhcurl_context_free(xhcurl_req_context_t *ctx)
         ZVAL_UNDEF(&ctx->request_zval);
     }
 
+    /* 释放用户自定义数据引用 */
+    if (!Z_ISUNDEF(ctx->user_data)) {
+        zval_ptr_dtor(&ctx->user_data);
+        ZVAL_UNDEF(&ctx->user_data);
+    }
+
     /* 释放上下文本身 */
     efree(ctx);
 }
