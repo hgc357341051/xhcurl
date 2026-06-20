@@ -278,6 +278,7 @@ typedef struct _xhmulti_obj {
 
     /* --- 并发控制 --- */
     int                         max_concurrent;  /* 最大并发数（滑动窗口大小） */
+    zend_long                   global_timeout;  /* 全局总超时（秒），0 = 不限制，默认 300 */
     zend_bool                   is_executing;    /* 是否正在执行（防止 execute 期间调用 add） */
 
     /* --- easy → context 哈希表（O(1) 查找） --- */

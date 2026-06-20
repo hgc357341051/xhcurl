@@ -210,6 +210,22 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
         ctx->request_headers = headers;
     }
 
+    /* +--------------------------------------------------------------+
+     * | 禁用 Expect: 100-continue 行为                               |
+     * | curl 默认对 body > 1024 字节的 POST 请求自动添加             |
+     * | "Expect: 100-continue" 头，要求服务器先回复 100 Continue，   |
+     * | 然后才发送请求体。但很多服务器/代理不支持此机制，导致：      |
+     * | 1. curl 等待 100 Continue 响应（默认 1 秒），浪费超时时间    |
+     * | 2. 服务器等待请求体，形成死锁，最终超时                      |
+     * | 3. 状态码返回 100（中间响应），而非最终状态码                |
+     * | 添加空 "Expect:" 头可禁用此行为，curl 直接发送请求体。       |
+     * | 参考：https://curl.se/docs/faq.html#How_do_I_prevent_curl_fr |
+     * +--------------------------------------------------------------+
+     */
+    headers = curl_slist_append(headers, "Expect:");
+    curl_easy_setopt(ctx->easy, CURLOPT_HTTPHEADER, headers);
+    ctx->request_headers = headers;
+
     /* 设置 Cookie：全局 Cookie + 请求级 Cookie */
     /* 使用 curl_share 共享全局 Cookie（启用 Cookie 共享机制） */
     if (curl_obj->share != NULL) {

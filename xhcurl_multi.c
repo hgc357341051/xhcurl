@@ -251,6 +251,7 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
     obj->context_count = 0;             /* 初始活跃数为 0 */
     obj->context_capacity = 0;          /* 初始容量为 0 */
     obj->max_concurrent = XHCURL_DEFAULT_MAX_CONCURRENT; /* 默认最大并发 100 */
+    obj->global_timeout = 300;          /* 默认全局总超时 300 秒（5 分钟） */
     obj->is_executing = 0;              /* 初始未在执行 */
     obj->results = NULL;                /* 结果数组在 execute 时分配 */
     obj->result_count = 0;              /* 初始结果数为 0 */
@@ -898,6 +899,18 @@ PHP_METHOD(XHMulti, execute)
     /* --- 阶段 2：滑动窗口事件循环 --- */
     int still_running = 0;
     /* +--------------------------------------------------------------+
+     * | 总超时保护：防止因 curl 内部超时失效或 DNS 解析阻塞          |
+     * | 导致事件循环永远不退出。默认 300 秒（5 分钟），              |
+     * | 可通过 XHMulti::setGlobalTimeout() 配置。                   |
+     * | 当总耗时超过此值时，强制中断所有未完成的请求。               |
+     * +--------------------------------------------------------------+
+     */
+    zend_long global_timeout = obj->global_timeout; /* 总超时（秒），0 = 不限制 */
+    time_t loop_start_time = 0; /* 事件循环开始时间戳 */
+    if (global_timeout > 0) {
+        loop_start_time = time(NULL); /* 记录循环开始时间 */
+    }
+    /* +--------------------------------------------------------------+
      * | 已完成请求数计数器（存储在对象中，供回调模式和返回值使用）    |
      * | 注意：不在此处重置为 0，因为阶段 1 中 dispatch_next 失败的   |
      * | 请求已经递增了 completed_count。重置会导致这些失败请求       |
@@ -1092,18 +1105,41 @@ PHP_METHOD(XHMulti, execute)
          * | 否则 curl_multi_perform 可能立即返回 still_running=0，      |
          * | 导致无限空转（CPU 100%）。                                  |
          * +--------------------------------------------------------------+
+         * | 重要：curl_multi_wait 在没有文件描述符时会立即返回，        |
+         * | 此时 numfds=0。如果不加处理，会导致 CPU 空转。             |
+         * | 官方推荐做法：numfds==0 时短暂休眠（如 10ms），            |
+         * | 让 DNS 解析等非 socket 操作有机会完成。                     |
+         * | 参考：https://curl.se/libcurl/c/curl_multi_wait.html        |
+         * +--------------------------------------------------------------+
          */
-        if (still_running > 0) {
-            mc = curl_multi_wait(obj->multi, NULL, 0, 100, NULL);
-            if (mc != CURLM_OK) {
-                break;
-            }
-        } else if (obj->pending_head < obj->pending_count) {
-            /* still_running == 0 但还有待执行请求 */
-            /* 短暂等待 1ms，让 curl 处理新添加的 easy 句柄 */
-            mc = curl_multi_wait(obj->multi, NULL, 0, 1, NULL);
-            if (mc != CURLM_OK) {
-                break;
+        {
+            int numfds = 0; /* curl_multi_wait 返回的就绪文件描述符数量 */
+            if (still_running > 0) {
+                mc = curl_multi_wait(obj->multi, NULL, 0, 100, &numfds);
+                if (mc != CURLM_OK) {
+                    break;
+                }
+                /* +----------------------------------------------------------+
+                 * | numfds == 0 表示没有就绪的 socket，可能是所有连接        |
+                 * | 处于 DNS 解析阶段（没有 socket 可监听）。                |
+                 * | 短暂休眠避免 CPU 空转（curl 官方推荐做法）。            |
+                 * +----------------------------------------------------------+
+                 */
+                if (numfds == 0) {
+                    /* 休眠 10ms，让 DNS 解析等操作有机会完成 */
+#ifdef PHP_WIN32
+                    Sleep(10);
+#else
+                    usleep(10000);
+#endif
+                }
+            } else if (obj->pending_head < obj->pending_count) {
+                /* still_running == 0 但还有待执行请求 */
+                /* 短暂等待 1ms，让 curl 处理新添加的 easy 句柄 */
+                mc = curl_multi_wait(obj->multi, NULL, 0, 1, &numfds);
+                if (mc != CURLM_OK) {
+                    break;
+                }
             }
         }
 
@@ -1111,6 +1147,25 @@ PHP_METHOD(XHMulti, execute)
         if (EG(exception) != NULL) {
             /* 有异常，中止所有请求 */
             break;
+        }
+
+        /* +--------------------------------------------------------------+
+         * | 总超时检查：防止事件循环永远不退出                           |
+         * | 当总耗时超过 global_timeout 秒时，强制中断所有请求。        |
+         * | 这是对 CURLOPT_TIMEOUT 的补充保护，防止 curl 内部超时       |
+         * | 失效（如 Windows DNS 解析阻塞、PIPEWAIT 死锁等场景）。     |
+         * +--------------------------------------------------------------+
+         */
+        if (global_timeout > 0) {
+            time_t now = time(NULL);
+            zend_long elapsed = (zend_long)(now - loop_start_time);
+            if (elapsed >= global_timeout) {
+                /* 总超时，强制中断 */
+                php_error_docref(NULL, E_WARNING,
+                    "XHMulti global timeout (%ld seconds) exceeded, aborting remaining requests",
+                    (long)global_timeout);
+                break;
+            }
         }
     } while (still_running > 0 || obj->pending_head < obj->pending_count);
 
@@ -1231,6 +1286,42 @@ PHP_METHOD(XHMulti, setMaxConcurrent)
 }
 
 /**
+ * 设置全局总超时时间
+ * XHMulti::setGlobalTimeout(int $seconds): static
+ *
+ * 设置 execute() 方法的总超时时间。当总耗时超过此值时，
+ * 强制中断所有未完成的请求。这是对 CURLOPT_TIMEOUT 的补充保护，
+ * 防止 curl 内部超时失效（如 Windows DNS 解析阻塞等场景）。
+ * 默认 300 秒（5 分钟），设为 0 表示不限制。
+ *
+ * @param int $seconds 超时秒数（0 = 不限制）
+ */
+PHP_METHOD(XHMulti, setGlobalTimeout)
+{
+    zend_long seconds; /* 超时秒数参数 */
+
+    /* 解析参数：1个整数 */
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(seconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 验证超时值不能为负数 */
+    if (seconds < 0) {
+        zend_argument_value_error(1, "must be non-negative");
+        RETURN_THROWS();
+    }
+
+    /* 获取 XHMulti 对象 */
+    xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 更新全局超时时间 */
+    obj->global_timeout = seconds;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+
+/**
  * 获取当前最大并发数
  * XHMulti::getMaxConcurrent(): int
  *
@@ -1283,6 +1374,11 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_getMaxConcurrent, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+/* setGlobalTimeout 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_setGlobalTimeout, 0, 0, 1)
+    ZEND_ARG_INFO(0, seconds)         /* 超时秒数（必填，0 = 不限制） */
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry xhmulti_methods[] = {
     /* 构造函数 */
     PHP_ME(XHMulti, __construct, arginfo_xhmulti_construct, ZEND_ACC_PUBLIC)
@@ -1296,6 +1392,8 @@ static const zend_function_entry xhmulti_methods[] = {
     PHP_ME(XHMulti, setMaxConcurrent, arginfo_xhmulti_setMaxConcurrent, ZEND_ACC_PUBLIC)
     /* 获取最大并发数 */
     PHP_ME(XHMulti, getMaxConcurrent, arginfo_xhmulti_getMaxConcurrent, ZEND_ACC_PUBLIC)
+    /* 设置全局总超时 */
+    PHP_ME(XHMulti, setGlobalTimeout, arginfo_xhmulti_setGlobalTimeout, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };
