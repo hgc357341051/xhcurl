@@ -15,6 +15,9 @@
 /* XHCurl 类入口指针 */
 zend_class_entry *xhcurl_ce;
 
+/* XHCurl 自定义对象操作函数表（用于注册 free_obj，确保对象销毁时释放资源） */
+static zend_object_handlers xhcurl_object_handlers;
+
 /* +----------------------------------------------------------------------+
  * | JSON 函数指针缓存（性能优化）                                        |
  * | 在 MINIT 时缓存 json_encode/json_decode 的函数指针，                 |
@@ -121,7 +124,8 @@ static zend_object *xhcurl_create_obj(zend_class_entry *class_type)
     obj->retry_delay_ms = 100;                          /* 默认重试间隔 100ms */
 
     /* 设置对象释放函数 */
-    obj->std.handlers = zend_get_std_object_handlers();
+    /* 设置自定义对象操作函数表（包含 free_obj，确保对象销毁时调用 xhcurl_free_obj） */
+    obj->std.handlers = &xhcurl_object_handlers;
 
     return &obj->std;
 }
@@ -145,7 +149,7 @@ PHP_METHOD(XHCurl, __construct)
 
 /**
  * 设置全局请求头
- * XHCurl::setGlobalHeader(string $name, string $value): void
+ * XHCurl::setGlobalHeader(string $name, string $value): static
  * 全局头部会应用到所有通过此管理器发出的请求
  */
 PHP_METHOD(XHCurl, setGlobalHeader)
@@ -164,18 +168,56 @@ PHP_METHOD(XHCurl, setGlobalHeader)
     /* 获取当前对象 */
     xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 添加到原始头部链表（用于合并时查找） */
-    xhcurl_header_add(&obj->global_headers_raw, name, value);
+    /* 设置到原始头部链表（同名头部替换旧值，避免重复） */
+    xhcurl_header_set(&obj->global_headers_raw, name, value);
 
-    /* 添加到 curl_slist 格式头部列表（用于设置到 curl 句柄） */
-    char header_line[4096];
-    snprintf(header_line, sizeof(header_line), "%s: %s", name, value);
-    obj->global_headers = curl_slist_append(obj->global_headers, header_line);
+    /* 从 curl_slist 中移除同名头部（避免重复发送） */
+    /* curl_slist 不支持直接删除，需要重建 */
+    struct curl_slist *new_slist = NULL;   /* 新的 slist */
+    struct curl_slist *current = obj->global_headers;  /* 遍历旧 slist */
+    /* 构建查找键：小写化的头部名称 + 冒号 */
+    char *lower_name = estrdup(name);
+    xhcurl_str_tolower(lower_name, strlen(lower_name));
+    size_t lower_name_len = strlen(lower_name);
+
+    while (current != NULL) {
+        /* 检查当前 slist 节点是否是同名头部 */
+        /* slist 格式为 "Name: Value"，比较冒号前的部分 */
+        const char *colon = strchr(current->data, ':');
+        if (colon != NULL) {
+            size_t node_name_len = (size_t)(colon - current->data);
+            /* 跳过名称长度不匹配的 */
+            if (node_name_len == lower_name_len &&
+                strncasecmp(current->data, lower_name, lower_name_len) == 0) {
+                /* 同名头部，跳过不添加到新 slist */
+                current = current->next;
+                continue;
+            }
+        }
+        /* 非同名头部，添加到新 slist */
+        new_slist = curl_slist_append(new_slist, current->data);
+        current = current->next;
+    }
+    efree(lower_name);
+
+    /* 释放旧 slist */
+    curl_slist_free_all(obj->global_headers);
+    /* 添加新的头部值（动态分配，避免固定缓冲区截断超长头部） */
+    size_t header_line_len = name_len + 2 + value_len + 1; /* name + ": " + value + '\0' */
+    char *header_line = (char *)emalloc(header_line_len);
+    snprintf(header_line, header_line_len, "%s: %s", name, value);
+    new_slist = curl_slist_append(new_slist, header_line);
+    efree(header_line);
+    /* 更新 slist 指针 */
+    obj->global_headers = new_slist;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置全局 Cookie
- * XHCurl::setGlobalCookie(string $name, string $value, string $domain = '', string $path = '/'): void
+ * XHCurl::setGlobalCookie(string $name, string $value, string $domain = '', string $path = '/'): static
  * 全局 Cookie 通过 curl_share 在请求间共享
  */
 PHP_METHOD(XHCurl, setGlobalCookie)
@@ -201,22 +243,22 @@ PHP_METHOD(XHCurl, setGlobalCookie)
     /* 获取当前对象 */
     xhcurl_obj_t *obj = XHCURL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 添加到全局 Cookie 链表 */
+    /* 添加到全局 Cookie 链表（用于在 xhcurl_context_create 中通过 CURLOPT_COOKIELIST 应用到 easy 句柄） */
     xhcurl_cookie_add(&obj->global_cookies, name, value, domain, path);
 
-    /* 同时通过 curl_share 设置 Cookie（使用 CURLOPT_COOKIELIST 格式） */
-    /* 格式：域名\t是否包含子域\t路径\t是否安全\t过期时间\t名称\t值 */
-    char cookie_line[4096];
-    snprintf(cookie_line, sizeof(cookie_line), "%s\tFALSE\t%s\tFALSE\t0\t%s\t%s",
-             (domain_len > 0) ? domain : "localhost",
-             (path_len > 0) ? path : "/",
-             name, value);
+    /* 注意：curl_share 的 COOKIE 共享机制需要通过 easy 句柄的 CURLOPT_COOKIELIST 来设置 */
+    /* 不能直接通过 curl_share_setopt 设置具体的 Cookie 值 */
+    /* 全局 Cookie 会在 xhcurl_context_create 中遍历 global_cookies 链表，逐个通过 CURLOPT_COOKIELIST 应用 */
+    /* 这里仅确保 share 句柄启用了 Cookie 共享 */
     curl_share_setopt(obj->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置默认请求超时时间
- * XHCurl::setTimeout(int $seconds): void
+ * XHCurl::setTimeout(int $seconds): static
  */
 PHP_METHOD(XHCurl, setTimeout)
 {
@@ -232,11 +274,14 @@ PHP_METHOD(XHCurl, setTimeout)
 
     /* 设置超时时间 */
     obj->timeout = (long)seconds;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置默认连接超时时间
- * XHCurl::setConnectTimeout(int $seconds): void
+ * XHCurl::setConnectTimeout(int $seconds): static
  */
 PHP_METHOD(XHCurl, setConnectTimeout)
 {
@@ -252,11 +297,14 @@ PHP_METHOD(XHCurl, setConnectTimeout)
 
     /* 设置连接超时 */
     obj->connect_timeout = (long)seconds;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置是否验证 SSL 证书
- * XHCurl::setVerifySsl(bool $verify): void
+ * XHCurl::setVerifySsl(bool $verify): static
  * 开发环境可设为 false，生产环境建议为 true
  */
 PHP_METHOD(XHCurl, setVerifySsl)
@@ -273,11 +321,14 @@ PHP_METHOD(XHCurl, setVerifySsl)
 
     /* 设置 SSL 验证 */
     obj->verify_ssl = verify;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置默认 User-Agent
- * XHCurl::setUserAgent(string $ua): void
+ * XHCurl::setUserAgent(string $ua): static
  */
 PHP_METHOD(XHCurl, setUserAgent)
 {
@@ -299,11 +350,14 @@ PHP_METHOD(XHCurl, setUserAgent)
 
     /* 复制新的 User-Agent */
     obj->user_agent = estrdup(ua);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置代理服务器
- * XHCurl::setProxy(string $proxy): void
+ * XHCurl::setProxy(string $proxy): static
  * 格式：http://host:port 或 socks5://host:port
  */
 PHP_METHOD(XHCurl, setProxy)
@@ -326,11 +380,14 @@ PHP_METHOD(XHCurl, setProxy)
 
     /* 复制新的代理地址 */
     obj->proxy = estrdup(proxy);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置最大响应体大小
- * XHCurl::setMaxResponseSize(int $bytes): void
+ * XHCurl::setMaxResponseSize(int $bytes): static
  * 超过此大小的响应体会被截断并返回错误
  * 用于防止内存溢出，默认 10MB
  */
@@ -348,6 +405,9 @@ PHP_METHOD(XHCurl, setMaxResponseSize)
 
     /* 设置最大响应体大小 */
     obj->max_response_size = (size_t)bytes;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
@@ -369,6 +429,9 @@ PHP_METHOD(XHCurl, setHttp2)
 
     /* 设置 HTTP/2 启用状态 */
     obj->http2_enabled = enabled;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
@@ -406,6 +469,9 @@ PHP_METHOD(XHCurl, setRetry)
     /* 设置重试参数 */
     obj->retry_count = count;
     obj->retry_delay_ms = (delay_ms > 0) ? delay_ms : 100;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
@@ -469,6 +535,18 @@ PHP_METHOD(XHCurl, exec)
             /* 需要重试：清理当前请求的数据，准备下一次尝试 */
             attempt++;
 
+            /* +----------------------------------------------------------+
+             * | 重试时不使用 curl_easy_reset                              |
+             * | curl_easy_reset 会清除所有选项（URL、回调、头部、Cookie、 |
+             * | SSL、代理等），需要重新设置几十个选项，极易遗漏导致重试    |
+             * | 请求与首次请求行为不一致                                  |
+             * |                                                          |
+             * | 正确做法：curl easy 句柄在 curl_easy_perform 后保留所有  |
+             * | 选项设置，可直接再次调用 curl_easy_perform 而无需重置     |
+             * | 只需清理上次请求的响应数据（缓冲区、头部、状态码等）      |
+             * +----------------------------------------------------------+
+             */
+
             /* 重置响应体缓冲区（保留容量，仅重置大小） */
             ctx->body_buf.size = 0;
             /* 重置响应头缓冲区 */
@@ -476,6 +554,13 @@ PHP_METHOD(XHCurl, exec)
             /* 释放已解析的头部链表 */
             xhcurl_header_list_free(ctx->parsed_headers);
             ctx->parsed_headers = NULL;
+            /* 释放 Content-Type（重试后由新的响应重新设置） */
+            if (ctx->content_type != NULL) {
+                efree(ctx->content_type);
+                ctx->content_type = NULL;
+            }
+            /* 重置状态码 */
+            ctx->status_code = 0;
 
             /* 等待重试间隔（毫秒级 sleep） */
             if (curl_obj->retry_delay_ms > 0) {
@@ -685,6 +770,19 @@ PHP_MINIT_FUNCTION(xhcurl)
 {
     /* 全局初始化 libcurl 库 */
     curl_global_init(CURL_GLOBAL_ALL);
+
+    /* +--------------------------------------------------------------+
+     * | 初始化 XHCurl 自定义对象操作函数表                             |
+     * | 必须在注册类之前初始化，因为 create_obj 中会引用此 handlers   |
+     * | 关键：设置 free_obj 回调，确保 PHP 对象销毁时释放 C 侧资源   |
+     * | 不设置 free_obj 会导致 curl_share/curl_slist 等资源泄漏      |
+     * +--------------------------------------------------------------+
+     */
+    memcpy(&xhcurl_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    /* 设置 free_obj 回调：PHP GC 回收对象时自动调用 xhcurl_free_obj */
+    xhcurl_object_handlers.free_obj = xhcurl_free_obj;
+    /* 设置 std 字段在结构体中的偏移量，free_obj 回调需要此信息 */
+    xhcurl_object_handlers.offset = XtOffsetOf(xhcurl_obj_t, std);
 
     /* 注册 XHCurl 全局管理器类 */
     PHP_MINIT(xhcurl_class)(INIT_FUNC_ARGS_PASSTHRU);

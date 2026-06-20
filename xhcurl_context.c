@@ -75,8 +75,10 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     /* GET 方法是默认值，无需额外设置 */
 
     /* 设置请求体（POST/PUT/PATCH 等方法） */
+    /* 使用 CURLOPT_COPYPOSTFIELDS 让 curl 复制数据，避免 XHRequest 修改 body 后指针悬空 */
     if (req_obj->body != NULL && req_obj->body_len > 0) {
-        curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, req_obj->body);
+        curl_easy_setopt(ctx->easy, CURLOPT_COPYPOSTFIELDS, req_obj->body);
+        /* COPYPOSTFIELDS 使用 strlen 确定长度，对于含 null 字节的数据需显式设置大小 */
         curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE, (long)req_obj->body_len);
     }
 
@@ -90,7 +92,10 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
 
     /* 设置 SSL 验证 */
     curl_easy_setopt(ctx->easy, CURLOPT_SSL_VERIFYPEER, (long)curl_obj->verify_ssl);
-    curl_easy_setopt(ctx->easy, CURLOPT_SSL_VERIFYHOST, (long)curl_obj->verify_ssl);
+    /* 设置 SSL 主机名验证 */
+    /* verify_ssl 为 true 时设为 2（验证主机名与证书 CN/SAN 匹配）， */
+    /* 为 false 时设为 0（不验证）；值 1 在 curl 7.28.1 后已无效 */
+    curl_easy_setopt(ctx->easy, CURLOPT_SSL_VERIFYHOST, curl_obj->verify_ssl ? 2L : 0L);
 
     /* 设置 User-Agent */
     if (curl_obj->user_agent != NULL) {
@@ -123,25 +128,47 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     }
 #endif
 
-    /* 构建请求头列表：先添加全局头部，再添加请求级头部（请求级可覆盖全局） */
+    /* 构建请求头列表：先添加全局头部，再添加请求级头部（请求级覆盖全局同名头部） */
     struct curl_slist *headers = NULL;
 
-    /* 添加全局头部 */
+    /* 第一遍：收集请求级头部名称（用于过滤全局同名头部） */
+    /* 请求级头部优先，全局头部中与请求级同名的会被跳过 */
+    xhcurl_header_t *req_h = req_obj->headers;
+
+    /* 添加全局头部（跳过与请求级同名的） */
     xhcurl_header_t *global_h = curl_obj->global_headers_raw;
     while (global_h != NULL) {
-        /* 构建 "Name: Value" 格式的头部字符串 */
-        char header_line[4096];
-        snprintf(header_line, sizeof(header_line), "%s: %s", global_h->name, global_h->value);
-        headers = curl_slist_append(headers, header_line);
+        /* 检查请求级头部中是否存在同名头部 */
+        zend_bool overridden = 0;
+        xhcurl_header_t *check = req_obj->headers;
+        while (check != NULL) {
+            if (strcmp(check->name, global_h->name) == 0) {
+                /* 请求级存在同名头部，跳过此全局头部 */
+                overridden = 1;
+                break;
+            }
+            check = check->next;
+        }
+        if (!overridden) {
+            /* 未被请求级覆盖，添加全局头部 */
+            /* 动态分配头部行，避免固定缓冲区截断超长头部 */
+            size_t line_len = strlen(global_h->name) + 2 + strlen(global_h->value) + 1;
+            char *header_line = (char *)emalloc(line_len);
+            snprintf(header_line, line_len, "%s: %s", global_h->name, global_h->value);
+            headers = curl_slist_append(headers, header_line);
+            efree(header_line);
+        }
         global_h = global_h->next;
     }
 
-    /* 添加请求级头部 */
-    xhcurl_header_t *req_h = req_obj->headers;
+    /* 添加请求级头部（全部添加，已过滤全局同名头部） */
     while (req_h != NULL) {
-        char header_line[4096];
-        snprintf(header_line, sizeof(header_line), "%s: %s", req_h->name, req_h->value);
+        /* 动态分配头部行，避免固定缓冲区截断超长头部 */
+        size_t line_len = strlen(req_h->name) + 2 + strlen(req_h->value) + 1;
+        char *header_line = (char *)emalloc(line_len);
+        snprintf(header_line, line_len, "%s: %s", req_h->name, req_h->value);
         headers = curl_slist_append(headers, header_line);
+        efree(header_line);
         req_h = req_h->next;
     }
 
@@ -152,9 +179,39 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     }
 
     /* 设置 Cookie：全局 Cookie + 请求级 Cookie */
-    /* 使用 curl_share 共享全局 Cookie */
+    /* 使用 curl_share 共享全局 Cookie（启用 Cookie 共享机制） */
     if (curl_obj->share != NULL) {
         curl_easy_setopt(ctx->easy, CURLOPT_SHARE, curl_obj->share);
+    }
+
+    /* +--------------------------------------------------------------+
+     * | 将全局 Cookie 通过 CURLOPT_COOKIELIST 应用到 easy 句柄       |
+     * | curl_share 的 Cookie 共享机制要求先通过某个 easy 句柄设置    |
+     * | Cookie，之后同一 share 下的其他 easy 句柄才能共享            |
+     * | 格式：Netscape/Mozilla 格式                                  |
+     * | 域名\t是否包含子域\t路径\t是否安全\t过期时间\t名称\t值       |
+     * +--------------------------------------------------------------+
+     */
+    if (curl_obj->global_cookies != NULL) {
+        xhcurl_cookie_t *gc = curl_obj->global_cookies;
+        while (gc != NULL) {
+            /* 动态分配 Cookie 行，避免固定缓冲区截断 */
+            size_t domain_len = (gc->domain != NULL) ? strlen(gc->domain) : 0;
+            size_t path_len = (gc->path != NULL) ? strlen(gc->path) : 0;
+            size_t name_len = strlen(gc->name);
+            size_t value_len = strlen(gc->value);
+            /* 计算总长度：域名 + \t + FALSE + \t + 路径 + \t + FALSE + \t + 0 + \t + 名称 + \t + 值 + \0 */
+            size_t line_len = domain_len + 1 + 5 + 1 + path_len + 1 + 5 + 1 + 1 + 1 + name_len + 1 + value_len + 1;
+            char *cookie_line = (char *)emalloc(line_len);
+            snprintf(cookie_line, line_len, "%s\tFALSE\t%s\tFALSE\t0\t%s\t%s",
+                     (domain_len > 0) ? gc->domain : "localhost",
+                     (path_len > 0) ? gc->path : "/",
+                     gc->name, gc->value);
+            /* 通过 COOKIELIST 将 Cookie 添加到 easy 句柄（同时写入 share 的 Cookie jar） */
+            curl_easy_setopt(ctx->easy, CURLOPT_COOKIELIST, cookie_line);
+            efree(cookie_line);
+            gc = gc->next;
+        }
     }
 
     /* 设置请求级 Cookie（通过 Cookie 头部） */

@@ -14,7 +14,7 @@
  */
 
 /**
- * 向 Cookie 链表追加一个 Cookie
+ * 向 Cookie 链表追加一个 Cookie（同名 Cookie 会更新值，避免重复）
  * @param list   Cookie 链表指针的指针
  * @param name   Cookie 名称
  * @param value  Cookie 值
@@ -29,7 +29,30 @@ void xhcurl_cookie_add(xhcurl_cookie_t **list, const char *name, const char *val
         return;
     }
 
-    /* 分配新节点内存，使用 ecalloc 确保零初始化 */
+    /* 去重检查：遍历链表查找同名 Cookie */
+    xhcurl_cookie_t *current = *list;
+    while (current != NULL) {
+        if (current->name != NULL && strcmp(current->name, name) == 0) {
+            /* 找到同名 Cookie，更新值（释放旧值，复制新值） */
+            efree(current->value);
+            current->value = estrdup(value);
+            /* 如果提供了新的 domain，也更新 */
+            if (domain != NULL && (current->domain == NULL || strcmp(current->domain, domain) != 0)) {
+                efree(current->domain);
+                current->domain = estrdup(domain);
+            }
+            /* 如果提供了新的 path，也更新 */
+            if (path != NULL && (current->path == NULL || strcmp(current->path, path) != 0)) {
+                efree(current->path);
+                current->path = estrdup(path);
+            }
+            /* 同名 Cookie 已更新，直接返回 */
+            return;
+        }
+        current = current->next;
+    }
+
+    /* 未找到同名 Cookie，分配新节点内存，使用 ecalloc 确保零初始化 */
     xhcurl_cookie_t *node = (xhcurl_cookie_t *)ecalloc(1, sizeof(xhcurl_cookie_t));
     if (node == NULL) {
         return;

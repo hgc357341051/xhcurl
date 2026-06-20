@@ -70,7 +70,19 @@ int xhcurl_buffer_write(xhcurl_buffer_t *buf, const char *data, size_t len)
         /* 容量不足，需要扩容 */
         /* 计算新容量：至少为当前需要的 2 倍，采用指数增长策略减少频繁扩容 */
         size_t new_capacity = buf->capacity;
-        while (new_capacity < (buf->size + len)) {
+        /* 防止整数溢出：new_capacity * 2 可能超过 SIZE_MAX */
+        size_t needed = buf->size + len;
+        /* 如果当前容量为 0，从合理的初始值开始 */
+        if (new_capacity == 0) {
+            new_capacity = XHCURL_BUFFER_INIT_CAPACITY;
+        }
+        while (new_capacity < needed) {
+            /* 检查翻倍是否会溢出 */
+            if (new_capacity > SIZE_MAX / 2) {
+                /* 无法再翻倍，直接使用所需大小 */
+                new_capacity = needed;
+                break;
+            }
             new_capacity *= 2;
         }
 

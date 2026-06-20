@@ -278,6 +278,7 @@ typedef struct _xhmulti_obj {
 
     /* --- 并发控制 --- */
     int                         max_concurrent;  /* 最大并发数（滑动窗口大小） */
+    zend_bool                   is_executing;    /* 是否正在执行（防止 execute 期间调用 add） */
 
     /* --- easy → context 哈希表（O(1) 查找） --- */
     xhcurl_easy_map_t           easy_map;        /* easy 句柄到上下文的映射 */
@@ -286,6 +287,7 @@ typedef struct _xhmulti_obj {
     zval                       *results;         /* 已完成的 XHResponse zval 数组 */
     int                         result_count;    /* 已完成结果数量 */
     int                         result_capacity; /* 结果数组容量 */
+    int                         completed_count; /* 已完成请求数（含回调模式，用于返回值） */
 
     zend_object                 std;             /* PHP 对象标准头（必须放在最后） */
 } xhmulti_obj_t;
@@ -327,6 +329,7 @@ typedef struct _xhthreadpool_obj {
     zval                       *pending_user_data;/* 待执行请求的用户自定义数据数组（与 pending_requests 一一对应） */
     int                         pending_count;   /* 待执行请求数量 */
     int                         pending_capacity;/* 待执行数组容量 */
+    zend_bool                   is_executing;    /* 是否正在执行（防止 execute 期间调用 add） */
 
     zend_object                 std;             /* PHP 对象标准头（必须放在最后） */
 } xhthreadpool_obj_t;
@@ -430,6 +433,9 @@ void xhcurl_buffer_free(xhcurl_buffer_t *buf);
 
 /* 向头部链表追加一个头部，name 会被转为小写存储 */
 void xhcurl_header_add(xhcurl_header_t **list, const char *name, const char *value);
+
+/* 设置头部值（存在则替换，不存在则添加），用于请求头去重 */
+void xhcurl_header_set(xhcurl_header_t **list, const char *name, const char *value);
 
 /* 在头部链表中查找指定名称的头部值（名称不区分大小写） */
 const char *xhcurl_header_find(xhcurl_header_t *list, const char *name);

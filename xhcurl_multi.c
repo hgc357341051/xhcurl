@@ -17,6 +17,9 @@
 /* 类入口指针 */
 zend_class_entry *xhmulti_ce;
 
+/* XHMulti 自定义对象操作函数表（用于注册 free_obj，确保对象销毁时释放资源） */
+static zend_object_handlers xhmulti_object_handlers;
+
 /* +----------------------------------------------------------------------+
  * | 哈希表操作函数（easy 句柄 → 上下文映射）                              |
  * | O(1) 查找替代原来的 O(n) 线性遍历                                    |
@@ -240,6 +243,7 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
     obj->multi = NULL;                  /* curl multi 句柄在构造函数中创建 */
     obj->curl_obj = NULL;               /* XHCurl 引用在构造函数中设置 */
     obj->pending_requests = NULL;       /* 待执行队列在首次 add 时分配 */
+    obj->pending_user_data = NULL;      /* 用户数据队列在首次 add 时分配 */
     obj->pending_count = 0;             /* 初始待执行数为 0 */
     obj->pending_capacity = 0;          /* 初始容量为 0 */
     obj->pending_head = 0;              /* 队列头部索引为 0 */
@@ -247,6 +251,7 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
     obj->context_count = 0;             /* 初始活跃数为 0 */
     obj->context_capacity = 0;          /* 初始容量为 0 */
     obj->max_concurrent = XHCURL_DEFAULT_MAX_CONCURRENT; /* 默认最大并发 100 */
+    obj->is_executing = 0;              /* 初始未在执行 */
     obj->results = NULL;                /* 结果数组在 execute 时分配 */
     obj->result_count = 0;              /* 初始结果数为 0 */
     obj->result_capacity = 0;           /* 初始容量为 0 */
@@ -255,8 +260,8 @@ static zend_object *xhmulti_create_obj(zend_class_entry *class_type)
     /* 初始化哈希表 */
     xhcurl_easy_map_init(&obj->easy_map);
 
-    /* 设置对象释放函数 */
-    obj->std.handlers = zend_get_std_object_handlers();
+    /* 设置自定义对象操作函数表（包含 free_obj，确保对象销毁时调用 xhmulti_free_obj） */
+    obj->std.handlers = &xhmulti_object_handlers;
 
     return &obj->std;
 }
@@ -347,15 +352,18 @@ static xhcurl_req_context_t *xhmulti_dispatch_next(xhmulti_obj_t *obj)
  * 处理已完成的请求：提取结果、移除 easy 句柄、释放上下文
  * @param obj      XHMulti 对象
  * @param ctx      请求上下文
+ * @param curl_result curl 执行结果码（来自 CURLMsg.data.result）
  * @param fci      回调函数调用信息（fci->size == 0 表示无回调）
  * @param fcc      回调函数调用缓存
  * @param has_callback 是否有回调函数
+ * @param completed_count 已完成请求数（用于回调中的 completed 参数）
  * @param response_zv 输出的 XHResponse zval（调用方需释放）
  * @return 0 成功，-1 失败
  */
 static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *ctx,
+                                      CURLcode curl_result,
                                       zend_fcall_info *fci, zend_fcall_info_cache *fcc,
-                                      zend_bool has_callback, zval *response_zv)
+                                      zend_bool has_callback, int completed_count, zval *response_zv)
 {
     /* 获取 HTTP 状态码 */
     ctx->status_code = 0;
@@ -377,7 +385,8 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
 
     /* 填充响应数据 */
     resp_obj->status_code = ctx->status_code;
-    resp_obj->curl_code = CURLE_OK;
+    /* 保存 curl 执行结果码（CURLE_OK 表示成功，其他值表示各类网络错误） */
+    resp_obj->curl_code = curl_result;
 
     /* 获取请求总耗时 */
     curl_easy_getinfo(ctx->easy, CURLINFO_TOTAL_TIME, &resp_obj->total_time);
@@ -387,9 +396,13 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
         resp_obj->content_type = estrdup(ctx->content_type);
     }
 
-    /* 设置错误信息：如果状态码为 0 且无数据，则视为请求失败 */
-    if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
-        resp_obj->error_msg = estrdup("Request failed");
+    /* 设置错误信息：优先使用 curl 错误描述，其次使用通用错误信息 */
+    if (curl_result != CURLE_OK) {
+        /* curl 执行失败（网络错误、超时、DNS 失败等），使用 curl 提供的错误描述 */
+        resp_obj->error_msg = estrdup(curl_easy_strerror(curl_result));
+    } else if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
+        /* curl 执行成功但无响应数据（可能是服务器关闭连接等），使用通用错误信息 */
+        resp_obj->error_msg = estrdup("Request failed: no response received");
     }
 
     /* 转移响应体缓冲区所有权（避免大块内存复制） */
@@ -419,7 +432,7 @@ static int xhmulti_process_completed(xhmulti_obj_t *obj, xhcurl_req_context_t *c
         /* 调用 PHP 回调：callback(XHResponse $response, int $completed, int $total, mixed $userData) */
         zval args[4];
         ZVAL_COPY(&args[0], response_zv);                      /* 响应对象 */
-        ZVAL_LONG(&args[1], obj->result_count + 1);            /* 已完成数 */
+        ZVAL_LONG(&args[1], completed_count);                  /* 已完成数（使用独立计数器） */
         ZVAL_LONG(&args[2], obj->pending_count);               /* 总请求数 */
 
         /* 第4个参数：用户自定义数据（未设置则传 null） */
@@ -466,6 +479,15 @@ static void xhmulti_cleanup_context(xhmulti_obj_t *obj, xhcurl_req_context_t *ct
     curl_multi_remove_handle(obj->multi, ctx->easy);
     /* 从哈希表移除 */
     xhcurl_easy_map_remove(&obj->easy_map, ctx->easy);
+
+    /* 从活跃上下文数组中查找并清除指针（防止 use-after-free） */
+    for (int i = 0; i < obj->context_count; i++) {
+        if (obj->contexts[i] == ctx) {
+            obj->contexts[i] = NULL;
+            break;
+        }
+    }
+
     /* 释放上下文资源 */
     xhcurl_context_free(ctx);
 }
@@ -551,24 +573,48 @@ PHP_METHOD(XHMulti, add)
     /* 获取 XHMulti 对象 */
     xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
+    /* 防止在 execute 期间调用 add()，避免并发修改 pending 队列 */
+    if (obj->is_executing) {
+        zend_throw_exception(xhcurl_exception_ce,
+            "Cannot add requests while execute() is running", 0);
+        return;
+    }
+
     /* 检查是否需要扩容待执行队列 */
     if (obj->pending_count >= obj->pending_capacity) {
         /* 计算新容量（初始 64，之后翻倍增长） */
         int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
+
+        /* 先保存旧指针，用于分配失败时回滚 */
+        zval *old_requests = obj->pending_requests;
+        zval *old_user_data = obj->pending_user_data;
+
         /* 重新分配请求队列数组 */
-        obj->pending_requests = (zval *)erealloc(
+        zval *new_requests = (zval *)erealloc(
             obj->pending_requests, new_capacity * sizeof(zval));
-        if (obj->pending_requests == NULL) {
+        if (new_requests == NULL) {
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate pending queue", 0);
             return;
         }
+        obj->pending_requests = new_requests;
+
         /* 重新分配用户数据数组（与请求队列一一对应） */
-        obj->pending_user_data = (zval *)erealloc(
+        zval *new_user_data = (zval *)erealloc(
             obj->pending_user_data, new_capacity * sizeof(zval));
-        if (obj->pending_user_data == NULL) {
+        if (new_user_data == NULL) {
+            /* 回滚：将 pending_requests 恢复为旧指针 */
+            /* 注意：erealloc 成功后旧指针已失效，new_requests 就是正确的指针 */
+            /* 但 pending_user_data 分配失败，需要恢复 pending_requests 到扩容前状态 */
+            /* 由于 erealloc 可能已移动内存，无法回滚，只能将 new_requests 缩回 */
+            /* 实际上 erealloc 不会返回 NULL 时影响旧指针，这里直接报错即可 */
+            /* PHP 的 erealloc 在内存不足时会调用 zend_error_noreturn 终止请求 */
+            /* 所以下面的代码在正常 PHP 环境中不会执行到 */
+            obj->pending_user_data = old_user_data;
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate user data queue", 0);
             return;
         }
+        obj->pending_user_data = new_user_data;
+
         /* 初始化新分配的空间 */
         for (int i = obj->pending_count; i < new_capacity; i++) {
             ZVAL_UNDEF(&obj->pending_requests[i]);
@@ -642,6 +688,9 @@ PHP_METHOD(XHMulti, execute)
     /* 重置队列头部索引（从头开始消费） */
     obj->pending_head = 0;
 
+    /* 设置执行标志（防止 execute 期间调用 add） */
+    obj->is_executing = 1;
+
     /* 初始化结果数组（无 callback 模式下使用） */
     if (obj->results == NULL || obj->result_capacity < obj->pending_count) {
         /* 分配足够大的结果数组 */
@@ -675,6 +724,8 @@ PHP_METHOD(XHMulti, execute)
 
     /* --- 阶段 2：滑动窗口事件循环 --- */
     int still_running = 0;
+    /* 已完成请求数计数器（存储在对象中，供回调模式和返回值使用） */
+    obj->completed_count = 0;
     do {
         /* 执行一次 multi 操作 */
         CURLMcode mc = curl_multi_perform(obj->multi, &still_running);
@@ -697,11 +748,14 @@ PHP_METHOD(XHMulti, execute)
                 continue; /* 未找到上下文，跳过 */
             }
 
-            /* 处理已完成的请求：提取结果 */
+            /* 处理已完成的请求：提取结果，传递 curl 执行结果码用于错误诊断 */
             zval response_zv;
             ZVAL_UNDEF(&response_zv);
+            /* 递增已完成计数器（在 process_completed 之前，因为回调需要最新的 completed 值） */
+            obj->completed_count++;
             int process_result = xhmulti_process_completed(obj, ctx,
-                &callback_fci, &callback_fcc, has_callback, &response_zv);
+                msg->data.result,
+                &callback_fci, &callback_fcc, has_callback, obj->completed_count, &response_zv);
 
             if (process_result == 0 && !Z_ISUNDEF(response_zv)) {
                 if (has_callback) {
@@ -715,6 +769,10 @@ PHP_METHOD(XHMulti, execute)
                         /* 结果数组已满，需要扩容 */
                         int new_cap = obj->result_capacity * 2;
                         obj->results = (zval *)erealloc(obj->results, new_cap * sizeof(zval));
+                        /* 初始化新分配的空间为 UNDEF，防止异常路径中 zval_ptr_dtor 访问未初始化的 zval */
+                        for (int j = obj->result_capacity; j < new_cap; j++) {
+                            ZVAL_UNDEF(&obj->results[j]);
+                        }
                         ZVAL_COPY_VALUE(&obj->results[obj->result_count], &response_zv);
                         obj->result_capacity = new_cap;
                     }
@@ -727,6 +785,11 @@ PHP_METHOD(XHMulti, execute)
 
             /* 清理已完成的上下文 */
             xhmulti_cleanup_context(obj, ctx);
+
+            /* 回调抛出异常时立即中断事件循环，避免异常堆积 */
+            if (process_result != 0 && EG(exception) != NULL) {
+                break;
+            }
 
             /* 滑动窗口：从 pending 队列取下一个请求补充窗口 */
             if (obj->pending_head < obj->pending_count) {
@@ -769,7 +832,7 @@ PHP_METHOD(XHMulti, execute)
     if (has_callback) {
         /* 有回调模式：返回已完成数和总数 ['completed' => N, 'total' => M] */
         array_init(return_value);
-        add_assoc_long(return_value, "completed", obj->result_count);
+        add_assoc_long(return_value, "completed", obj->completed_count);
         add_assoc_long(return_value, "total", obj->pending_count);
     } else {
         /* 无回调模式：返回 XHResponse 数组（兼容旧 API） */
@@ -799,6 +862,8 @@ PHP_METHOD(XHMulti, execute)
     }
     obj->pending_count = 0;
     obj->pending_head = 0;
+    /* 清除执行标志（允许再次 add） */
+    obj->is_executing = 0;
 }
 
 /**
@@ -815,6 +880,70 @@ PHP_METHOD(XHMulti, count)
 
     /* 返回待执行请求数量 */
     RETURN_LONG(obj->pending_count);
+}
+
+/**
+ * 设置最大并发数（滑动窗口大小）
+ * XHMulti::setMaxConcurrent(int $max): static
+ *
+ * 动态调整滑动窗口大小，影响 execute() 时的同时活跃请求数
+ * 必须在 execute() 之前调用，执行中修改无效
+ *
+ * @param int $max 最大并发数（1-10000）
+ */
+PHP_METHOD(XHMulti, setMaxConcurrent)
+{
+    zend_long max_concurrent; /* 最大并发数参数 */
+
+    /* 解析参数：1个整数 */
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(max_concurrent)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 验证并发数必须大于 0 */
+    if (max_concurrent <= 0) {
+        zend_throw_exception(xhcurl_exception_ce,
+            "maxConcurrent must be greater than 0", 0);
+        return;
+    }
+
+    /* 限制最大并发数不超过 10000，防止系统资源耗尽 */
+    if (max_concurrent > 10000) {
+        max_concurrent = 10000;
+    }
+
+    /* 获取 XHMulti 对象 */
+    xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 更新最大并发数 */
+    obj->max_concurrent = (int)max_concurrent;
+
+    /* 同步更新 curl multi 句柄的连接数限制 */
+    if (obj->multi != NULL) {
+        curl_multi_setopt(obj->multi, CURLMOPT_MAXCONNECTS, (long)max_concurrent);
+        curl_multi_setopt(obj->multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, (long)max_concurrent);
+    }
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+
+/**
+ * 获取当前最大并发数
+ * XHMulti::getMaxConcurrent(): int
+ *
+ * @return int 当前最大并发数
+ */
+PHP_METHOD(XHMulti, getMaxConcurrent)
+{
+    /* 无参数 */
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    /* 获取 XHMulti 对象 */
+    xhmulti_obj_t *obj = XHMULTI_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 返回当前最大并发数 */
+    RETURN_LONG(obj->max_concurrent);
 }
 
 /* +----------------------------------------------------------------------+
@@ -843,6 +972,15 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_count, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+/* setMaxConcurrent 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_setMaxConcurrent, 0, 0, 1)
+    ZEND_ARG_INFO(0, max)             /* 最大并发数（必填） */
+ZEND_END_ARG_INFO()
+
+/* getMaxConcurrent 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhmulti_getMaxConcurrent, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry xhmulti_methods[] = {
     /* 构造函数 */
     PHP_ME(XHMulti, __construct, arginfo_xhmulti_construct, ZEND_ACC_PUBLIC)
@@ -852,6 +990,10 @@ static const zend_function_entry xhmulti_methods[] = {
     PHP_ME(XHMulti, execute, arginfo_xhmulti_execute, ZEND_ACC_PUBLIC)
     /* 获取请求数量 */
     PHP_ME(XHMulti, count, arginfo_xhmulti_count, ZEND_ACC_PUBLIC)
+    /* 设置最大并发数 */
+    PHP_ME(XHMulti, setMaxConcurrent, arginfo_xhmulti_setMaxConcurrent, ZEND_ACC_PUBLIC)
+    /* 获取最大并发数 */
+    PHP_ME(XHMulti, getMaxConcurrent, arginfo_xhmulti_getMaxConcurrent, ZEND_ACC_PUBLIC)
     /* 结束标记 */
     PHP_FE_END
 };
@@ -869,8 +1011,20 @@ PHP_MINIT_FUNCTION(xhmulti_class)
     /* 注册类 */
     xhmulti_ce = zend_register_internal_class(&ce);
 
-    /* 设置对象创建和释放函数 */
+    /* 设置对象创建函数 */
     xhmulti_ce->create_object = xhmulti_create_obj;
+
+    /* +--------------------------------------------------------------+
+     * | 初始化自定义对象操作函数表                                     |
+     * | 关键：设置 free_obj 回调，确保 PHP 对象销毁时释放 C 侧资源   |
+     * | 不设置 free_obj 会导致 curl_multi/contexts/pending 等资源泄漏 |
+     * +--------------------------------------------------------------+
+     */
+    memcpy(&xhmulti_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    /* 设置 free_obj 回调：PHP GC 回收对象时自动调用 xhmulti_free_obj */
+    xhmulti_object_handlers.free_obj = xhmulti_free_obj;
+    /* 设置 std 字段在结构体中的偏移量 */
+    xhmulti_object_handlers.offset = XtOffsetOf(xhmulti_obj_t, std);
 
     return SUCCESS;
 }

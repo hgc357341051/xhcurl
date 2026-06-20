@@ -46,6 +46,42 @@ void xhcurl_header_add(xhcurl_header_t **list, const char *name, const char *val
 }
 
 /**
+ * 设置头部值（存在则替换，不存在则添加）
+ * 用于请求头去重，避免 setJsonBody 等方法重复添加同名头部
+ * @param list  头部链表指针的指针（可能修改头指针）
+ * @param name  头部名称（不区分大小写匹配）
+ * @param value 头部值
+ */
+void xhcurl_header_set(xhcurl_header_t **list, const char *name, const char *value)
+{
+    /* 参数有效性检查 */
+    if (list == NULL || name == NULL || value == NULL) {
+        return;
+    }
+
+    /* 创建小写化的查找键 */
+    char *key = estrdup(name);
+    xhcurl_str_tolower(key, strlen(key));
+
+    /* 遍历链表查找是否已存在同名头部 */
+    xhcurl_header_t *current = *list;
+    while (current != NULL) {
+        if (strcmp(current->name, key) == 0) {
+            /* 找到同名头部，替换值 */
+            efree(current->value);              /* 释放旧值 */
+            current->value = estrdup(value);    /* 设置新值 */
+            efree(key);
+            return;
+        }
+        current = current->next;
+    }
+
+    /* 未找到同名头部，添加新节点 */
+    efree(key);
+    xhcurl_header_add(list, name, value);
+}
+
+/**
  * 在头部链表中查找指定名称的头部值
  * @param list 头部链表指针
  * @param name 要查找的头部名称（不区分大小写）
@@ -58,23 +94,46 @@ const char *xhcurl_header_find(xhcurl_header_t *list, const char *name)
         return NULL;
     }
 
-    /* 创建小写化的查找键 */
-    char *key = estrdup(name);
-    xhcurl_str_tolower(key, strlen(key));
+    /* 在栈上创建小写化的查找键（避免每次调用都 estrdup/efree） */
+    /* 绝大多数 HTTP 头部名称不超过 256 字节，栈分配零开销 */
+    size_t name_len = strlen(name);
+    char key_stack[256];
 
-    /* 遍历链表查找匹配的头部 */
-    xhcurl_header_t *current = list;
-    while (current != NULL) {
-        if (strcmp(current->name, key) == 0) {
-            /* 找到匹配的头部 */
-            efree(key);
-            return current->value;
+    if (name_len < sizeof(key_stack)) {
+        /* 头部名称较短，使用栈上缓冲区（零分配） */
+        memcpy(key_stack, name, name_len + 1); /* +1 包含 '\0' */
+        xhcurl_str_tolower(key_stack, name_len);
+
+        /* 遍历链表查找匹配的头部 */
+        xhcurl_header_t *current = list;
+        while (current != NULL) {
+            if (strcmp(current->name, key_stack) == 0) {
+                /* 找到匹配的头部 */
+                return current->value;
+            }
+            current = current->next;
         }
-        current = current->next;
+    } else {
+        /* 头部名称超长（罕见），回退到堆分配 */
+        char *key = estrdup(name);
+        xhcurl_str_tolower(key, name_len);
+
+        /* 遍历链表查找匹配的头部 */
+        xhcurl_header_t *current = list;
+        while (current != NULL) {
+            if (strcmp(current->name, key) == 0) {
+                /* 找到匹配的头部 */
+                efree(key);
+                return current->value;
+            }
+            current = current->next;
+        }
+
+        /* 未找到，释放堆分配的 key */
+        efree(key);
     }
 
     /* 未找到 */
-    efree(key);
     return NULL;
 }
 

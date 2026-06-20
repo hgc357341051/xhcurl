@@ -6,10 +6,6 @@
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的 HTTP 客户端能力，支持单次请求、批量异步请求、多线程并发请求，并针对大数据量场景做了内存优化。
-git tag -d v1.0.0
-git push origin :refs/tags/v1.0.0
-git tag v1.0.0
-git push origin v1.0.0
 
 ## 目录
 
@@ -283,16 +279,16 @@ echo "下载完成，总大小: " . $response->getBodyLength() . " 字节\n";
 
 ```php
 <?php
-$curl = new XHCurl();
-$curl->setGlobalHeader('Authorization', 'Bearer your-token-here');
+$curl = (new XHCurl())
+    ->setGlobalHeader('Authorization', 'Bearer your-token-here');
 
-$request = new XHRequest('https://api.example.com/users');
-$request->setMethod('POST');
-$request->setJsonBody([
-    'name' => '张三',
-    'email' => 'zhangsan@example.com',
-    'age' => 30,
-]);
+$request = (new XHRequest('https://api.example.com/users'))
+    ->setMethod('POST')
+    ->setJsonBody([
+        'name' => '张三',
+        'email' => 'zhangsan@example.com',
+        'age' => 30,
+    ]);
 
 $response = $curl->exec($request);
 
@@ -393,16 +389,16 @@ echo "错误信息: " . ($response->getError() ?? '无') . "\n";
 | 方法 | 说明 |
 |------|------|
 | `__construct()` | 构造函数，初始化 curl_share 共享会话 |
-| `setGlobalHeader(string $name, string $value): void` | 设置全局请求头 |
-| `setGlobalCookie(string $name, string $value, string $domain = '', string $path = '/'): void` | 设置全局 Cookie |
-| `setTimeout(int $seconds): void` | 设置默认请求超时（默认 30 秒） |
-| `setConnectTimeout(int $seconds): void` | 设置默认连接超时（默认 10 秒） |
-| `setVerifySsl(bool $verify): void` | 是否验证 SSL 证书（默认 true） |
-| `setUserAgent(string $ua): void` | 设置默认 User-Agent |
-| `setProxy(string $proxy): void` | 设置代理（如 `http://host:port` 或 `socks5://host:port`） |
-| `setMaxResponseSize(int $bytes): void` | 设置最大响应体大小（默认 10MB，超过则截断） |
-| `setHttp2(bool $enabled): void` | 启用/禁用 HTTP/2（默认启用，支持多路复用） |
-| `setRetry(int $count, int $delayMs = 100): void` | 设置失败重试（网络错误或 5xx 自动重试） |
+| `setGlobalHeader(string $name, string $value): static` | 设置全局请求头（链式） |
+| `setGlobalCookie(string $name, string $value, string $domain = '', string $path = '/'): static` | 设置全局 Cookie（链式） |
+| `setTimeout(int $seconds): static` | 设置默认请求超时（默认 30 秒，链式） |
+| `setConnectTimeout(int $seconds): static` | 设置默认连接超时（默认 10 秒，链式） |
+| `setVerifySsl(bool $verify): static` | 是否验证 SSL 证书（默认 true，链式） |
+| `setUserAgent(string $ua): static` | 设置默认 User-Agent（链式） |
+| `setProxy(string $proxy): static` | 设置代理（如 `http://host:port` 或 `socks5://host:port`，链式） |
+| `setMaxResponseSize(int $bytes): static` | 设置最大响应体大小（默认 10MB，超过则截断，链式） |
+| `setHttp2(bool $enabled): static` | 启用/禁用 HTTP/2（默认启用，支持多路复用，链式） |
+| `setRetry(int $count, int $delayMs = 100): static` | 设置失败重试（网络错误或 5xx 自动重试，链式） |
 | `exec(XHRequest $request): XHResponse` | 同步执行单个请求 |
 
 #### 示例

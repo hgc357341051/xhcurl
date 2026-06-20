@@ -10,6 +10,9 @@
 /* 类入口指针 */
 zend_class_entry *xhrequest_ce;
 
+/* XHRequest 自定义对象操作函数表（用于注册 free_obj，确保对象销毁时释放资源） */
+static zend_object_handlers xhrequest_object_handlers;
+
 /* +----------------------------------------------------------------------+
  * | 对象生命周期函数                                                      |
  * +----------------------------------------------------------------------+
@@ -99,8 +102,8 @@ static zend_object *xhrequest_create_obj(zend_class_entry *class_type)
     ZVAL_UNDEF(&obj->chunk_callback);   /* 无流式回调 */
     ZVAL_UNDEF(&obj->header_callback);  /* 无头部回调 */
 
-    /* 设置对象释放函数 */
-    obj->std.handlers = zend_get_std_object_handlers();
+    /* 设置自定义对象操作函数表（包含 free_obj，确保对象销毁时调用 xhrequest_free_obj） */
+    obj->std.handlers = &xhrequest_object_handlers;
 
     return &obj->std;
 }
@@ -138,7 +141,7 @@ PHP_METHOD(XHRequest, __construct)
 
 /**
  * 设置 HTTP 方法
- * XHRequest::setMethod(string $method): void
+ * XHRequest::setMethod(string $method): static
  */
 PHP_METHOD(XHRequest, setMethod)
 {
@@ -161,12 +164,13 @@ PHP_METHOD(XHRequest, setMethod)
     /* 复制新的方法字符串 */
     obj->method = estrdup(method);
 
-    /* 无返回值（链式调用由 PHP 侧 __clone 或返回 $this 实现） */
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置请求级别头部
- * XHRequest::setHeader(string $name, string $value): void
+ * XHRequest::setHeader(string $name, string $value): static
  * 请求级头部会与全局头部合并，同名头部请求级优先
  */
 PHP_METHOD(XHRequest, setHeader)
@@ -185,13 +189,16 @@ PHP_METHOD(XHRequest, setHeader)
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 添加到请求级头部链表 */
-    xhcurl_header_add(&obj->headers, name, value);
+    /* 设置请求级头部（同名头部会替换旧值，避免重复） */
+    xhcurl_header_set(&obj->headers, name, value);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置请求级别 Cookie
- * XHRequest::setCookie(string $name, string $value): void
+ * XHRequest::setCookie(string $name, string $value): static
  */
 PHP_METHOD(XHRequest, setCookie)
 {
@@ -211,11 +218,14 @@ PHP_METHOD(XHRequest, setCookie)
 
     /* 添加到请求级 Cookie 链表 */
     xhcurl_cookie_add(&obj->cookies, name, value, NULL, NULL);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置请求体
- * XHRequest::setBody(string $body): void
+ * XHRequest::setBody(string $body): static
  */
 PHP_METHOD(XHRequest, setBody)
 {
@@ -238,11 +248,14 @@ PHP_METHOD(XHRequest, setBody)
     /* 复制新的请求体数据 */
     obj->body = estrndup(body, body_len);
     obj->body_len = body_len;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置 JSON 格式请求体
- * XHRequest::setJsonBody(array $data): void
+ * XHRequest::setJsonBody(array $data): static
  * 自动将数组转为 JSON 字符串并设置 Content-Type
  */
 PHP_METHOD(XHRequest, setJsonBody)
@@ -259,23 +272,35 @@ PHP_METHOD(XHRequest, setJsonBody)
     /* 获取当前对象 */
     xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
-    /* 调用 PHP 内置函数 json_encode 进行编码（避免直接依赖 php_json.h） */
+    /* 调用 PHP 内置函数 json_encode 进行编码 */
     ZVAL_COPY(&json_args[0], data);
     ZVAL_UNDEF(&json_ret);
-    /* call_user_function 要求第3个参数为 zval*，不能直接传 zend_string* */
-    zval func_name_zv;
-    ZVAL_STRING(&func_name_zv, "json_encode");
-    /* 调用用户空间 json_encode 函数 */
-    int call_result = call_user_function(EG(function_table), NULL,
-                                          &func_name_zv, &json_ret,
-                                          1, json_args);
-    /* 释放函数名 zval */
-    zval_ptr_dtor(&func_name_zv);
+
+    /* 优先使用 MINIT 阶段缓存的函数指针（避免每次调用都做哈希查找） */
+    if (xhcurl_json_encode_func != NULL) {
+        /* 使用缓存的函数指针直接调用，性能更优 */
+        zend_call_known_function(xhcurl_json_encode_func, NULL, NULL,
+                                  &json_ret, 1, json_args, NULL);
+    } else {
+        /* 回退方案：通过函数名查找调用（json 扩展未加载时） */
+        zval func_name_zv;
+        ZVAL_STRING(&func_name_zv, "json_encode");
+        int call_result = call_user_function(EG(function_table), NULL,
+                                              &func_name_zv, &json_ret,
+                                              1, json_args);
+        zval_ptr_dtor(&func_name_zv);
+        if (call_result != SUCCESS) {
+            zval_ptr_dtor(&json_args[0]);
+            zend_throw_exception(xhcurl_exception_ce, "Failed to call json_encode", 0);
+            return;
+        }
+    }
+
     /* 释放参数 */
     zval_ptr_dtor(&json_args[0]);
 
-    /* 检查调用是否成功以及返回值是否为字符串 */
-    if (call_result != SUCCESS || Z_TYPE(json_ret) != IS_STRING) {
+    /* 检查返回值是否为字符串（编码失败时返回 false 或抛出异常） */
+    if (Z_TYPE(json_ret) != IS_STRING) {
         /* JSON 编码失败 */
         if (Z_TYPE(json_ret) != IS_UNDEF) {
             zval_ptr_dtor(&json_ret);
@@ -296,13 +321,16 @@ PHP_METHOD(XHRequest, setJsonBody)
     /* 释放 json_encode 返回值 */
     zval_ptr_dtor(&json_ret);
 
-    /* 自动设置 Content-Type 为 application/json */
-    xhcurl_header_add(&obj->headers, "Content-Type", "application/json");
+    /* 自动设置 Content-Type 为 application/json（使用 set 去重，避免重复添加） */
+    xhcurl_header_set(&obj->headers, "Content-Type", "application/json");
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置请求超时时间
- * XHRequest::setTimeout(int $seconds): void
+ * XHRequest::setTimeout(int $seconds): static
  * 设置为 0 表示使用全局默认值
  */
 PHP_METHOD(XHRequest, setTimeout)
@@ -319,11 +347,14 @@ PHP_METHOD(XHRequest, setTimeout)
 
     /* 设置超时时间 */
     obj->timeout = (long)seconds;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置连接超时时间
- * XHRequest::setConnectTimeout(int $seconds): void
+ * XHRequest::setConnectTimeout(int $seconds): static
  */
 PHP_METHOD(XHRequest, setConnectTimeout)
 {
@@ -339,11 +370,14 @@ PHP_METHOD(XHRequest, setConnectTimeout)
 
     /* 设置连接超时 */
     obj->connect_timeout = (long)seconds;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 设置是否跟随重定向
- * XHRequest::setFollowRedirects(bool $follow, int $max = 5): void
+ * XHRequest::setFollowRedirects(bool $follow, int $max = 5): static
  */
 PHP_METHOD(XHRequest, setFollowRedirects)
 {
@@ -363,11 +397,14 @@ PHP_METHOD(XHRequest, setFollowRedirects)
     /* 设置重定向跟随 */
     obj->follow_redirects = follow;
     obj->max_redirects = (long)max_redirects;
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 注册流式数据回调
- * XHRequest::onChunk(callable $callback): void
+ * XHRequest::onChunk(callable $callback): static
  * 当接收到响应体数据时，会调用此回调函数
  * 回调签名：function(string $chunk): void
  * 注意：此回调在 XHThreadPool 模式下无效（线程安全限制）
@@ -397,11 +434,14 @@ PHP_METHOD(XHRequest, onChunk)
 
     /* 保存新的回调引用 */
     ZVAL_COPY(&obj->chunk_callback, callback);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
  * 注册响应头回调
- * XHRequest::onHeader(callable $callback): void
+ * XHRequest::onHeader(callable $callback): static
  * 当接收到响应头数据时，会调用此回调函数
  * 回调签名：function(string $headerLine): void
  * 注意：此回调在 XHThreadPool 模式下无效（线程安全限制）
@@ -431,6 +471,9 @@ PHP_METHOD(XHRequest, onHeader)
 
     /* 保存新的回调引用 */
     ZVAL_COPY(&obj->header_callback, callback);
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
 }
 
 /**
@@ -561,8 +604,20 @@ PHP_MINIT_FUNCTION(xhrequest_class)
     /* 注册类 */
     xhrequest_ce = zend_register_internal_class(&ce);
 
-    /* 设置对象创建和释放函数 */
+    /* 设置对象创建函数 */
     xhrequest_ce->create_object = xhrequest_create_obj;
+
+    /* +--------------------------------------------------------------+
+     * | 初始化自定义对象操作函数表                                     |
+     * | 关键：设置 free_obj 回调，确保 PHP 对象销毁时释放 C 侧资源   |
+     * | 不设置 free_obj 会导致 url/method/headers/cookies 等资源泄漏 |
+     * +--------------------------------------------------------------+
+     */
+    memcpy(&xhrequest_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    /* 设置 free_obj 回调：PHP GC 回收对象时自动调用 xhrequest_free_obj */
+    xhrequest_object_handlers.free_obj = xhrequest_free_obj;
+    /* 设置 std 字段在结构体中的偏移量 */
+    xhrequest_object_handlers.offset = XtOffsetOf(xhrequest_obj_t, std);
 
     return SUCCESS;
 }

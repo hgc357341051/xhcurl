@@ -10,6 +10,9 @@
 /* 类入口指针 */
 zend_class_entry *xhresponse_ce;
 
+/* XHResponse 自定义对象操作函数表（用于注册 free_obj，确保对象销毁时释放资源） */
+static zend_object_handlers xhresponse_object_handlers;
+
 /* +----------------------------------------------------------------------+
  * | 对象生命周期函数                                                      |
  * +----------------------------------------------------------------------+
@@ -84,9 +87,10 @@ static zend_object *xhresponse_create_obj(zend_class_entry *class_type)
     obj->body = NULL;           /* 无响应体（后续由执行器设置） */
     obj->content_type = NULL;   /* 无 Content-Type */
     obj->total_time = 0.0;      /* 耗时为 0 */
+    ZVAL_UNDEF(&obj->user_data); /* 用户自定义数据默认未定义 */
 
-    /* 设置对象释放函数 */
-    obj->std.handlers = zend_get_std_object_handlers();
+    /* 设置自定义对象操作函数表（包含 free_obj，确保对象销毁时调用 xhresponse_free_obj） */
+    obj->std.handlers = &xhresponse_object_handlers;
 
     return &obj->std;
 }
@@ -145,6 +149,7 @@ PHP_METHOD(XHResponse, getHeader)
  * 获取所有响应头
  * XHResponse::getHeaders(): array
  * 注意：数据量大时慎用，建议使用 getHeader() 按需获取
+ * 同名头部（如 Set-Cookie）的值会合并为数组
  */
 PHP_METHOD(XHResponse, getHeaders)
 {
@@ -160,8 +165,26 @@ PHP_METHOD(XHResponse, getHeaders)
     /* 遍历头部链表，逐个添加到数组 */
     xhcurl_header_t *current = obj->headers;
     while (current != NULL) {
-        /* 添加键值对到数组 */
-        add_assoc_string(return_value, current->name, current->value);
+        /* 检查数组中是否已存在同名头部 */
+        zval *existing = zend_hash_str_find(Z_ARRVAL_P(return_value),
+                                             current->name, strlen(current->name));
+        if (existing == NULL) {
+            /* 首次出现：直接添加字符串 */
+            add_assoc_string(return_value, current->name, current->value);
+        } else if (Z_TYPE_P(existing) == IS_STRING) {
+            /* 第二次出现：将字符串转为数组，包含两个值 */
+            zval arr;   /* 临时数组 */
+            array_init(&arr);
+            /* 添加之前的字符串值 */
+            add_next_index_string(&arr, Z_STRVAL_P(existing));
+            /* 添加当前值 */
+            add_next_index_string(&arr, current->value);
+            /* 替换原值为数组 */
+            add_assoc_zval(return_value, current->name, &arr);
+        } else {
+            /* 已是数组（第三次及以后出现）：追加当前值 */
+            add_next_index_string(existing, current->value);
+        }
         current = current->next;
     }
 }
@@ -220,22 +243,22 @@ PHP_METHOD(XHResponse, getBodyChunk)
         RETURN_EMPTY_STRING();
     }
 
-    /* 从缓冲区读取指定范围的数据 */
-    char *out_data = NULL;
-    size_t out_len = 0;
-    int result = xhcurl_buffer_read(obj->body, (size_t)offset, (size_t)length,
-                                     &out_data, &out_len);
+    /* 直接从缓冲区读取指定范围的数据（避免双重复制） */
+    /* 原方案：buffer_read(emalloc+memcpy) → RETVAL_STRINGL(再复制) → efree */
+    /* 优化后：直接 RETVAL_STRINGL 从 buf->data+offset 复制，省去中间缓冲区 */
+    xhcurl_buffer_t *buf = obj->body;
 
-    if (result != 0 || out_data == NULL || out_len == 0) {
-        /* 读取失败或无数据，返回空字符串 */
+    /* 检查偏移量是否超出缓冲区范围 */
+    if ((size_t)offset >= buf->size) {
         RETURN_EMPTY_STRING();
     }
 
-    /* 返回读取的数据（PHP 会自动复制字符串，之后释放 out_data） */
-    RETVAL_STRINGL(out_data, out_len);
+    /* 计算实际可读取的长度（防止越界读取） */
+    size_t available = buf->size - (size_t)offset;
+    size_t read_len = ((size_t)length < available) ? (size_t)length : available;
 
-    /* 释放临时输出缓冲区（使用 efree 对应 emalloc） */
-    efree(out_data);
+    /* 直接从缓冲区数据指针偏移处复制到 PHP 字符串（单次复制） */
+    RETVAL_STRINGL(buf->data + (size_t)offset, read_len);
 }
 
 /**
@@ -434,8 +457,9 @@ PHP_METHOD(XHResponse, getUserData)
     xhresponse_obj_t *obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
     /* 返回用户自定义数据（未设置则返回 null） */
+    /* 使用 RETURN_COPY 增加引用计数，防止 XHResponse 释放后 PHP 侧持有悬空指针 */
     if (!Z_ISUNDEF(obj->user_data)) {
-        RETURN_COPY_VALUE(&obj->user_data);
+        RETURN_COPY(&obj->user_data);
     } else {
         RETURN_NULL();
     }
@@ -465,10 +489,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_hasHeader, 0, 0, 1)
     ZEND_ARG_INFO(0, name)        /* 头部名称（必填） */
 ZEND_END_ARG_INFO()
 
-/* getBodyChunk 参数信息 */
-ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBodyChunk, 0, 0, 1)
+/* getBodyChunk 参数信息：offset 和 length 都是必填 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getBodyChunk, 0, 0, 2)
     ZEND_ARG_INFO(0, offset)      /* 偏移量（必填） */
-    ZEND_ARG_INFO(0, length)      /* 读取长度（可选） */
+    ZEND_ARG_INFO(0, length)      /* 读取长度（必填） */
 ZEND_END_ARG_INFO()
 
 /* getBodyLength 参数信息（无参数） */
@@ -546,8 +570,20 @@ PHP_MINIT_FUNCTION(xhresponse_class)
     /* 注册类（不支持实例化，由执行器内部创建） */
     xhresponse_ce = zend_register_internal_class(&ce);
 
-    /* 设置对象创建和释放函数 */
+    /* 设置对象创建函数 */
     xhresponse_ce->create_object = xhresponse_create_obj;
+
+    /* +--------------------------------------------------------------+
+     * | 初始化自定义对象操作函数表                                     |
+     * | 关键：设置 free_obj 回调，确保 PHP 对象销毁时释放 C 侧资源   |
+     * | 不设置 free_obj 会导致 body 缓冲区/headers/error_msg 等泄漏  |
+     * +--------------------------------------------------------------+
+     */
+    memcpy(&xhresponse_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    /* 设置 free_obj 回调：PHP GC 回收对象时自动调用 xhresponse_free_obj */
+    xhresponse_object_handlers.free_obj = xhresponse_free_obj;
+    /* 设置 std 字段在结构体中的偏移量 */
+    xhresponse_object_handlers.offset = XtOffsetOf(xhresponse_obj_t, std);
 
     /* 声明属性：statusCode（只读，通过方法访问） */
     zend_declare_property_null(xhresponse_ce, "statusCode", sizeof("statusCode") - 1, ZEND_ACC_PRIVATE);

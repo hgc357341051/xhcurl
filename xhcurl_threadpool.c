@@ -16,6 +16,9 @@
 /* 类入口指针 */
 zend_class_entry *xhthreadpool_ce;
 
+/* XHThreadPool 自定义对象操作函数表（用于注册 free_obj，确保对象销毁时释放资源） */
+static zend_object_handlers xhthreadpool_object_handlers;
+
 /* +----------------------------------------------------------------------+
  * | 工作线程函数                                                          |
  * | 每个工作线程独立运行 curl_multi 事件循环                              |
@@ -91,16 +94,16 @@ static void *xhcurl_worker_thread(void *arg)
                     /* 获取 HTTP 状态码 */
                     curl_easy_getinfo(ctx->easy, CURLINFO_RESPONSE_CODE, &ctx->status_code);
 
-                    /* 获取 Content-Type */
-                    char *ct = NULL;
-                    curl_easy_getinfo(ctx->easy, CURLINFO_CONTENT_TYPE, &ct);
-                    if (ct != NULL && ctx->content_type == NULL) {
-                        /* 使用 strdup 而非 estrdup（线程中不能使用 PHP 内存管理器） */
-                        ctx->content_type = strdup(ct);
-                    }
+                    /* 注意：不在线程中获取/设置 Content-Type */
+                    /* 原因：工作线程中不能使用 PHP 内存管理器（emalloc/efree）， */
+                    /* 而 strdup 分配的内存后续在 xhcurl_context_free 中用 efree 释放 */
+                    /* 会导致 malloc/free 与 efree 不匹配，引发堆损坏或崩溃 */
+                    /* Content-Type 的获取移到主线程的 execute 阶段 5 中进行 */
 
-                    /* 解析响应头 */
-                    xhcurl_parse_response_headers(&ctx->header_buf, &ctx->parsed_headers);
+                    /* 注意：不在线程中解析响应头 */
+                    /* xhcurl_parse_response_headers 使用 ecalloc/efree， */
+                    /* 在工作线程中调用会导致 zend_mm_heap corrupted */
+                    /* 响应头解析移到主线程的 execute 阶段 5 中进行 */
 
                     break;
                 }
@@ -193,12 +196,14 @@ static zend_object *xhthreadpool_create_obj(zend_class_entry *class_type)
     obj->curl_obj = NULL;               /* XHCurl 引用在构造函数中设置 */
     obj->worker_count = XHCURL_DEFAULT_THREAD_POOL_SIZE; /* 默认 4 个工作线程 */
     obj->pending_requests = NULL;       /* 待执行队列在首次 add 时分配 */
+    obj->pending_user_data = NULL;      /* 用户数据队列在首次 add 时分配 */
     obj->pending_count = 0;             /* 初始待执行数为 0 */
     obj->pending_capacity = 0;          /* 初始容量为 0 */
+    obj->is_executing = 0;              /* 初始未在执行 */
     ZVAL_UNDEF(&obj->curl_zval);        /* 初始化 XHCurl 引用 */
 
-    /* 设置对象释放函数 */
-    obj->std.handlers = zend_get_std_object_handlers();
+    /* 设置自定义对象操作函数表（包含 free_obj，确保对象销毁时调用 xhthreadpool_free_obj） */
+    obj->std.handlers = &xhthreadpool_object_handlers;
 
     return &obj->std;
 }
@@ -275,24 +280,44 @@ PHP_METHOD(XHThreadPool, add)
     /* 获取 XHThreadPool 对象 */
     xhthreadpool_obj_t *obj = XHTHREADPOOL_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
 
+    /* 防止在 execute 期间调用 add()，避免并发修改 pending 队列 */
+    if (obj->is_executing) {
+        zend_throw_exception(xhcurl_exception_ce,
+            "Cannot add requests while execute() is running", 0);
+        return;
+    }
+
     /* 检查是否需要扩容待执行队列 */
     if (obj->pending_count >= obj->pending_capacity) {
         /* 计算新容量（初始 64，之后翻倍增长） */
         int new_capacity = (obj->pending_capacity == 0) ? 64 : obj->pending_capacity * 2;
+
+        /* 先保存旧指针，用于分配失败时回滚 */
+        zval *old_requests = obj->pending_requests;
+        zval *old_user_data = obj->pending_user_data;
+
         /* 重新分配请求队列数组 */
-        obj->pending_requests = (zval *)erealloc(
+        zval *new_requests = (zval *)erealloc(
             obj->pending_requests, new_capacity * sizeof(zval));
-        if (obj->pending_requests == NULL) {
+        if (new_requests == NULL) {
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate pending queue", 0);
             return;
         }
+        obj->pending_requests = new_requests;
+
         /* 重新分配用户数据数组（与请求队列一一对应） */
-        obj->pending_user_data = (zval *)erealloc(
+        zval *new_user_data = (zval *)erealloc(
             obj->pending_user_data, new_capacity * sizeof(zval));
-        if (obj->pending_user_data == NULL) {
+        if (new_user_data == NULL) {
+            /* 回滚：pending_user_data 分配失败，恢复旧指针 */
+            /* PHP 的 erealloc 在内存不足时会调用 zend_error_noreturn 终止请求 */
+            /* 所以下面的代码在正常 PHP 环境中不会执行到 */
+            obj->pending_user_data = old_user_data;
             zend_throw_exception(xhcurl_exception_ce, "Failed to allocate user data queue", 0);
             return;
         }
+        obj->pending_user_data = new_user_data;
+
         /* 初始化新分配的空间 */
         for (int i = obj->pending_count; i < new_capacity; i++) {
             ZVAL_UNDEF(&obj->pending_requests[i]);
@@ -340,6 +365,9 @@ PHP_METHOD(XHThreadPool, execute)
         return;
     }
 
+    /* 设置执行标志（防止 execute 期间调用 add） */
+    obj->is_executing = 1;
+
     /* --- 阶段 1：从 pending 队列创建所有请求上下文 --- */
     /* 此时才创建 curl easy 句柄，分配网络资源 */
     xhcurl_req_context_t **contexts = (xhcurl_req_context_t **)ecalloc(
@@ -370,6 +398,27 @@ PHP_METHOD(XHThreadPool, execute)
             ZVAL_COPY(&ctx->user_data, &obj->pending_user_data[i]);
         }
 
+        /* 线程安全：清除 PHP 回调引用，防止工作线程中 curl 回调触发 PHP 函数调用 */
+        /* 工作线程中不能调用 call_user_function，否则会导致崩溃或数据损坏 */
+        if (!Z_ISUNDEF(ctx->chunk_callback)) {
+            zval_ptr_dtor(&ctx->chunk_callback);
+            ZVAL_UNDEF(&ctx->chunk_callback);
+        }
+        if (!Z_ISUNDEF(ctx->header_callback)) {
+            zval_ptr_dtor(&ctx->header_callback);
+            ZVAL_UNDEF(&ctx->header_callback);
+        }
+
+        /* +--------------------------------------------------------------+
+         * | 线程安全：取消 curl_share 绑定                               |
+         * | curl_share 在多线程中共享时需要注册锁回调，否则会导致数据竞争 |
+         * | 全局 Cookie 已在 xhcurl_context_create 中通过               |
+         * | CURLOPT_COOKIELIST 直接设置到 easy 句柄，无需 share 共享    |
+         * | 不取消 share 绑定会导致多线程并发访问 share 内部数据时崩溃   |
+         * +--------------------------------------------------------------+
+         */
+        curl_easy_setopt(ctx->easy, CURLOPT_SHARE, NULL);
+
         contexts[i] = ctx;
         context_count++;
     }
@@ -392,6 +441,8 @@ PHP_METHOD(XHThreadPool, execute)
             }
         }
         obj->pending_count = 0;
+        /* 清除执行标志（所有上下文创建失败） */
+        obj->is_executing = 0;
         return;
     }
 
@@ -509,19 +560,29 @@ PHP_METHOD(XHThreadPool, execute)
         /* 获取请求总耗时 */
         curl_easy_getinfo(ctx->easy, CURLINFO_TOTAL_TIME, &resp_obj->total_time);
 
-        /* 复制 Content-Type */
-        if (ctx->content_type != NULL) {
-            /* 线程中使用 strdup 分配，这里需要转为 estrdup */
-            resp_obj->content_type = estrdup(ctx->content_type);
-            /* 释放线程中分配的字符串 */
-            free(ctx->content_type);
-            ctx->content_type = NULL;
+        /* +----------------------------------------------------------+
+         * | 在主线程中获取 Content-Type                                |
+         * | 工作线程中不能使用 estrdup（PHP 内存管理器非线程安全），    |
+         * | 因此 Content-Type 的获取和设置必须在主线程中完成，         |
+         * | 使用 estrdup 确保与 xhcurl_context_free 中的 efree 匹配   |
+         * +----------------------------------------------------------+
+         */
+        {
+            char *ct = NULL;
+            curl_easy_getinfo(ctx->easy, CURLINFO_CONTENT_TYPE, &ct);
+            if (ct != NULL) {
+                /* 使用 estrdup 分配（PHP 内存管理器），与 efree 匹配 */
+                resp_obj->content_type = estrdup(ct);
+            }
         }
 
         /* 设置错误信息 */
         if (ctx->status_code == 0 && ctx->body_buf.size == 0) {
             resp_obj->error_msg = estrdup("Request failed");
         }
+
+        /* 在主线程中解析响应头（工作线程中不能使用 ecalloc/efree） */
+        xhcurl_parse_response_headers(&ctx->header_buf, &ctx->parsed_headers);
 
         /* 转移响应体缓冲区所有权 */
         resp_obj->body = (xhcurl_buffer_t *)ecalloc(1, sizeof(xhcurl_buffer_t));
@@ -573,6 +634,8 @@ PHP_METHOD(XHThreadPool, execute)
         }
     }
     obj->pending_count = 0;
+    /* 清除执行标志（允许再次 add） */
+    obj->is_executing = 0;
 }
 
 /**
@@ -642,8 +705,20 @@ PHP_MINIT_FUNCTION(xhthreadpool_class)
     /* 注册类 */
     xhthreadpool_ce = zend_register_internal_class(&ce);
 
-    /* 设置对象创建和释放函数 */
+    /* 设置对象创建函数 */
     xhthreadpool_ce->create_object = xhthreadpool_create_obj;
+
+    /* +--------------------------------------------------------------+
+     * | 初始化自定义对象操作函数表                                     |
+     * | 关键：设置 free_obj 回调，确保 PHP 对象销毁时释放 C 侧资源   |
+     * | 不设置 free_obj 会导致 pending 队列/curl_zval 等资源泄漏     |
+     * +--------------------------------------------------------------+
+     */
+    memcpy(&xhthreadpool_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    /* 设置 free_obj 回调：PHP GC 回收对象时自动调用 xhthreadpool_free_obj */
+    xhthreadpool_object_handlers.free_obj = xhthreadpool_free_obj;
+    /* 设置 std 字段在结构体中的偏移量 */
+    xhthreadpool_object_handlers.offset = XtOffsetOf(xhthreadpool_obj_t, std);
 
     return SUCCESS;
 }
