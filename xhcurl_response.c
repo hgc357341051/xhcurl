@@ -117,6 +117,40 @@ PHP_METHOD(XHResponse, getStatusCode)
 }
 
 /**
+ * 获取 curl 原始错误码
+ * XHResponse::getCurlCode(): int
+ *
+ * 返回 curl 执行结果码（CURLcode），用于精确诊断网络错误。
+ * CURLE_OK (0) 表示成功，其他值表示各类网络错误：
+ *   - CURLE_OPERATION_TIMEDOUT (28): 请求超时
+ *   - CURLE_COULDNT_RESOLVE_HOST (6): DNS 解析失败
+ *   - CURLE_COULDNT_CONNECT (7): 连接被拒绝
+ *   - CURLE_SSL_CONNECT_ERROR (35): SSL 握手失败
+ *   - CURLE_PARTIAL_FILE (18): 数据传输不完整
+ *   - 完整列表：https://curl.se/libcurl/c/libcurl-errors.html
+ *
+ * 典型用法：
+ *   if ($response->getStatusCode() === 0 && $response->getCurlCode() !== 0) {
+ *       // 网络层错误，未收到 HTTP 响应
+ *       echo "curl 错误码: " . $response->getCurlCode() . "\n";
+ *       echo "错误描述: " . $response->getError() . "\n";
+ *   }
+ *
+ * @return int curl 错误码（0 = 成功）
+ */
+PHP_METHOD(XHResponse, getCurlCode)
+{
+    /* 无参数 */
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    /* 获取当前对象 */
+    xhresponse_obj_t *obj = XHRESPONSE_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* 返回 curl 原始错误码 */
+    RETURN_LONG((zend_long)obj->curl_code);
+}
+
+/**
  * 获取指定名称的响应头值
  * XHResponse::getHeader(string $name): ?string
  * 不返回所有头部，避免大数据量一次性加载
@@ -498,6 +532,10 @@ PHP_METHOD(XHResponse, getUserData)
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getStatusCode, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
+/* getCurlCode 参数信息（无参数） */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getCurlCode, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
 /* getHeader 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhresponse_getHeader, 0, 0, 1)
     ZEND_ARG_INFO(0, name)        /* 头部名称（必填） */
@@ -557,6 +595,8 @@ ZEND_END_ARG_INFO()
 static const zend_function_entry xhresponse_methods[] = {
     /* 获取 HTTP 状态码 */
     PHP_ME(XHResponse, getStatusCode, arginfo_xhresponse_getStatusCode, ZEND_ACC_PUBLIC)
+    /* 获取 curl 原始错误码 */
+    PHP_ME(XHResponse, getCurlCode, arginfo_xhresponse_getCurlCode, ZEND_ACC_PUBLIC)
     /* 获取指定响应头 */
     PHP_ME(XHResponse, getHeader, arginfo_xhresponse_getHeader, ZEND_ACC_PUBLIC)
     /* 获取所有响应头（慎用） */

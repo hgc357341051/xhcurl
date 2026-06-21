@@ -570,6 +570,159 @@ PHP_METHOD(XHRequest, onHeader)
 }
 
 /**
+ * 设置表单格式的请求体（application/x-www-form-urlencoded）
+ * XHRequest::setFormBody(array $data): static
+ *
+ * 将关联数组编码为 URL 编码的表单字符串，并自动设置 Content-Type。
+ * 类似 PHP curl 中 CURLOPT_POSTFIELDS 传入数组的行为。
+ *
+ * 用法：
+ *   $request->setMethod('POST')->setFormBody(['name' => 'test', 'age' => '25']);
+ *   等效于 curl_setopt($ch, CURLOPT_POSTFIELDS, ['name' => 'test', 'age' => '25']);
+ *
+ * 编码规则：
+ *   - 键和值都会通过 rawurlencode 编码（空格变为 +，特殊字符变为 %XX）
+ *   - 数值索引的数组项会被编码为 key[0]=val0&key[1]=val1 格式
+ *   - 嵌套数组暂不支持（建议使用 setJsonBody 发送复杂数据结构）
+ *
+ * @param array $data 表单数据（关联数组：键名 => 键值）
+ */
+PHP_METHOD(XHRequest, setFormBody)
+{
+    zval *data; /* 表单数据数组参数 */
+
+    /* 解析参数：必须是数组 */
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* 获取当前对象 */
+    xhrequest_obj_t *obj = XHREQUEST_OBJ_FROM_ZOBJ(Z_OBJ_P(getThis()));
+
+    /* +--------------------------------------------------------------+
+     * | 将 PHP 数组编码为 URL 编码的表单字符串                        |
+     * | 格式：key1=value1&key2=value2                                 |
+     * | 每个键值对都通过 rawurlencode 编码，确保特殊字符安全传输      |
+     * | 参考：PHP curl 传入数组给 CURLOPT_POSTFIELDS 时的行为         |
+     * +--------------------------------------------------------------+
+     */
+    zend_string *form_str = NULL; /* 编码后的表单字符串 */
+    zend_string *key_str;         /* 当前遍历的键名 */
+    zval *val_zv;                 /* 当前遍历的值 zval */
+    zend_ulong num_idx;           /* 数值索引（用于非关联数组） */
+
+    /* 遍历数组，逐个编码键值对 */
+    ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(data), num_idx, key_str, val_zv) {
+        /* 编码键名 */
+        zend_string *encoded_key;
+        if (key_str != NULL) {
+            /* 关联数组：键名为字符串，rawurlencode 编码 */
+            encoded_key = php_raw_url_encode(ZSTR_VAL(key_str), ZSTR_LEN(key_str));
+        } else {
+            /* 数值索引数组：将数字索引转为字符串后编码 */
+            char idx_buf[32]; /* 足够存放 zend_ulong 的字符串表示 */
+            int idx_len = snprintf(idx_buf, sizeof(idx_buf), ZEND_ULONG_FMT, num_idx);
+            encoded_key = php_raw_url_encode(idx_buf, idx_len);
+        }
+
+        /* 编码键值（支持字符串、整数、浮点数、布尔值） */
+        zend_string *encoded_val = NULL;
+        if (Z_TYPE_P(val_zv) == IS_STRING) {
+            /* 字符串值：直接 rawurlencode 编码 */
+            encoded_val = php_raw_url_encode(Z_STRVAL_P(val_zv), Z_STRLEN_P(val_zv));
+        } else if (Z_TYPE_P(val_zv) == IS_LONG) {
+            /* 整数值：转为字符串后编码 */
+            char val_buf[32];
+            int val_len = snprintf(val_buf, sizeof(val_buf), ZEND_LONG_FMT, Z_LVAL_P(val_zv));
+            encoded_val = php_raw_url_encode(val_buf, val_len);
+        } else if (Z_TYPE_P(val_zv) == IS_DOUBLE) {
+            /* 浮点数值：转为字符串后编码 */
+            char val_buf[64];
+            int val_len = snprintf(val_buf, sizeof(val_buf), "%.14g", Z_DVAL_P(val_zv));
+            encoded_val = php_raw_url_encode(val_buf, val_len);
+        } else if (Z_TYPE_P(val_zv) == IS_TRUE) {
+            /* 布尔值 true：编码为 "1" */
+            encoded_val = php_raw_url_encode("1", 1);
+        } else if (Z_TYPE_P(val_zv) == IS_FALSE) {
+            /* 布尔值 false：编码为 "0" */
+            encoded_val = php_raw_url_encode("0", 1);
+        } else if (Z_TYPE_P(val_zv) == IS_NULL) {
+            /* null 值：编码为空字符串 */
+            encoded_val = php_raw_url_encode("", 0);
+        } else {
+            /* 不支持的类型（数组、对象、资源），跳过 */
+            zend_string_release(encoded_key);
+            continue;
+        }
+
+        /* 拼接键值对到表单字符串 */
+        if (form_str == NULL) {
+            /* 第一个键值对：直接创建 "key=value" */
+            size_t pair_len = ZSTR_LEN(encoded_key) + 1 + ZSTR_LEN(encoded_val);
+            form_str = zend_string_alloc(pair_len, 0);
+            snprintf(ZSTR_VAL(form_str), pair_len + 1, "%s=%s",
+                     ZSTR_VAL(encoded_key), ZSTR_VAL(encoded_val));
+        } else {
+            /* 后续键值对：追加 "&key=value" */
+            size_t old_len = ZSTR_LEN(form_str);
+            size_t append_len = 1 + ZSTR_LEN(encoded_key) + 1 + ZSTR_LEN(encoded_val); /* &key=value */
+            form_str = zend_string_extend(form_str, old_len + append_len, 0);
+            /* 在末尾追加 "&key=value" */
+            snprintf(ZSTR_VAL(form_str) + old_len, append_len + 1, "&%s=%s",
+                     ZSTR_VAL(encoded_key), ZSTR_VAL(encoded_val));
+        }
+
+        /* 释放编码后的临时字符串 */
+        zend_string_release(encoded_key);
+        if (encoded_val != NULL) {
+            zend_string_release(encoded_val);
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    /* 检查是否成功编码了数据 */
+    if (form_str == NULL) {
+        /* 空数组或所有值均为不支持的类型，设置空表单 */
+        if (obj->body != NULL) {
+            efree(obj->body);
+        }
+        obj->body = estrdup("");
+        obj->body_len = 0;
+        RETURN_ZVAL(getThis(), 1, 0);
+    }
+
+    /* 释放旧的请求体数据 */
+    if (obj->body != NULL) {
+        efree(obj->body);
+    }
+
+    /* 将编码后的表单字符串复制为请求体 */
+    obj->body = estrndup(ZSTR_VAL(form_str), ZSTR_LEN(form_str));
+    obj->body_len = ZSTR_LEN(form_str);
+
+    /* 释放临时表单字符串 */
+    zend_string_release(form_str);
+
+    /* +--------------------------------------------------------------+
+     * | 自动设置 Content-Type 为 application/x-www-form-urlencoded   |
+     * | 仅当用户未通过 setHeader 手动设置 Content-Type 时才自动设置，|
+     * | 用户显式设置优先级高于便捷方法的自动设置。                   |
+     * | 场景：                                                       |
+     * |   setHeader('Content-Type', 'text/plain') → setFormBody()   |
+     * |   → 保留 'text/plain'，不覆盖                               |
+     * |   setFormBody() → setHeader('Content-Type', 'text/plain')   |
+     * |   → 覆盖为 'text/plain'（用户最后设置者生效）                |
+     * +--------------------------------------------------------------+
+     */
+    if (xhcurl_header_find(obj->headers, "Content-Type") == NULL) {
+        /* 用户未手动设置 Content-Type，自动设置表单编码类型 */
+        xhcurl_header_set(&obj->headers, "Content-Type", "application/x-www-form-urlencoded");
+    }
+
+    /* 返回 $this 支持链式调用 */
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+
+/**
  * 获取请求 URL
  * XHRequest::getUrl(): string
  */
@@ -630,6 +783,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setJsonBody, 0, 0, 1)
     ZEND_ARG_INFO(0, data)        /* 数组数据（必填） */
 ZEND_END_ARG_INFO()
 
+/* setFormBody 参数信息 */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setFormBody, 0, 0, 1)
+    ZEND_ARG_INFO(0, data)        /* 表单数据数组（必填） */
+ZEND_END_ARG_INFO()
+
 /* setTimeout 参数信息 */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_xhrequest_setTimeout, 0, 0, 1)
     ZEND_ARG_INFO(0, seconds)     /* 超时秒数（必填） */
@@ -675,6 +833,8 @@ static const zend_function_entry xhrequest_methods[] = {
     PHP_ME(XHRequest, setProxy, arginfo_xhrequest_setProxy, ZEND_ACC_PUBLIC)
     /* 设置 JSON 请求体 */
     PHP_ME(XHRequest, setJsonBody, arginfo_xhrequest_setJsonBody, ZEND_ACC_PUBLIC)
+    /* 设置表单请求体（application/x-www-form-urlencoded） */
+    PHP_ME(XHRequest, setFormBody, arginfo_xhrequest_setFormBody, ZEND_ACC_PUBLIC)
     /* 设置超时时间 */
     PHP_ME(XHRequest, setTimeout, arginfo_xhrequest_setTimeout, ZEND_ACC_PUBLIC)
     /* 设置连接超时 */

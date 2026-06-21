@@ -68,36 +68,76 @@ xhcurl_req_context_t *xhcurl_context_create(xhcurl_obj_t *curl_obj, xhrequest_ob
     /* 设置请求 URL */
     curl_easy_setopt(ctx->easy, CURLOPT_URL, req_obj->url);
 
-    /* 设置 HTTP 方法 */
+    /* +--------------------------------------------------------------+
+     * | 设置 HTTP 方法 + 请求体                                      |
+     * |                                                              |
+     * | 关键设计决策：                                               |
+     * | 1. POST 方法：使用 CURLOPT_POST + CURLOPT_POSTFIELDS         |
+     * |    CURLOPT_POSTFIELDS 不复制数据，直接使用指针，性能更优     |
+     * |    body 数据由 XHRequest PHP 对象持有，ZVAL_COPY 保证在      |
+     * |    请求完成前不会被 GC 回收                                  |
+     * |                                                              |
+     * | 2. PUT/PATCH/DELETE 等方法：使用 CURLOPT_CUSTOMREQUEST       |
+     * |    + CURLOPT_POSTFIELDS（而非 CURLOPT_UPLOAD）               |
+     * |    CURLOPT_POSTFIELDS 对所有方法都有效，curl 会自动发送      |
+     * |    请求体并设置 Content-Length 头部                          |
+     * |                                                              |
+     * | 3. POST 无 body：设置 CURLOPT_POSTFIELDS="" + SIZE=0        |
+     * |    确保 curl 发送 Content-Length: 0，避免服务器等待请求体    |
+     * |    导致连接挂起（死锁）                                      |
+     * |                                                              |
+     * | 不使用 CURLOPT_COPYPOSTFIELDS 的原因：                       |
+     * |   CURLOPT_COPYPOSTFIELDS 内部使用 strlen 复制数据，         |
+     * |   如果 body 包含 \0 字节（如二进制数据），数据会被截断；    |
+     * |   CURLOPT_POSTFIELDS + CURLOPT_POSTFIELDSIZE_LARGE          |
+     * |   可以精确控制数据长度，不受 \0 字节影响                     |
+     * +--------------------------------------------------------------+
+     */
     if (strcmp(req_obj->method, "POST") == 0) {
+        /* 设置 POST 方法（CURLOPT_POST=1 让 curl 发送 POST 请求） */
         curl_easy_setopt(ctx->easy, CURLOPT_POST, 1L);
+
+        if (req_obj->body != NULL && req_obj->body_len > 0) {
+            /* POST 有 body：直接设置请求体指针和大小 */
+            /* CURLOPT_POSTFIELDS 不复制数据，指针必须在请求完成前有效 */
+            /* body 由 XHRequest PHP 对象持有，ZVAL_COPY 保证生命周期 */
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, req_obj->body);
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
+        } else {
+            /* POST 无 body：设置空请求体，确保发送 Content-Length: 0 */
+            /* 仅设置 CURLOPT_POST=1 而不设置 CURLOPT_POSTFIELDS 时， */
+            /* curl 不会发送 Content-Length: 0 头部，某些服务器会等待 */
+            /* 请求体导致连接挂起（死锁） */
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, "");
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE, 0L);
+        }
     } else if (strcmp(req_obj->method, "PUT") == 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_CUSTOMREQUEST, "PUT");
+        /* PUT 有 body：设置请求体（CURLOPT_POSTFIELDS 对所有方法有效） */
+        if (req_obj->body != NULL && req_obj->body_len > 0) {
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, req_obj->body);
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
+        }
     } else if (strcmp(req_obj->method, "DELETE") == 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_CUSTOMREQUEST, "DELETE");
+        /* DELETE 有 body：设置请求体 */
+        if (req_obj->body != NULL && req_obj->body_len > 0) {
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, req_obj->body);
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
+        }
     } else if (strcmp(req_obj->method, "PATCH") == 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_CUSTOMREQUEST, "PATCH");
+        /* PATCH 有 body：设置请求体 */
+        if (req_obj->body != NULL && req_obj->body_len > 0) {
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDS, req_obj->body);
+            curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
+        }
     } else if (strcmp(req_obj->method, "HEAD") == 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_NOBODY, 1L);
     } else if (strcmp(req_obj->method, "OPTIONS") == 0) {
         curl_easy_setopt(ctx->easy, CURLOPT_CUSTOMREQUEST, "OPTIONS");
     }
     /* GET 方法是默认值，无需额外设置 */
-
-    /* 设置请求体（POST/PUT/PATCH 等方法） */
-    /* 使用 CURLOPT_COPYPOSTFIELDS 让 curl 复制数据，避免 XHRequest 修改 body 后指针悬空 */
-    if (req_obj->body != NULL && req_obj->body_len > 0) {
-        curl_easy_setopt(ctx->easy, CURLOPT_COPYPOSTFIELDS, req_obj->body);
-        /* +--------------------------------------------------------------+
-         * | 使用 CURLOPT_POSTFIELDSIZE_LARGE 替代 CURLOPT_POSTFIELDSIZE |
-         * | CURLOPT_POSTFIELDSIZE 接受 long 类型（32位平台为 2GB 限制），|
-         * | 大文件上传时 body_len 可能超过 LONG_MAX 导致截断。           |
-         * | CURLOPT_POSTFIELDSIZE_LARGE 接受 curl_off_t（64位），       |
-         * | 支持超大请求体。                                             |
-         * +--------------------------------------------------------------+
-         */
-        curl_easy_setopt(ctx->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req_obj->body_len);
-    }
 
     /* 设置超时时间（请求级优先，否则使用全局默认值） */
     long timeout = (req_obj->timeout > 0) ? req_obj->timeout : curl_obj->timeout;
