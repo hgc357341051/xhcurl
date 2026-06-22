@@ -54,15 +54,33 @@ jobs:
       # libclang-dev: ext-php-rs bindgen 需要
       # build-essential: C 编译工具链
       # pkg-config: 库检测工具
+      #
+      # 重要：Ubuntu 22.04 自带的 LLVM 14 存在 bindgen 兼容性问题
+      # （emmintrin.h SSE2 intrinsics 类型转换错误），
+      # 必须安装 LLVM 15+ 才能正常生成 PHP 绑定代码
       # -----------------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
+
+          # 添加 LLVM 官方 APT 源（安装 LLVM 18 替代系统自带的 LLVM 14）
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc > /dev/null
+          sudo add-apt-repository -y "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main"
+          sudo apt-get update -y
+
+          # 安装 LLVM 18 的 libclang（bindgen 使用）
           sudo apt-get install -y \
-            libclang-dev \
+            libclang-18-dev \
+            clang-18 \
             build-essential \
             pkg-config \
             libssl-dev
+
+          # 设置 LIBCLANG_PATH 环境变量，让 bindgen 使用 LLVM 18
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+
+          # 验证 clang 版本
+          clang-18 --version
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装指定版本的 PHP 及开发工具
@@ -316,6 +334,8 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 4: 设置 PHP SDK
+      # ext-php-rs 需要 php-config 和 php 可执行文件
+      # setup-php-sdk 会将 PHP 添加到 PATH
       # -----------------------------------------------------------------
       - name: Setup PHP SDK
         id: setup-php-sdk
@@ -325,6 +345,57 @@ jobs:
           arch: x64
           ts: ${{ matrix.ts }}
           cache: true
+
+      # -----------------------------------------------------------------
+      # 步骤 4.5: 确保 PHP 在 PATH 中
+      # ext-php-rs build script 调用 `php -i` 获取 PHP 配置信息
+      # 如果 php 不在 PATH 中，bindgen 会失败
+      # -----------------------------------------------------------------
+      - name: Verify PHP in PATH
+        shell: pwsh
+        run: |
+          # 输出 setup-php-sdk 的 prefix 路径
+          $prefix = "${{ steps.setup-php-sdk.outputs.prefix }}"
+          Write-Host "PHP SDK prefix: $prefix"
+
+          # 检查 php 是否在 PATH 中
+          $phpPath = Get-Command php -ErrorAction SilentlyContinue
+          if ($phpPath) {
+            Write-Host "PHP found in PATH: $($phpPath.Source)"
+            php -v | Select-Object -First 1
+            php-config --prefix 2>$null || Write-Host "php-config not found"
+          } else {
+            Write-Host "::warning::PHP not in PATH, attempting to add it"
+
+            # 尝试从 prefix 路径添加 PHP 到 PATH
+            if ($prefix -and (Test-Path $prefix)) {
+              $phpExe = Join-Path $prefix "php.exe"
+              if (Test-Path $phpExe) {
+                $phpDir = Split-Path $phpExe
+                Write-Host "Adding PHP directory to PATH: $phpDir"
+                echo $phpDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                # 同时设置当前会话的 PATH
+                $env:PATH = "$phpDir;$env:PATH"
+                php -v | Select-Object -First 1
+              } else {
+                Write-Host "::error::php.exe not found at $phpExe"
+                # 搜索 php.exe
+                Get-ChildItem -Path $prefix -Filter "php.exe" -Recurse -ErrorAction SilentlyContinue |
+                  ForEach-Object { Write-Host "  Found: $($_.FullName)" }
+                exit 1
+              }
+            } else {
+              Write-Host "::error::PHP SDK prefix is empty or does not exist"
+              exit 1
+            }
+          }
+
+          # 设置 PHP_CONFIG 环境变量（ext-php-rs 使用）
+          $phpConfigPath = Get-Command php-config -ErrorAction SilentlyContinue
+          if ($phpConfigPath) {
+            echo "PHP_CONFIG=$($phpConfigPath.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "PHP_CONFIG set to: $($phpConfigPath.Source)"
+          }
 
       # -----------------------------------------------------------------
       # 步骤 5: 设置 MSVC 编译环境
@@ -352,18 +423,41 @@ jobs:
       # -----------------------------------------------------------------
       # 步骤 7: 编译 Rust PHP 扩展
       # Windows 上 ext-php-rs 需要 PHP_INCLUDE_PATH 环境变量
+      # 同时需要确保 php.exe 在 PATH 中（build script 调用 php -i）
       # -----------------------------------------------------------------
       - name: Build Rust PHP extension
         working-directory: rust
         env:
           # ext-php-rs 需要 PHP 的 include 路径
           PHP_INCLUDE_PATH: ${{ steps.setup-php-sdk.outputs.prefix }}/include
+          # 确保 bindgen 找到 libclang
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         shell: pwsh
         run: |
           Write-Host "=== 开始编译 XHCurl Rust 扩展 ==="
-          Write-Host "PHP 版本: $(php -v | Select-Object -First 1)"
+
+          # 验证 PHP 可用
+          try {
+            $phpVer = php -v 2>&1 | Select-Object -First 1
+            Write-Host "PHP 版本: $phpVer"
+          } catch {
+            Write-Host "::error::PHP 不可用，请检查 PATH 设置"
+            exit 1
+          }
+
           Write-Host "Rust 版本: $(rustc --version)"
           Write-Host "PHP Include: $env:PHP_INCLUDE_PATH"
+          Write-Host "LIBCLANG_PATH: $env:LIBCLANG_PATH"
+
+          # 验证 include 路径是否存在
+          if (-not (Test-Path $env:PHP_INCLUDE_PATH)) {
+            Write-Host "::warning::PHP_INCLUDE_PATH 不存在: $env:PHP_INCLUDE_PATH"
+            # 尝试查找正确的 include 路径
+            $prefix = "${{ steps.setup-php-sdk.outputs.prefix }}"
+            Write-Host "Searching for include path in: $prefix"
+            Get-ChildItem -Path $prefix -Filter "php.h" -Recurse -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  Found: $($_.FullName)" }
+          }
 
           # 编译
           cargo build --release --features php
@@ -424,12 +518,25 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------------------------------------
-      # 步骤 2: 安装系统依赖
+      # 步骤 2: 安装系统依赖（LLVM 18 替代系统自带 LLVM 14）
       # -----------------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y libclang-dev build-essential pkg-config libssl-dev
+
+          # 添加 LLVM 18 源
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc > /dev/null
+          sudo add-apt-repository -y "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main"
+          sudo apt-get update -y
+
+          sudo apt-get install -y \
+            libclang-18-dev \
+            clang-18 \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装 Rust 工具链（含 clippy 组件）
