@@ -14,7 +14,8 @@ fn test_request_build_flow() {
         .header("Authorization", "Bearer token123")
         .header("Accept", "application/json")
         .header("X-Custom", "custom-value")
-        .body_json_str(r#"{"key": "value"}"#).unwrap()
+        .body_json_str(r#"{"key": "value"}"#)
+        .unwrap()
         .timeout(30)
         .verify_ssl(true)
         .id("test-request-001");
@@ -61,18 +62,24 @@ fn test_cookie_management_flow() {
     let cm = CookieManager::new();
 
     // 添加多个域名的 Cookie
-    cm.set(Cookie::new("session_id", "abc123")
-        .with_domain("example.com")
-        .with_secure(true)
-        .with_http_only(true));
+    cm.set(
+        Cookie::new("session_id", "abc123")
+            .with_domain("example.com")
+            .with_secure(true)
+            .with_http_only(true),
+    );
 
-    cm.set(Cookie::new("token", "xyz789")
-        .with_domain("api.example.com")
-        .with_path("/v1"));
+    cm.set(
+        Cookie::new("token", "xyz789")
+            .with_domain("api.example.com")
+            .with_path("/v1"),
+    );
 
-    cm.set(Cookie::new("tracking", "track123")
-        .with_domain("example.com")
-        .with_expires(1000)); // 已过期
+    cm.set(
+        Cookie::new("tracking", "track123")
+            .with_domain("example.com")
+            .with_expires(1000),
+    ); // 已过期
 
     // 验证
     assert_eq!(cm.len(), 3);
@@ -168,9 +175,7 @@ fn test_http_methods() {
 #[test]
 fn test_multi_executor() {
     let client = reqwest::Client::new();
-    let mut multi = XhMulti::new(client)
-        .max_concurrency(10)
-        .timeout(30);
+    let mut multi = XhMulti::new(client).max_concurrency(10).timeout(30);
 
     // 添加请求
     multi.add(XhRequest::new("https://httpbin.org/get").id("req1"));

@@ -99,12 +99,9 @@ jobs:
       # 步骤 2.5: 清除缓存中的旧 bindgen 产物
       # 如果缓存了 LLVM 14 生成的绑定代码，切换到 LLVM 18 后
       # 必须清除旧的 build 输出，否则会继续使用旧的（有错误的）绑定
+      # 注意：此步骤必须在缓存恢复之后执行（步骤 5 之后）
+      # 这里仅做标记，实际清理在 Build 步骤中通过 cargo clean 完成
       # -----------------------------------------------------------------
-      - name: Clean cached bindgen output
-        run: |
-          # 删除缓存的 ext-php-rs build 输出（包含旧版 bindgen 生成的绑定代码）
-          rm -rf rust/target/release/build/ext-php-rs-*
-          echo "已清除旧的 bindgen 缓存"
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装指定版本的 PHP 及开发工具
@@ -129,6 +126,9 @@ jobs:
       # -----------------------------------------------------------------
       # 步骤 5: 缓存 cargo 编译产物
       # 加速后续构建，避免重复下载和编译依赖
+      #
+      # 重要：缓存 key 包含 llvm18 标识，确保从 LLVM 14 升级后
+      # 旧缓存不会恢复（旧缓存中的 bindgen 产物与 LLVM 18 不兼容）
       # -----------------------------------------------------------------
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -137,9 +137,21 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: linux-rust-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          # key 中包含 llvm18 标识，LLVM 版本变更时自动失效旧缓存
+          key: linux-rust-llvm18-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            linux-rust-php${{ matrix.php-version }}-
+            linux-rust-llvm18-php${{ matrix.php-version }}-
+
+      # -----------------------------------------------------------------
+      # 步骤 5.5: 清除缓存中可能残留的旧 bindgen 产物
+      # 即使缓存 key 包含 llvm18，restore-keys 可能匹配到旧缓存
+      # 必须在缓存恢复后清除 ext-php-rs 的 build 输出
+      # -----------------------------------------------------------------
+      - name: Clean cached bindgen output
+        run: |
+          # 删除缓存的 ext-php-rs build 输出（可能包含旧版 bindgen 生成的绑定代码）
+          rm -rf rust/target/release/build/ext-php-rs-*
+          echo "已清除旧的 bindgen 缓存"
 
       # -----------------------------------------------------------------
       # 步骤 6: 编译 Rust PHP 扩展
@@ -562,14 +574,6 @@ jobs:
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
 
       # -----------------------------------------------------------------
-      # 步骤 2.5: 清除缓存中的旧 bindgen 产物
-      # -----------------------------------------------------------------
-      - name: Clean cached bindgen output
-        run: |
-          rm -rf rust/target/release/build/ext-php-rs-*
-          echo "已清除旧的 bindgen 缓存"
-
-      # -----------------------------------------------------------------
       # 步骤 3: 安装 Rust 工具链（含 clippy 组件）
       # -----------------------------------------------------------------
       - name: Install Rust toolchain
@@ -579,7 +583,7 @@ jobs:
           components: clippy, rustfmt
 
       # -----------------------------------------------------------------
-      # 步骤 4: 缓存
+      # 步骤 4: 缓存（key 包含 llvm18 标识，避免恢复旧 LLVM 14 缓存）
       # -----------------------------------------------------------------
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -588,9 +592,17 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: linux-rust-lint-${{ hashFiles('rust/Cargo.lock') }}
+          key: linux-rust-llvm18-lint-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            linux-rust-lint-
+            linux-rust-llvm18-lint-
+
+      # -----------------------------------------------------------------
+      # 步骤 4.5: 清除缓存中可能残留的旧 bindgen 产物
+      # -----------------------------------------------------------------
+      - name: Clean cached bindgen output
+        run: |
+          rm -rf rust/target/release/build/ext-php-rs-*
+          echo "已清除旧的 bindgen 缓存"
 
       # -----------------------------------------------------------------
       # 步骤 5: 代码格式检查

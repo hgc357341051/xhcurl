@@ -526,7 +526,7 @@ mod tests {
             .post()
             .header("Authorization", "Bearer token")
             .header("Accept", "application/json")
-            .body_json_str(r#"{"name": "test", "age": 18}"").unwrap()
+            .body_json_str(r#"{"name": "test", "age": 18}"#).unwrap()
             .timeout(30)
             .verify_ssl(true);
 
