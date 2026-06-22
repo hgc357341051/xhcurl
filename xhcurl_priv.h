@@ -18,10 +18,18 @@
 #include "zend_exceptions.h"
 /* 引入 PHP SAPI 头文件（sapi_module 全局变量） */
 #include "SAPI.h"
-/* php_raw_url_encode 函数声明在 ext/standard/php_url.h 中
- * macOS clang 将隐式函数声明视为错误（-Wimplicit-function-declaration），
- * 必须显式包含该头文件 */
-#include "ext/standard/php_url.h"
+
+/* php_raw_url_encode 函数由 PHP 核心导出（在 php-core DLL/so 中），
+ * 但其声明头文件 ext/standard/php_url.h 不在扩展的公共 include 路径中，
+ * 无法通过 #include 引入。
+ *
+ * 解决方案：使用 extern 声明该函数，链接时由 PHP 核心提供符号。
+ *
+ * 函数签名：zend_string *php_raw_url_encode(const char *str, size_t len);
+ * - 等价于 PHP 的 rawurlencode() 函数
+ * - 返回值需要调用 zend_string_release() 释放
+ */
+extern zend_string *php_raw_url_encode(const char *str, size_t len);
 
 /* +----------------------------------------------------------------------+
  * | 平台兼容性宏定义                                                      |

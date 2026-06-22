@@ -7,12 +7,17 @@
 
 name: Build XHCurl Rust Extension
 
-# 触发条件：push 到 main 分支 或 创建 tag 时触发
+# 触发条件：
+#   1. push 到 main 分支
+#   2. 创建 v* 或 rust-v* tag 时触发（支持 v1.0.0 和 rust-v1.0.0 两种格式）
+#   3. PR 到 main 分支（仅 rust/ 目录变更时）
 on:
   push:
     branches: [ main ]
-    # Rust 版本的 tag 以 rust-v 前缀区分
-    tags: [ 'rust-v*' ]
+    # 支持 v* 和 rust-v* 两种 tag 格式
+    # v1.0.0 - 同时触发 C 和 Rust 版本编译
+    # rust-v1.0.0 - 仅触发 Rust 版本编译
+    tags: [ 'v*', 'rust-v*' ]
   pull_request:
     branches: [ main ]
     # 仅在 rust/ 目录变更时触发
@@ -57,18 +62,23 @@ jobs:
       #
       # 重要：Ubuntu 22.04 自带的 LLVM 14 存在 bindgen 兼容性问题
       # （emmintrin.h SSE2 intrinsics 类型转换错误），
-      # 必须安装 LLVM 15+ 才能正常生成 PHP 绑定代码
+      # 必须安装 LLVM 18 才能正常生成 PHP 绑定代码
+      #
+      # 安装方式：通过 LLVM 官方 APT 源安装 LLVM 18
       # -----------------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
+          # 安装 add-apt-repository 所需的依赖
+          sudo apt-get install -y software-properties-common wget gnupg2
 
-          # 添加 LLVM 官方 APT 源（安装 LLVM 18 替代系统自带的 LLVM 14）
+          # 添加 LLVM 18 官方 APT 源
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc > /dev/null
           sudo add-apt-repository -y "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main"
           sudo apt-get update -y
 
           # 安装 LLVM 18 的 libclang（bindgen 使用）
+          # 不安装默认的 libclang-dev（会拉取 LLVM 14）
           sudo apt-get install -y \
             libclang-18-dev \
             clang-18 \
@@ -76,11 +86,25 @@ jobs:
             pkg-config \
             libssl-dev
 
-          # 设置 LIBCLANG_PATH 环境变量，让 bindgen 使用 LLVM 18
+          # 设置 LIBCLANG_PATH 环境变量，让 bindgen 使用 LLVM 18 的 libclang
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
 
-          # 验证 clang 版本
+          # 验证 LLVM 18 安装成功
+          echo "=== 验证 LLVM 版本 ==="
           clang-18 --version
+          ls -la /usr/lib/llvm-18/lib/libclang.so 2>/dev/null || echo "libclang-18.so not found"
+          ls -la /usr/lib/llvm-18/lib/libclang-18.so 2>/dev/null || echo "libclang-18.so.18 not found"
+
+      # -----------------------------------------------------------------
+      # 步骤 2.5: 清除缓存中的旧 bindgen 产物
+      # 如果缓存了 LLVM 14 生成的绑定代码，切换到 LLVM 18 后
+      # 必须清除旧的 build 输出，否则会继续使用旧的（有错误的）绑定
+      # -----------------------------------------------------------------
+      - name: Clean cached bindgen output
+        run: |
+          # 删除缓存的 ext-php-rs build 输出（包含旧版 bindgen 生成的绑定代码）
+          rm -rf rust/target/release/build/ext-php-rs-*
+          echo "已清除旧的 bindgen 缓存"
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装指定版本的 PHP 及开发工具
@@ -350,6 +374,8 @@ jobs:
       # 步骤 4.5: 确保 PHP 在 PATH 中
       # ext-php-rs build script 调用 `php -i` 获取 PHP 配置信息
       # 如果 php 不在 PATH 中，bindgen 会失败
+      #
+      # 注意：Windows 上不存在 php-config 命令，不能调用它
       # -----------------------------------------------------------------
       - name: Verify PHP in PATH
         shell: pwsh
@@ -362,8 +388,7 @@ jobs:
           $phpPath = Get-Command php -ErrorAction SilentlyContinue
           if ($phpPath) {
             Write-Host "PHP found in PATH: $($phpPath.Source)"
-            php -v | Select-Object -First 1
-            php-config --prefix 2>$null || Write-Host "php-config not found"
+            php -v 2>&1 | Select-Object -First 1
           } else {
             Write-Host "::warning::PHP not in PATH, attempting to add it"
 
@@ -376,7 +401,7 @@ jobs:
                 echo $phpDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
                 # 同时设置当前会话的 PATH
                 $env:PATH = "$phpDir;$env:PATH"
-                php -v | Select-Object -First 1
+                php -v 2>&1 | Select-Object -First 1
               } else {
                 Write-Host "::error::php.exe not found at $phpExe"
                 # 搜索 php.exe
@@ -390,12 +415,9 @@ jobs:
             }
           }
 
-          # 设置 PHP_CONFIG 环境变量（ext-php-rs 使用）
-          $phpConfigPath = Get-Command php-config -ErrorAction SilentlyContinue
-          if ($phpConfigPath) {
-            echo "PHP_CONFIG=$($phpConfigPath.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Host "PHP_CONFIG set to: $($phpConfigPath.Source)"
-          }
+          # Windows 上不存在 php-config，跳过
+          # ext-php-rs 在 Windows 上通过 php -i 获取配置，不需要 php-config
+          Write-Host "PHP 验证完成"
 
       # -----------------------------------------------------------------
       # 步骤 5: 设置 MSVC 编译环境
@@ -523,6 +545,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
+          sudo apt-get install -y software-properties-common wget gnupg2
 
           # 添加 LLVM 18 源
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc > /dev/null
@@ -537,6 +560,14 @@ jobs:
             libssl-dev
 
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+
+      # -----------------------------------------------------------------
+      # 步骤 2.5: 清除缓存中的旧 bindgen 产物
+      # -----------------------------------------------------------------
+      - name: Clean cached bindgen output
+        run: |
+          rm -rf rust/target/release/build/ext-php-rs-*
+          echo "已清除旧的 bindgen 缓存"
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装 Rust 工具链（含 clippy 组件）
