@@ -1,0 +1,106 @@
+# +----------------------------------------------------------------------+
+# | XHCurl 扩展 - Rust 核心引擎 Cargo 配置                                |
+# | 使用 ext-php-rs 直接生成 PHP 扩展                                     |
+# | tokio 提供 M:N 异步调度（类似 goroutine）                            |
+# | reqwest 提供 HTTP 客户端（基于 hyper，支持 HTTP/2）                   |
+# +----------------------------------------------------------------------+
+
+[package]
+# 包名称
+name = "xhcurl"
+# 版本号（与 PHP 扩展版本保持一致）
+version = "2.0.0"
+# 作者信息
+authors = ["XHCurl Team"]
+# 许可证
+license = "MIT"
+# Rust 版本要求（使用 2021 edition 的现代特性）
+edition = "2021"
+# 项目描述
+description = "高性能 PHP cURL 扩展 - Rust 核心引擎"
+# 仓库链接
+repository = "https://github.com/xiaohu/xhcurl"
+
+[lib]
+# 生成 cdylib（动态库）供 PHP 加载
+# 同时生成 rlib 供 Rust 测试使用
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# 默认不启用 PHP 扩展功能（仅作为 Rust 库使用）
+default = []
+# 启用 PHP 扩展功能（使用 ext-php-rs 生成 PHP 扩展）
+php = ["dep:ext-php-rs"]
+
+[dependencies]
+# PHP 扩展绑定库（直接生成 PHP 扩展，无需 C 桥接层）
+# 提供类型安全的 PHP 互操作，自动处理引用计数和 arginfo 生成
+# 仅在 php feature 启用时编译
+ext-php-rs = { version = "0.12", optional = true }
+
+# 异步运行时（M:N 调度模型，类似 goroutine）
+# features:
+#   - full: 启用所有功能（rt-multi-thread, macros, net, time 等）
+#   - rt-multi-thread: 多线程运行时（CLI 模式下使用）
+tokio = { version = "1", features = ["full"] }
+
+# HTTP 客户端（基于 hyper，支持 HTTP/2、连接池、流式传输）
+# features:
+#   - json: 内置 JSON 序列化支持
+#   - stream: 流式响应支持（替代 curl 的 WRITEFUNCTION 回调）
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# 并发原语（Channel、无锁数据结构）
+# 用于工作线程与主线程间的安全通信（替代回调机制）
+crossbeam-channel = "0.5"
+
+# 并行计算库（work-stealing 线程池）
+# 用于 CPU 密集型任务的并行处理
+rayon = "1.10"
+
+# 异步 trait 支持（用于定义异步接口）
+async-trait = "0.1"
+
+# 序列化/反序列化（JSON 处理）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 错误处理库（库代码使用 thiserror，应用代码使用 anyhow）
+thiserror = "1"
+
+# 日期时间处理（请求耗时计算）
+chrono = "0.4"
+
+# 字节缓冲区（零拷贝数据传输）
+bytes = "1"
+
+# URL 解析（用于请求 URL 验证）
+url = "2"
+
+# HTTP 协议类型（reqwest 依赖，显式声明用于 from_reqwest 方法）
+http = "1"
+
+# futures 工具（流式处理）
+futures-util = "0.3"
+
+[dev-dependencies]
+# 测试框架
+tokio-test = "0.4"
+
+[profile.release]
+# 发布模式优化
+# LTO（链接时优化）：跨 crate 优化，减少代码体积
+lto = true
+# 代码生成单元数（1 = 最大优化，编译时间较长）
+codegen-units = 1
+# 优化级别（3 = 最高优化）
+opt-level = 3
+# panic 时中止（不展开栈，减少二进制体积）
+panic = "abort"
+# 去除调试符号（减小二进制体积）
+strip = true
+
+[profile.dev]
+# 开发模式：快速编译
+opt-level = 0
+debug = true

@@ -1,0 +1,947 @@
+// +----------------------------------------------------------------------+
+// | XHCurl 扩展 - PHP 扩展入口（ext-php-rs 绑定）                         |
+// |                                                                        |
+// | 使用 ext-php-rs crate 直接生成 PHP 扩展                                |
+// | 无需 C 桥接层，Rust 函数直接暴露为 PHP 函数/方法                       |
+// |                                                                        |
+// | PHP 类映射：                                                           |
+// |   XHCurl      → 全局管理器（静态方法）                                 |
+// |   XHRequest   → 请求构建器                                             |
+// |   XHResponse  → 响应对象                                               |
+// |   XHMulti     → 异步批量执行器                                         |
+// |   XHThreadPool→ 线程池                                                 |
+// +----------------------------------------------------------------------+
+
+use ext_php_rs::prelude::*;
+use ext_php_rs::types::ZendClassObject;
+use ext_php_rs::zend::ClassEntry;
+
+use crate::curl::XhCurlManager;
+use crate::multi::XhMulti;
+use crate::request::{HttpMethod, XhRequest};
+use crate::response::XhResponse;
+use crate::threadpool::{ThreadPoolConfig, XhThreadPool};
+
+// +----------------------------------------------------------------------+
+// | 常量定义                                                              |
+// +----------------------------------------------------------------------+
+
+/// 单次批量请求的最大数量限制
+/// 防止用户传入过多请求导致内存溢出
+const MAX_REQUESTS_PER_BATCH: usize = 10000;
+
+// +----------------------------------------------------------------------+
+// | PHP 模块信息                                                          |
+// +----------------------------------------------------------------------+
+
+/// PHP 扩展模块信息
+/// 对应 C 版本的 xhcurl_module_entry
+#[php_module]
+pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
+    // 注册 PHP 类
+    module
+        .class::<PhpXhCurl>()
+        .class::<PhpXhRequest>()
+        .class::<PhpXhResponse>()
+        .class::<PhpXhMulti>()
+        .class::<PhpXhThreadPool>()
+}
+
+// +----------------------------------------------------------------------+
+// | PHP 类：XHCurl（全局管理器）                                          |
+// +----------------------------------------------------------------------+
+
+/// PHP XHCurl 类的 Rust 表示
+/// 对应 C 版本的 XHCurl 全局管理器
+#[php_class(name = "XHCurl")]
+pub struct PhpXhCurl;
+
+/// PHP XHCurl 类的方法实现
+#[php_impl]
+impl PhpXhCurl {
+    /// 获取扩展版本
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::version(): string
+    #[php_method]
+    pub fn version() -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    /// 设置全局配置
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::setConfig(array $config): void
+    #[php_method]
+    pub fn set_config(config: ZendHashTable) -> Result<(), String> {
+        // 获取全局管理器单例
+        let manager = XhCurlManager::global();
+
+        // 使用闭包修改配置，避免手动管理锁
+        manager.modify_config(|c| {
+            // 从 PHP 数组读取配置项
+            // 每个配置项都是可选的，只处理存在的键
+
+            // 连接超时（秒）
+            if let Some(timeout) = config.get("connect_timeout") {
+                if let Some(v) = timeout.long() {
+                    c.connect_timeout = v as u64;
+                }
+            }
+
+            // 请求超时（秒）
+            if let Some(timeout) = config.get("request_timeout") {
+                if let Some(v) = timeout.long() {
+                    c.request_timeout = v as u64;
+                }
+            }
+
+            // 最大响应体大小（字节），防止内存溢出
+            if let Some(max_size) = config.get("max_response_size") {
+                if let Some(v) = max_size.long() {
+                    c.max_response_size = v as usize;
+                }
+            }
+
+            // 是否跟随重定向
+            if let Some(follow) = config.get("follow_redirects") {
+                if let Some(v) = follow.bool() {
+                    c.follow_redirects = v;
+                }
+            }
+
+            // 最大重定向次数
+            if let Some(max_redirects) = config.get("max_redirects") {
+                if let Some(v) = max_redirects.long() {
+                    c.max_redirects = v as u32;
+                }
+            }
+
+            // 是否验证 SSL 证书
+            if let Some(verify) = config.get("verify_ssl") {
+                if let Some(v) = verify.bool() {
+                    c.verify_ssl = v;
+                }
+            }
+
+            // 自定义 User-Agent
+            if let Some(ua) = config.get("user_agent") {
+                if let Some(v) = ua.string() {
+                    c.user_agent = v.to_string();
+                }
+            }
+
+            // 代理地址
+            if let Some(proxy) = config.get("proxy") {
+                if let Some(v) = proxy.string() {
+                    c.proxy = Some(v.to_string());
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// 获取全局配置
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::getConfig(): array
+    #[php_method]
+    pub fn get_config() -> Result<ZendHashTable, String> {
+        // 获取全局管理器单例
+        let manager = XhCurlManager::global();
+        // 读取配置快照（避免长时间持有锁）
+        let config = manager.config();
+
+        // 构建 PHP 关联数组
+        let mut ht = ZendHashTable::new();
+        ht.insert("connect_timeout", config.connect_timeout as i64);
+        ht.insert("request_timeout", config.request_timeout as i64);
+        ht.insert("max_response_size", config.max_response_size as i64);
+        ht.insert("follow_redirects", config.follow_redirects);
+        ht.insert("max_redirects", config.max_redirects as i64);
+        ht.insert("verify_ssl", config.verify_ssl);
+        ht.insert("http2_enabled", config.http2_enabled);
+        ht.insert("user_agent", config.user_agent);
+        ht.insert("tcp_keepalive", config.tcp_keepalive);
+        ht.insert("max_connections", config.max_connections as i64);
+
+        // 代理地址（可选）
+        if let Some(proxy) = config.proxy {
+            ht.insert("proxy", proxy);
+        }
+
+        Ok(ht)
+    }
+
+    /// 检查是否为 CLI 模式
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::isCli(): bool
+    #[php_method]
+    pub fn is_cli() -> bool {
+        XhCurlManager::is_cli_mode()
+    }
+
+    /// 创建请求构建器
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::createRequest(string $url): XHRequest
+    #[php_method]
+    pub fn create_request(url: String) -> Result<PhpXhRequest, String> {
+        Ok(PhpXhRequest {
+            request: XhRequest::new(url),
+        })
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | PHP 类：XHRequest（请求构建器）                                       |
+// +----------------------------------------------------------------------+
+
+/// PHP XHRequest 类的 Rust 表示
+#[php_class(name = "XHRequest")]
+pub struct PhpXhRequest {
+    /// 内部请求构建器
+    request: XhRequest,
+}
+
+/// PHP XHRequest 类的方法实现
+/// 补全了 proxy / connectTimeout / followRedirects 等缺失方法
+#[php_impl]
+impl PhpXhRequest {
+    /// 构造函数
+    ///
+    /// # PHP 签名
+    /// public XHRequest::__construct(string $url)
+    #[php_method]
+    pub fn __construct(url: String) -> Self {
+        Self {
+            request: XhRequest::new(url),
+        }
+    }
+
+    /// 设置 HTTP 方法
+    ///
+    /// # PHP 签名
+    /// public XHRequest::method(string $method): $this
+    #[php_method]
+    pub fn method(&mut self, method: String) -> Result<&mut Self, String> {
+        // 解析 HTTP 方法字符串为枚举
+        let m = HttpMethod::from_str(&method)
+            .map_err(|e| e.to_string())?;
+        // Builder 模式：clone 后设置新方法
+        self.request = self.request.clone().method(m);
+        Ok(self)
+    }
+
+    /// 设置为 GET 方法
+    #[php_method]
+    pub fn get(&mut self) -> &mut Self {
+        self.request = self.request.clone().get();
+        self
+    }
+
+    /// 设置为 POST 方法
+    #[php_method]
+    pub fn post(&mut self) -> &mut Self {
+        self.request = self.request.clone().post();
+        self
+    }
+
+    /// 设置为 PUT 方法
+    #[php_method]
+    pub fn put(&mut self) -> &mut Self {
+        self.request = self.request.clone().put();
+        self
+    }
+
+    /// 设置为 DELETE 方法
+    #[php_method]
+    pub fn delete(&mut self) -> &mut Self {
+        self.request = self.request.clone().delete();
+        self
+    }
+
+    /// 设置为 PATCH 方法
+    #[php_method]
+    pub fn patch(&mut self) -> &mut Self {
+        self.request = self.request.clone().patch();
+        self
+    }
+
+    /// 设置为 HEAD 方法（仅获取响应头，不返回响应体）
+    #[php_method]
+    pub fn head(&mut self) -> &mut Self {
+        self.request = self.request.clone().head();
+        self
+    }
+
+    /// 设置请求头
+    ///
+    /// # PHP 签名
+    /// public XHRequest::header(string $name, string $value): $this
+    #[php_method]
+    pub fn header(&mut self, name: String, value: String) -> &mut Self {
+        self.request = self.request.clone().header(&name, &value);
+        self
+    }
+
+    /// 设置 JSON 请求体
+    ///
+    /// # PHP 签名
+    /// public XHRequest::json(mixed $data): $this
+    #[php_method]
+    pub fn json(&mut self, data: ZendHashTable) -> Result<&mut Self, String> {
+        // 将 PHP 数组转换为 JSON 字符串
+        let json_str = php_array_to_json(&data)?;
+        // 设置 JSON 请求体（自动添加 Content-Type）
+        self.request = self.request.clone().body_json_str(&json_str)
+            .map_err(|e| e.to_string())?;
+        Ok(self)
+    }
+
+    /// 设置表单数据
+    ///
+    /// # PHP 签名
+    /// public XHRequest::form(array $data): $this
+    #[php_method]
+    pub fn form(&mut self, data: ZendHashTable) -> Result<&mut Self, String> {
+        // 将 PHP 数组转换为表单键值对
+        let form = php_array_to_form(&data);
+        self.request = self.request.clone().body_form(form);
+        Ok(self)
+    }
+
+    /// 设置原始请求体
+    ///
+    /// # PHP 签名
+    /// public XHRequest::body(string $data): $this
+    #[php_method]
+    pub fn body(&mut self, data: String) -> &mut Self {
+        self.request = self.request.clone().body_bytes(data.into_bytes());
+        self
+    }
+
+    /// 设置请求超时（秒）
+    ///
+    /// # PHP 签名
+    /// public XHRequest::timeout(int $seconds): $this
+    #[php_method]
+    pub fn timeout(&mut self, seconds: i64) -> &mut Self {
+        self.request = self.request.clone().request_timeout(seconds as u64);
+        self
+    }
+
+    /// 设置连接超时（秒）
+    /// 与 timeout 不同，此方法仅控制连接阶段的超时
+    ///
+    /// # PHP 签名
+    /// public XHRequest::connectTimeout(int $seconds): $this
+    #[php_method]
+    pub fn connect_timeout(&mut self, seconds: i64) -> &mut Self {
+        self.request = self.request.clone().connect_timeout(seconds as u64);
+        self
+    }
+
+    /// 设置是否验证 SSL 证书
+    ///
+    /// # PHP 签名
+    /// public XHRequest::verifySsl(bool $verify): $this
+    #[php_method]
+    pub fn verify_ssl(&mut self, verify: bool) -> &mut Self {
+        self.request = self.request.clone().verify_ssl(verify);
+        self
+    }
+
+    /// 设置 User-Agent
+    ///
+    /// # PHP 签名
+    /// public XHRequest::userAgent(string $ua): $this
+    #[php_method]
+    pub fn user_agent(&mut self, ua: String) -> &mut Self {
+        self.request = self.request.clone().user_agent(ua);
+        self
+    }
+
+    /// 设置代理地址
+    /// 支持 HTTP/HTTPS/SOCKS5 代理
+    ///
+    /// # PHP 签名
+    /// public XHRequest::proxy(string $proxy): $this
+    ///
+    /// # 示例
+    /// $req->proxy("http://127.0.0.1:7890");
+    /// $req->proxy("socks5://127.0.0.1:1080");
+    #[php_method]
+    pub fn proxy(&mut self, proxy: String) -> &mut Self {
+        self.request = self.request.clone().proxy(proxy);
+        self
+    }
+
+    /// 设置是否跟随重定向
+    ///
+    /// # PHP 签名
+    /// public XHRequest::followRedirects(bool $follow): $this
+    #[php_method]
+    pub fn follow_redirects(&mut self, follow: bool) -> &mut Self {
+        self.request = self.request.clone().follow_redirects(follow);
+        self
+    }
+
+    /// 设置最大重定向次数
+    ///
+    /// # PHP 签名
+    /// public XHRequest::maxRedirects(int $max): $this
+    #[php_method]
+    pub fn max_redirects(&mut self, max: i64) -> &mut Self {
+        self.request = self.request.clone().max_redirects(max as u32);
+        self
+    }
+
+    /// 设置请求 ID（用于批量请求时的结果关联）
+    ///
+    /// # PHP 签名
+    /// public XHRequest::setId(string $id): $this
+    #[php_method]
+    pub fn set_id(&mut self, id: String) -> &mut Self {
+        self.request = self.request.clone().id(id);
+        self
+    }
+
+    /// 设置请求优先级（线程池模式下生效）
+    /// 数值越大优先级越高
+    ///
+    /// # PHP 签名
+    /// public XHRequest::setPriority(int $priority): $this
+    #[php_method]
+    pub fn set_priority(&mut self, priority: i64) -> &mut Self {
+        self.request = self.request.clone().priority(priority as i32);
+        self
+    }
+
+    /// 获取请求 URL
+    #[php_method]
+    pub fn get_url(&self) -> String {
+        self.request.get_url().to_string()
+    }
+
+    /// 获取 HTTP 方法
+    #[php_method]
+    pub fn get_method(&self) -> String {
+        self.request.get_method().to_string()
+    }
+
+    /// 获取请求 ID
+    #[php_method]
+    pub fn get_id(&self) -> Option<String> {
+        self.request.get_id().map(|s| s.to_string())
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | PHP 类：XHResponse（响应对象）                                        |
+// +----------------------------------------------------------------------+
+
+/// PHP XHResponse 类的 Rust 表示
+#[php_class(name = "XHResponse")]
+pub struct PhpXhResponse {
+    /// 内部响应对象
+    response: Option<XhResponse>,
+}
+
+/// PHP XHResponse 类的方法实现
+#[php_impl]
+impl PhpXhResponse {
+    /// 获取状态码
+    #[php_method]
+    pub fn status(&self) -> i64 {
+        // 安全访问：response 为 None 时返回 0
+        self.response.as_ref()
+            .map(|r| r.status() as i64)
+            .unwrap_or(0)
+    }
+
+    /// 检查是否成功（2xx 状态码）
+    #[php_method]
+    pub fn is_success(&self) -> bool {
+        self.response.as_ref()
+            .map(|r| r.is_success())
+            .unwrap_or(false)
+    }
+
+    /// 获取指定响应头
+    #[php_method]
+    pub fn header(&self, name: String) -> Option<String> {
+        self.response.as_ref()
+            .and_then(|r| r.header(&name))
+    }
+
+    /// 获取所有响应头
+    #[php_method]
+    pub fn headers(&self) -> ZendHashTable {
+        let mut ht = ZendHashTable::new();
+        if let Some(response) = &self.response {
+            // 遍历所有响应头，插入 PHP 数组
+            for (name, value) in response.headers().all() {
+                ht.insert(&name, value);
+            }
+        }
+        ht
+    }
+
+    /// 获取响应体（字符串）
+    #[php_method]
+    pub fn body(&self) -> Result<String, String> {
+        self.response.as_ref()
+            .ok_or("响应不存在".to_string())?
+            .body_text()
+            .map_err(|e| e.to_string())
+    }
+
+    /// 获取响应体（JSON 解析为数组）
+    #[php_method]
+    pub fn json(&self) -> Result<ZendHashTable, String> {
+        let response = self.response.as_ref()
+            .ok_or("响应不存在".to_string())?;
+        // 解析 JSON
+        let json = response.body_json()
+            .map_err(|e| e.to_string())?;
+        // 转换为 PHP 关联数组
+        json_to_php_array(&json)
+    }
+
+    /// 获取响应体大小（字节）
+    #[php_method]
+    pub fn body_size(&self) -> i64 {
+        self.response.as_ref()
+            .map(|r| r.body_size() as i64)
+            .unwrap_or(0)
+    }
+
+    /// 获取最终 URL（可能因重定向而与请求 URL 不同）
+    #[php_method]
+    pub fn url(&self) -> String {
+        self.response.as_ref()
+            .map(|r| r.url().to_string())
+            .unwrap_or_default()
+    }
+
+    /// 获取请求耗时（毫秒）
+    #[php_method]
+    pub fn elapsed_ms(&self) -> i64 {
+        self.response.as_ref()
+            .map(|r| r.elapsed().as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// 获取错误信息
+    #[php_method]
+    pub fn error(&self) -> Option<String> {
+        self.response.as_ref()
+            .and_then(|r| r.error().map(|s| s.to_string()))
+    }
+
+    /// 获取远程服务器地址（IP:Port）
+    #[php_method]
+    pub fn remote_addr(&self) -> Option<String> {
+        self.response.as_ref()
+            .and_then(|r| r.remote_addr().map(|s| s.to_string()))
+    }
+
+    /// 获取 HTTP 协议版本
+    #[php_method]
+    pub fn version(&self) -> Option<String> {
+        self.response.as_ref()
+            .and_then(|r| r.version().map(|s| s.to_string()))
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | PHP 类：XHMulti（异步批量执行器）                                     |
+// +----------------------------------------------------------------------+
+
+/// PHP XHMulti 类的 Rust 表示
+#[php_class(name = "XHMulti")]
+pub struct PhpXhMulti {
+    /// 内部批量执行器（延迟创建）
+    multi: Option<XhMulti>,
+
+    /// 待执行的请求列表
+    requests: Vec<XhRequest>,
+
+    /// 最大并发数（0 = 无限制）
+    /// 修复：原代码缺少此字段导致编译错误
+    max_concurrency: usize,
+}
+
+/// PHP XHMulti 类的方法实现
+#[php_impl]
+impl PhpXhMulti {
+    /// 构造函数
+    #[php_method]
+    pub fn __construct() -> Self {
+        Self {
+            multi: None,
+            requests: Vec::new(),
+            max_concurrency: 0, // 0 = 无限制
+        }
+    }
+
+    /// 添加请求到批量执行器
+    /// 带数量上限检查，防止内存溢出
+    ///
+    /// # PHP 签名
+    /// public XHMulti::add(XHRequest $request): $this
+    #[php_method]
+    pub fn add(&mut self, request: &mut PhpXhRequest) -> Result<&mut Self, String> {
+        // 检查请求数量是否超过上限
+        if self.requests.len() >= MAX_REQUESTS_PER_BATCH {
+            return Err(format!(
+                "批量请求数量超过上限 {}，请分批执行",
+                MAX_REQUESTS_PER_BATCH
+            ));
+        }
+        // 克隆请求并添加到列表
+        self.requests.push(request.request.clone());
+        Ok(self)
+    }
+
+    /// 设置最大并发数
+    ///
+    /// # PHP 签名
+    /// public XHMulti::maxConcurrency(int $max): $this
+    #[php_method]
+    pub fn max_concurrency(&mut self, max: i64) -> &mut Self {
+        // 在 execute 时应用到 XhMulti
+        self.max_concurrency = max as usize;
+        self
+    }
+
+    /// 执行所有请求
+    ///
+    /// # PHP 签名
+    /// public XHMulti::execute(): array
+    #[php_method]
+    pub fn execute(&mut self) -> Result<ZendHashTable, String> {
+        // 创建单线程运行时（FPM 安全）
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("创建运行时失败: {}", e))?;
+
+        // 阻塞执行异步任务
+        let results = runtime.block_on(async {
+            // 使用全局配置创建客户端（复用连接池）
+            let client = XhCurlManager::global().create_client()
+                .map_err(|e| e.to_string())?;
+            let mut multi = XhMulti::new(client);
+
+            // 设置并发数限制
+            if self.max_concurrency > 0 {
+                multi = multi.max_concurrency(self.max_concurrency);
+            }
+
+            // 添加请求（take 避免克隆）
+            let requests = std::mem::take(&mut self.requests);
+            multi.add_many(requests);
+
+            // 执行所有请求
+            multi.execute().await
+        }).map_err(|e| e.to_string())?;
+
+        // 转换为 PHP 数组
+        let mut ht = ZendHashTable::new();
+        for (i, result) in results.into_iter().enumerate() {
+            let mut response_ht = ZendHashTable::new();
+            // 请求 ID
+            response_ht.insert("id", result.id);
+            // 是否成功
+            response_ht.insert("success", result.is_success());
+            // 耗时（毫秒）
+            response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+
+            // 错误信息（可选）
+            if let Some(err) = result.error {
+                response_ht.insert("error", err);
+            }
+
+            // 响应详情（成功时）
+            if let Some(resp) = result.response {
+                // HTTP 状态码
+                response_ht.insert("status", resp.status() as i64);
+                // 响应体大小
+                response_ht.insert("body_size", resp.body_size() as i64);
+                // 响应体文本
+                if let Ok(body) = resp.body_text() {
+                    response_ht.insert("body", body);
+                }
+                // 最终 URL
+                response_ht.insert("url", resp.url().to_string());
+            }
+
+            ht.insert(i.to_string(), response_ht);
+        }
+
+        Ok(ht)
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | PHP 类：XHThreadPool（线程池）                                        |
+// +----------------------------------------------------------------------+
+
+/// PHP XHThreadPool 类的 Rust 表示
+#[php_class(name = "XHThreadPool")]
+pub struct PhpXhThreadPool {
+    /// 内部线程池（延迟创建）
+    pool: Option<XhThreadPool>,
+
+    /// 待执行的请求列表
+    requests: Vec<XhRequest>,
+
+    /// 最大并发数（工作线程数量）
+    max_concurrency: usize,
+}
+
+/// PHP XHThreadPool 类的方法实现
+#[php_impl]
+impl PhpXhThreadPool {
+    /// 构造函数
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::__construct(int $workers = 0)
+    #[php_method]
+    pub fn __construct(workers: Option<i64>) -> Self {
+        Self {
+            pool: None,
+            requests: Vec::new(),
+            max_concurrency: workers.unwrap_or(0) as usize,
+        }
+    }
+
+    /// 添加请求到线程池
+    /// 带数量上限检查，防止内存溢出
+    #[php_method]
+    pub fn add(&mut self, request: &mut PhpXhRequest) -> Result<&mut Self, String> {
+        // 检查请求数量是否超过上限
+        if self.requests.len() >= MAX_REQUESTS_PER_BATCH {
+            return Err(format!(
+                "批量请求数量超过上限 {}，请分批执行",
+                MAX_REQUESTS_PER_BATCH
+            ));
+        }
+        self.requests.push(request.request.clone());
+        Ok(self)
+    }
+
+    /// 执行所有请求
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::execute(): array
+    #[php_method]
+    pub fn execute(&mut self) -> Result<ZendHashTable, String> {
+        // 安全检查：线程池仅在 CLI 模式下可用
+        // FPM 模式下多线程会与 PHP 内存管理器冲突
+        if !XhCurlManager::is_cli_mode() {
+            return Err("XHThreadPool 仅在 CLI 模式下可用".to_string());
+        }
+
+        // 创建多线程运行时（真正的并行执行）
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("创建运行时失败: {}", e))?;
+
+        // 阻塞执行
+        let results = runtime.block_on(async {
+            // 使用全局配置创建客户端
+            let client = XhCurlManager::global().create_client()
+                .map_err(|e| e.to_string())?;
+
+            // 创建线程池配置
+            let mut config = ThreadPoolConfig::default();
+            if self.max_concurrency > 0 {
+                config.worker_count = self.max_concurrency;
+            }
+
+            // 创建线程池并执行
+            let mut pool = XhThreadPool::new(config, client);
+            let requests = std::mem::take(&mut self.requests);
+
+            pool.execute_all(requests).await
+        }).map_err(|e| e.to_string())?;
+
+        // 转换为 PHP 数组
+        let mut ht = ZendHashTable::new();
+        for (i, result) in results.into_iter().enumerate() {
+            let mut response_ht = ZendHashTable::new();
+            // 请求 ID
+            response_ht.insert("id", result.id);
+            // 是否成功
+            response_ht.insert("success", result.is_success());
+            // 耗时（毫秒）
+            response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+
+            // 错误信息（可选）
+            if let Some(err) = result.error {
+                response_ht.insert("error", err);
+            }
+
+            // 响应详情（成功时）
+            if let Some(resp) = result.response {
+                // HTTP 状态码
+                response_ht.insert("status", resp.status() as i64);
+                // 响应体大小
+                response_ht.insert("body_size", resp.body_size() as i64);
+                // 响应体文本
+                if let Ok(body) = resp.body_text() {
+                    response_ht.insert("body", body);
+                }
+                // 最终 URL
+                response_ht.insert("url", resp.url().to_string());
+            }
+
+            ht.insert(i.to_string(), response_ht);
+        }
+
+        Ok(ht)
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | 辅助函数                                                              |
+// +----------------------------------------------------------------------+
+
+/// 将 PHP 数组转换为 JSON 字符串
+/// 递归处理嵌套数组
+fn php_array_to_json(ht: &ZendHashTable) -> Result<String, String> {
+    // 构建 JSON Object
+    let mut map = serde_json::Map::new();
+
+    // 遍历 PHP 数组
+    for (key, val) in ht.iter() {
+        let key_str = key.to_string();
+        // 递归转换每个值
+        let json_val = zval_to_json(val)?;
+        map.insert(key_str, json_val);
+    }
+
+    let value = serde_json::Value::Object(map);
+    // 序列化为 JSON 字符串
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
+/// 将 Zval 转换为 JSON 值
+/// 支持 string / int / float / bool / array 类型
+fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
+    // 按类型匹配转换
+    if let Some(s) = val.string() {
+        // 字符串类型
+        Ok(serde_json::Value::String(s.to_string()))
+    } else if let Some(l) = val.long() {
+        // 整数类型
+        Ok(serde_json::Value::Number(l.into()))
+    } else if let Some(d) = val.double() {
+        // 浮点数类型
+        Ok(serde_json::json!(d))
+    } else if let Some(b) = val.bool() {
+        // 布尔类型
+        Ok(serde_json::Value::Bool(b))
+    } else if let Some(ht) = val.array() {
+        // 数组类型（递归处理）
+        let mut map = serde_json::Map::new();
+        for (key, v) in ht.iter() {
+            map.insert(key.to_string(), zval_to_json(v)?);
+        }
+        Ok(serde_json::Value::Object(map))
+    } else {
+        // NULL 或未知类型
+        Ok(serde_json::Value::Null)
+    }
+}
+
+/// 将 PHP 数组转换为表单键值对
+/// 用于 application/x-www-form-urlencoded 请求
+fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
+    let mut form = Vec::new();
+
+    // 遍历 PHP 数组，提取字符串键值对
+    for (key, val) in ht.iter() {
+        // 键转为字符串
+        let key_str = key.to_string();
+        // 值转为字符串（支持多种类型）
+        let val_str = if let Some(s) = val.string() {
+            s.to_string()
+        } else if let Some(l) = val.long() {
+            l.to_string()
+        } else if let Some(d) = val.double() {
+            d.to_string()
+        } else if let Some(b) = val.bool() {
+            if b { "1" } else { "0" }.to_string()
+        } else {
+            // 不支持的类型跳过
+            continue;
+        };
+        form.push((key_str, val_str));
+    }
+
+    form
+}
+
+/// 将 JSON 值转换为 PHP 数组
+/// 递归处理嵌套对象和数组
+fn json_to_php_array(json: &serde_json::Value) -> Result<ZendHashTable, String> {
+    let mut ht = ZendHashTable::new();
+
+    // 只处理 Object 类型（PHP 关联数组）
+    if let Some(obj) = json.as_object() {
+        for (key, val) in obj {
+            // 根据值类型插入
+            match val {
+                serde_json::Value::String(s) => {
+                    // 字符串
+                    ht.insert(key.as_str(), s.as_str());
+                }
+                serde_json::Value::Number(n) => {
+                    // 数字（优先取整数）
+                    if let Some(i) = n.as_i64() {
+                        ht.insert(key.as_str(), i);
+                    } else if let Some(f) = n.as_f64() {
+                        ht.insert(key.as_str(), f);
+                    }
+                }
+                serde_json::Value::Bool(b) => {
+                    // 布尔
+                    ht.insert(key.as_str(), *b);
+                }
+                serde_json::Value::Null => {
+                    // NULL → 空字符串
+                    ht.insert(key.as_str(), "");
+                }
+                serde_json::Value::Array(arr) => {
+                    // 数组 → 递归转换
+                    let mut arr_ht = ZendHashTable::new();
+                    for (i, item) in arr.iter().enumerate() {
+                        // 索引作为键
+                        if let Some(s) = item.as_str() {
+                            arr_ht.insert(i.to_string(), s);
+                        } else if let Some(n) = item.as_i64() {
+                            arr_ht.insert(i.to_string(), n);
+                        }
+                    }
+                    // 嵌套数组暂不深度递归（ext-php-rs 限制）
+                }
+                serde_json::Value::Object(inner) => {
+                    // 嵌套对象 → 递归转换
+                    let inner_ht = json_to_php_array(&serde_json::Value::Object(inner.clone()))?;
+                    // 嵌套哈希表暂不支持直接插入（ext-php-rs 限制）
+                    // 后续版本可扩展
+                    let _ = inner_ht;
+                }
+            }
+        }
+    }
+
+    Ok(ht)
+}

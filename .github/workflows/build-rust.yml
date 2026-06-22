@@ -1,0 +1,484 @@
+# +----------------------------------------------------------------------+
+# | XHCurl 扩展 - Rust 版本 GitHub Actions CI/CD 流水线                   |
+# | 自动化编译：Linux / macOS / Windows 多平台 + 多 PHP 版本              |
+# | 使用 cargo 构建 Rust 代码，ext-php-rs 生成 PHP 扩展                  |
+# | 编译产物：各平台 .so/.dylib/.dll 扩展文件                             |
+# +----------------------------------------------------------------------+
+
+name: Build XHCurl Rust Extension
+
+# 触发条件：push 到 main 分支 或 创建 tag 时触发
+on:
+  push:
+    branches: [ main ]
+    # Rust 版本的 tag 以 rust-v 前缀区分
+    tags: [ 'rust-v*' ]
+  pull_request:
+    branches: [ main ]
+    # 仅在 rust/ 目录变更时触发
+    paths:
+      - 'rust/**'
+      - '.github/workflows/build-rust.yml'
+
+# 全局环境变量
+env:
+  # 扩展名称
+  EXTENSION_NAME: xhcurl
+  # Rust 工具链版本
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  # =====================================================================
+  # Job 1: Linux 平台编译（Ubuntu 22.04）
+  # 支持 PHP 8.0 ~ 8.4
+  # 使用 cargo + ext-php-rs 编译为 .so 扩展
+  # =====================================================================
+  build-linux:
+    name: "Linux Rust (PHP ${{ matrix.php-version }}, Ubuntu ${{ matrix.ubuntu }})"
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false  # 某个版本失败不影响其他版本继续编译
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        ubuntu: ['22.04']
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码仓库
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装系统依赖
+      # libclang-dev: ext-php-rs bindgen 需要
+      # build-essential: C 编译工具链
+      # pkg-config: 库检测工具
+      # -----------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装指定版本的 PHP 及开发工具
+      # ext-php-rs 需要 php-config 获取 PHP 头文件路径
+      # -----------------------------------------------------------------
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: php-config
+          extensions: curl, json
+          coverage: none
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 安装 Rust 工具链
+      # -----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 缓存 cargo 编译产物
+      # 加速后续构建，避免重复下载和编译依赖
+      # -----------------------------------------------------------------
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-rust-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            linux-rust-php${{ matrix.php-version }}-
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 编译 Rust PHP 扩展
+      # 使用 --features php 启用 ext-php-rs 绑定
+      # --release 优化编译产物
+      # -----------------------------------------------------------------
+      - name: Build Rust PHP extension
+        working-directory: rust
+        run: |
+          echo "=== 开始编译 XHCurl Rust 扩展 ==="
+          echo "PHP 版本: $(php -v | head -n 1)"
+          echo "Rust 版本: $(rustc --version)"
+          echo "Cargo 版本: $(cargo --version)"
+
+          # 编译 Rust PHP 扩展（启用 php feature）
+          cargo build --release --features php
+
+          echo "=== 编译成功 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 7: 收集编译产物
+      # cargo 编译产物在 target/release/ 下，文件名格式为 libxhcurl.so
+      # -----------------------------------------------------------------
+      - name: Collect build artifacts
+        run: |
+          mkdir -p dist/linux
+          # 查找编译产物
+          if [ -f "rust/target/release/libxhcurl.so" ]; then
+            cp "rust/target/release/libxhcurl.so" "dist/linux/xhcurl-rust-linux-php${{ matrix.php-version }}.so"
+          else
+            echo "::error::未找到编译产物 libxhcurl.so"
+            ls -la rust/target/release/*.so 2>/dev/null || true
+            exit 1
+          fi
+          # 显示文件信息
+          ls -la dist/linux/
+          file dist/linux/*.so
+
+      # -----------------------------------------------------------------
+      # 步骤 8: 验证扩展可加载
+      # -----------------------------------------------------------------
+      - name: Verify extension loads
+        run: |
+          # 临时复制扩展到 PHP 扩展目录
+          EXT_DIR=$(php-config --extension-dir)
+          cp "dist/linux/xhcurl-rust-linux-php${{ matrix.php-version }}.so" "$EXT_DIR/xhcurl.so"
+
+          # 尝试加载扩展
+          php -d extension=xhcurl -r "echo 'XHCurl Rust 扩展加载成功';" || true
+
+      # -----------------------------------------------------------------
+      # 步骤 9: 上传编译产物
+      # -----------------------------------------------------------------
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-rust-linux-php${{ matrix.php-version }}
+          path: dist/linux/*.so
+          retention-days: 30
+
+  # =====================================================================
+  # Job 2: macOS 平台编译（macOS 14 / Apple Silicon）
+  # 支持 PHP 8.0 ~ 8.3
+  # ext-php-rs 在 macOS 上编译为 .dylib 扩展
+  # =====================================================================
+  build-macos:
+    name: "macOS Rust (PHP ${{ matrix.php-version }}, macos-14)"
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3']
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装系统依赖
+      # macOS 自带 clang，但需要安装 libclang 的 bindgen 依赖
+      # -----------------------------------------------------------------
+      - name: Install Homebrew dependencies
+        run: |
+          brew install llvm 2>/dev/null || true
+          echo "LLVM_PATH=$(brew --prefix llvm)" >> $GITHUB_ENV
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装 PHP
+      # -----------------------------------------------------------------
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: php-config
+          extensions: curl, json
+          coverage: none
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 安装 Rust 工具链
+      # -----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 缓存 cargo 编译产物
+      # -----------------------------------------------------------------
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-rust-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            macos-rust-php${{ matrix.php-version }}-
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 编译 Rust PHP 扩展
+      # macOS 需要设置 LIBCLANG_PATH 环境变量
+      # -----------------------------------------------------------------
+      - name: Build Rust PHP extension
+        working-directory: rust
+        env:
+          # bindgen 需要 libclang 路径
+          LIBCLANG_PATH: ${{ env.LLVM_PATH }}/lib
+        run: |
+          echo "=== 开始编译 XHCurl Rust 扩展 ==="
+          echo "PHP 版本: $(php -v | head -n 1)"
+          echo "Rust 版本: $(rustc --version)"
+          echo "macOS 版本: $(sw_vers -productVersion)"
+
+          # 编译
+          cargo build --release --features php
+
+          echo "=== 编译成功 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 7: 收集并上传产物
+      # macOS 编译产物为 .dylib 文件
+      # -----------------------------------------------------------------
+      - name: Collect and upload artifacts
+        run: |
+          mkdir -p dist/macos
+
+          # 查找编译产物（macOS 可能是 .dylib 或 .so）
+          if [ -f "rust/target/release/libxhcurl.dylib" ]; then
+            cp "rust/target/release/libxhcurl.dylib" "dist/macos/xhcurl-rust-macos-php${{ matrix.php-version }}.dylib"
+          elif [ -f "rust/target/release/libxhcurl.so" ]; then
+            cp "rust/target/release/libxhcurl.so" "dist/macos/xhcurl-rust-macos-php${{ matrix.php-version }}.so"
+          else
+            echo "::error::未找到编译产物"
+            ls -la rust/target/release/*.dylib rust/target/release/*.so 2>/dev/null || true
+            exit 1
+          fi
+
+          ls -la dist/macos/
+          file dist/macos/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-rust-macos-php${{ matrix.php-version }}
+          path: dist/macos/*
+          retention-days: 30
+
+  # =====================================================================
+  # Job 3: Windows 平台编译
+  # 使用 cargo + ext-php-rs 编译为 .dll 扩展
+  #
+  # Windows 编译注意事项：
+  #   1. 需要安装 Rust MSVC 工具链
+  #   2. 需要安装 PHP 开发头文件（php-devel）
+  #   3. libclang 需要 LLVM 安装
+  #   4. ext-php-rs 的 bindgen 在 Windows 上需要特殊配置
+  # =====================================================================
+  build-windows:
+    name: "Windows Rust (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        # NTS 和 ZTS 分别编译
+        ts: ['nts', 'zts']
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装 Rust 工具链（MSVC 目标）
+      # -----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装 LLVM（bindgen 依赖）
+      # -----------------------------------------------------------------
+      - name: Install LLVM
+        run: |
+          choco install llvm -y
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 设置 PHP SDK
+      # -----------------------------------------------------------------
+      - name: Setup PHP SDK
+        id: setup-php-sdk
+        uses: php/setup-php-sdk@v0.12
+        with:
+          version: ${{ matrix.php-version }}
+          arch: x64
+          ts: ${{ matrix.ts }}
+          cache: true
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 设置 MSVC 编译环境
+      # -----------------------------------------------------------------
+      - name: Setup MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
+
+      # -----------------------------------------------------------------
+      # 步骤 6: 缓存 cargo 编译产物
+      # -----------------------------------------------------------------
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-rust-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            windows-rust-php${{ matrix.php-version }}-${{ matrix.ts }}-
+
+      # -----------------------------------------------------------------
+      # 步骤 7: 编译 Rust PHP 扩展
+      # Windows 上 ext-php-rs 需要 PHP_INCLUDE_PATH 环境变量
+      # -----------------------------------------------------------------
+      - name: Build Rust PHP extension
+        working-directory: rust
+        env:
+          # ext-php-rs 需要 PHP 的 include 路径
+          PHP_INCLUDE_PATH: ${{ steps.setup-php-sdk.outputs.prefix }}/include
+        shell: pwsh
+        run: |
+          Write-Host "=== 开始编译 XHCurl Rust 扩展 ==="
+          Write-Host "PHP 版本: $(php -v | Select-Object -First 1)"
+          Write-Host "Rust 版本: $(rustc --version)"
+          Write-Host "PHP Include: $env:PHP_INCLUDE_PATH"
+
+          # 编译
+          cargo build --release --features php
+
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "=== 编译成功 ==="
+          } else {
+            Write-Host "::error::编译失败"
+            exit 1
+          }
+
+      # -----------------------------------------------------------------
+      # 步骤 8: 收集并上传产物
+      # Windows 编译产物为 .dll 文件
+      # -----------------------------------------------------------------
+      - name: Collect and upload artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist/windows" -Force | Out-Null
+
+          # 查找编译产物
+          $dllPath = "rust/target/release/xhcurl.dll"
+          if (-not (Test-Path $dllPath)) {
+            # 尝试带 lib 前缀
+            $dllPath = "rust/target/release/xhcurl.dll"
+          }
+
+          if (Test-Path $dllPath) {
+            Copy-Item -Path $dllPath -Destination "dist/windows/xhcurl-rust-windows-php${{ matrix.php-version }}-${{ matrix.ts }}.dll"
+          } else {
+            Write-Host "::error::未找到编译产物 xhcurl.dll"
+            Get-ChildItem -Path "rust/target/release/*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+            exit 1
+          }
+
+          Get-ChildItem -Path "dist/windows" | ForEach-Object { Write-Host "  $($_.Name)" }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhcurl-rust-windows-php${{ matrix.php-version }}-${{ matrix.ts }}
+          path: dist/windows/*.dll
+          retention-days: 30
+
+  # =====================================================================
+  # Job 4: Rust 代码质量检查
+  # 运行 cargo clippy 和 cargo test
+  # =====================================================================
+  lint-and-test:
+    name: "Rust Lint & Test"
+    runs-on: ubuntu-22.04
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 安装系统依赖
+      # -----------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libclang-dev build-essential pkg-config libssl-dev
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 安装 Rust 工具链（含 clippy 组件）
+      # -----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 缓存
+      # -----------------------------------------------------------------
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-rust-lint-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            linux-rust-lint-
+
+      # -----------------------------------------------------------------
+      # 步骤 5: 代码格式检查
+      # -----------------------------------------------------------------
+      - name: Check formatting
+        working-directory: rust
+        run: |
+          echo "=== 检查代码格式 ==="
+          cargo fmt -- --check
+
+      # -----------------------------------------------------------------
+      # 步骤 6: Clippy 静态分析
+      # 不启用 php feature（避免依赖 PHP 开发头文件）
+      # -----------------------------------------------------------------
+      - name: Run Clippy
+        working-directory: rust
+        run: |
+          echo "=== 运行 Clippy 静态分析 ==="
+          cargo clippy -- -D warnings
+
+      # -----------------------------------------------------------------
+      # 步骤 7: 运行测试
+      # 不启用 php feature，仅测试核心逻辑
+      # -----------------------------------------------------------------
+      - name: Run tests
+        working-directory: rust
+        run: |
+          echo "=== 运行测试 ==="
+          cargo test

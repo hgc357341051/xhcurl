@@ -1,0 +1,728 @@
+// +----------------------------------------------------------------------+
+// | XHCurl 扩展 - 异步批量执行器（XHMulti）                                |
+// | 基于 tokio 的 M:N 调度模型，实现类似 Golang goroutine 的并发           |
+// |                                                                        |
+// | 核心优势（对比 C 版本）：                                              |
+// | 1. 真正的 M:N 调度：N 个异步任务在 M 个工作线程上调度                 |
+// | 2. 非阻塞执行：主线程不阻塞，通过 channel 接收结果                     |
+// | 3. 流式回调支持：通过 channel 实现工作线程到主线程的回调              |
+// | 4. 统一 FPM/CLI：tokio 自动适配运行时模式                              |
+// | 5. 编译期线程安全：Send + Sync bounds 保证无数据竞争                  |
+// |                                                                        |
+// | 安全改进（v2）：                                                       |
+// | - 有界 channel 替代无界 channel，防止内存溢出                         |
+// | - 流式读取响应体 + max_response_size 限制                              |
+// | - 请求数量上限检查                                                     |
+// +----------------------------------------------------------------------+
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::curl::XhCurlManager;
+use crate::error::{XhCurlError, XhCurlResult};
+use crate::request::XhRequest;
+use crate::response::XhResponse;
+
+// +----------------------------------------------------------------------+
+// | 常量定义                                                              |
+// +----------------------------------------------------------------------+
+
+/// 单次批量请求的最大数量限制
+/// 防止用户传入过多请求导致内存溢出
+const MAX_REQUESTS_PER_BATCH: usize = 10000;
+
+/// 流式事件 channel 的默认缓冲区大小
+/// 限制积压事件数量，实现背压控制
+const STREAM_CHANNEL_CAPACITY: usize = 1024;
+
+/// 结果 channel 的默认缓冲区倍数
+/// 相对于请求数量的倍数，确保不会因缓冲不足而阻塞
+const RESULT_CHANNEL_MULTIPLIER: usize = 2;
+
+/// 默认最大响应体大小（10MB）
+/// 超过此大小的响应体会被截断并返回错误
+const DEFAULT_MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
+// +----------------------------------------------------------------------+
+// | 流式回调事件                                                          |
+// +----------------------------------------------------------------------+
+
+/// 流式回调事件
+/// 工作线程通过 channel 发送给主线程的事件类型
+/// 对应 C 版本的 onChunk / onHeader 回调
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// 接收到响应头
+    /// 参数：状态码、头部 Map
+    Headers {
+        /// HTTP 状态码
+        status: u16,
+        /// 响应头键值对
+        headers: HashMap<String, String>,
+    },
+
+    /// 接收到响应体数据块
+    /// 参数：数据块
+    Chunk {
+        /// 响应体数据块
+        data: Vec<u8>,
+    },
+
+    /// 请求完成
+    /// 参数：总耗时、响应体大小
+    Complete {
+        /// 请求总耗时
+        elapsed: Duration,
+        /// 响应体总大小
+        body_size: usize,
+    },
+
+    /// 请求出错
+    /// 参数：错误信息
+    Error {
+        /// 错误描述
+        message: String,
+    },
+}
+
+// +----------------------------------------------------------------------+
+// | 请求执行结果                                                          |
+// +----------------------------------------------------------------------+
+
+/// 单个请求的执行结果
+#[derive(Debug)]
+pub struct RequestResult {
+    /// 请求 ID（用于关联请求和响应）
+    pub id: String,
+
+    /// 响应对象（成功时）
+    pub response: Option<XhResponse>,
+
+    /// 错误信息（失败时）
+    pub error: Option<String>,
+
+    /// 请求耗时
+    pub elapsed: Duration,
+}
+
+impl RequestResult {
+    /// 创建成功结果
+    pub fn success(id: String, response: XhResponse, elapsed: Duration) -> Self {
+        Self {
+            id,
+            response: Some(response),
+            error: None,
+            elapsed,
+        }
+    }
+
+    /// 创建失败结果
+    pub fn error(id: String, error: String, elapsed: Duration) -> Self {
+        Self {
+            id,
+            response: None,
+            error: Some(error),
+            elapsed,
+        }
+    }
+
+    /// 检查是否成功
+    pub fn is_success(&self) -> bool {
+        self.response.is_some() && self.error.is_none()
+    }
+}
+
+// +----------------------------------------------------------------------+
+// | 异步批量执行器                                                        |
+// +----------------------------------------------------------------------+
+
+/// 异步批量执行器
+/// 管理多个并发 HTTP 请求，基于 tokio 的 M:N 调度
+///
+/// # 工作原理
+/// 1. 每个请求被封装为一个 tokio task（类似 goroutine）
+/// 2. tokio 运行时自动在 M 个工作线程间调度 N 个 task
+/// 3. 通过 mpsc channel 将结果发送回主线程
+/// 4. 主线程通过 `recv_all()` 收集所有结果
+///
+/// # 对比 C 版本
+/// - C 版本：curl_multi_perform 单线程事件循环，阻塞主线程
+/// - Rust 版本：tokio M:N 调度，真正并行执行
+///
+/// # 线程安全
+/// - XhMulti 本身不是线程安全的（管理任务状态）
+/// - 但内部的异步任务可以跨线程执行（通过 channel 通信）
+/// - 所有 channel 使用有界缓冲区，防止内存溢出
+pub struct XhMulti {
+    /// reqwest 客户端（共享连接池）
+    client: reqwest::Client,
+
+    /// 待执行的请求列表
+    requests: Vec<XhRequest>,
+
+    /// 最大并发数（0 = 无限制）
+    max_concurrency: usize,
+
+    /// 全局超时（0 = 无超时）
+    timeout: Option<Duration>,
+
+    /// 最大响应体大小（字节，0 = 使用默认值）
+    /// 防止恶意服务器返回超大响应导致内存溢出
+    max_response_size: usize,
+
+    /// 流式回调 channel 发送端
+    /// 用于将工作线程的事件发送到主线程
+    /// Some 表示启用了流式回调
+    /// 修复：改为有界 channel，实现背压控制
+    stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
+
+    /// 已启动的异步任务句柄
+    tasks: Vec<JoinHandle<RequestResult>>,
+}
+
+impl XhMulti {
+    /// 创建新的批量执行器
+    ///
+    /// # 参数
+    /// - `client`: reqwest 客户端实例
+    pub fn new(client: reqwest::Client) -> Self {
+        Self {
+            client,
+            requests: Vec::new(),
+            max_concurrency: 0, // 0 = 无限制
+            timeout: None,
+            max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
+            stream_tx: None,
+            tasks: Vec::new(),
+        }
+    }
+
+    /// 使用默认客户端创建
+    pub fn with_default_client() -> XhCurlResult<Self> {
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(XhCurlError::from)?;
+        Ok(Self::new(client))
+    }
+
+    /// 添加请求到批量执行器
+    /// 带数量上限检查，防止内存溢出
+    ///
+    /// # 参数
+    /// - `request`: 请求构建器
+    pub fn add(&mut self, request: XhRequest) -> XhCurlResult<&mut Self> {
+        // 检查请求数量是否超过上限
+        if self.requests.len() >= MAX_REQUESTS_PER_BATCH {
+            return Err(XhCurlError::Memory(format!(
+                "批量请求数量超过上限 {}，请分批执行",
+                MAX_REQUESTS_PER_BATCH
+            )));
+        }
+        self.requests.push(request);
+        Ok(self)
+    }
+
+    /// 批量添加请求
+    /// 带数量上限检查
+    pub fn add_many(&mut self, requests: Vec<XhRequest>) -> XhCurlResult<&mut Self> {
+        // 检查添加后是否超过上限
+        let new_count = self.requests.len() + requests.len();
+        if new_count > MAX_REQUESTS_PER_BATCH {
+            return Err(XhCurlError::Memory(format!(
+                "批量请求数量超过上限 {}（当前 {} + 新增 {}），请分批执行",
+                MAX_REQUESTS_PER_BATCH, self.requests.len(), requests.len()
+            )));
+        }
+        self.requests.extend(requests);
+        Ok(self)
+    }
+
+    /// 设置最大并发数
+    ///
+    /// # 参数
+    /// - `max`: 最大并发数（0 = 无限制）
+    pub fn max_concurrency(mut self, max: usize) -> Self {
+        self.max_concurrency = max;
+        self
+    }
+
+    /// 设置全局超时
+    ///
+    /// # 参数
+    /// - `secs`: 超时秒数（0 = 无超时）
+    pub fn timeout(mut self, secs: u64) -> Self {
+        self.timeout = if secs > 0 {
+            Some(Duration::from_secs(secs))
+        } else {
+            None
+        };
+        self
+    }
+
+    /// 设置最大响应体大小
+    /// 防止恶意服务器返回超大响应导致内存溢出
+    ///
+    /// # 参数
+    /// - `max_size`: 最大字节数（0 = 使用默认值 10MB）
+    pub fn max_response_size(mut self, max_size: usize) -> Self {
+        self.max_response_size = if max_size > 0 { max_size } else { DEFAULT_MAX_RESPONSE_SIZE };
+        self
+    }
+
+    /// 启用流式回调
+    /// 返回接收端 channel，用于接收流式事件
+    ///
+    /// # 修复
+    /// 改为有界 channel，限制积压事件数量，实现背压控制
+    /// 当消费者处理速度跟不上生产者时，生产者会等待而非无限积压
+    ///
+    /// # 返回
+    /// - `Receiver`: 流式事件接收端
+    pub fn enable_streaming(&mut self) -> mpsc::Receiver<(String, StreamEvent)> {
+        // 使用有界 channel 替代无界 channel
+        // 缓冲区大小 = STREAM_CHANNEL_CAPACITY
+        // 当缓冲区满时，发送端会等待（背压），而非无限积压导致内存溢出
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        self.stream_tx = Some(tx);
+        rx
+    }
+
+    /// 执行所有请求（异步）
+    ///
+    /// # 工作流程
+    /// 1. 为每个请求创建 tokio task（类似 goroutine）
+    /// 2. 使用 Semaphore 控制最大并发数
+    /// 3. 所有 task 并发执行，tokio 自动调度
+    /// 4. 通过 channel 收集结果
+    ///
+    /// # 返回
+    /// 所有请求的结果列表（顺序可能与添加顺序不同）
+    pub async fn execute(&mut self) -> XhCurlResult<Vec<RequestResult>> {
+        // 如果没有请求，直接返回空结果
+        if self.requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 创建结果 channel（有界，缓冲区 = 请求数 * 倍数）
+        let channel_capacity = self.requests.len()
+            .saturating_mul(RESULT_CHANNEL_MULTIPLIER)
+            .max(16); // 最小 16 个缓冲位
+        let (result_tx, mut result_rx) = mpsc::channel(channel_capacity);
+
+        // 创建并发控制 Semaphore（如果设置了最大并发数）
+        let semaphore = if self.max_concurrency > 0 {
+            Some(Arc::new(tokio::sync::Semaphore::new(self.max_concurrency)))
+        } else {
+            None
+        };
+
+        // 获取最大响应体大小（用于流式读取时的截断检查）
+        let max_response_size = self.max_response_size;
+
+        // 为每个请求创建异步任务
+        for request in self.requests.drain(..) {
+            // 获取请求 ID（如果没有则使用 URL 作为 ID）
+            let request_id = request.get_id()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| request.get_url().to_string());
+
+            // 克隆共享资源
+            let client = self.client.clone();
+            let result_tx = result_tx.clone();
+            let stream_tx = self.stream_tx.clone();
+            let semaphore = semaphore.clone();
+
+            // 生成异步任务（类似 go func() { ... }()）
+            let handle = tokio::spawn(async move {
+                // 如果有并发限制，获取 Semaphore 许可
+                // _permit 在作用域结束时自动释放
+                let _permit = if let Some(sem) = &semaphore {
+                    Some(sem.acquire().await.expect("Semaphore 获取失败"))
+                } else {
+                    None
+                };
+
+                // 记录开始时间
+                let start = Instant::now();
+
+                // 执行单个请求（带响应体大小限制）
+                let result = Self::execute_single(
+                    client,
+                    request,
+                    request_id.clone(),
+                    stream_tx,
+                    max_response_size,
+                ).await;
+
+                // 计算耗时
+                let elapsed = start.elapsed();
+
+                // 构建结果
+                let result = match result {
+                    Ok(response) => RequestResult::success(request_id, response, elapsed),
+                    Err(e) => RequestResult::error(request_id, e.to_string(), elapsed),
+                };
+
+                // 通过 channel 发送结果
+                // 如果发送失败，说明接收端已关闭（通常不会发生）
+                let _ = result_tx.send(result).await;
+
+                result
+            });
+
+            self.tasks.push(handle);
+        }
+
+        // 丢弃发送端（所有任务完成后 channel 自动关闭）
+        drop(result_tx);
+
+        // 收集所有结果
+        let mut results = Vec::with_capacity(self.tasks.len());
+        while let Some(result) = result_rx.recv().await {
+            results.push(result);
+        }
+
+        // 等待所有任务完成（确保没有任务泄漏）
+        for handle in self.tasks.drain(..) {
+            // abort 已经完成的任务不会有副作用
+            // 这里等待确保所有 task 都已结束
+            let _ = handle.await;
+        }
+
+        Ok(results)
+    }
+
+    /// 执行单个请求
+    /// 使用流式读取 + max_response_size 限制，防止内存溢出
+    ///
+    /// # 参数
+    /// - `client`: reqwest 客户端
+    /// - `request`: 请求构建器
+    /// - `request_id`: 请求 ID
+    /// - `stream_tx`: 流式事件发送端（可选）
+    /// - `max_response_size`: 最大响应体大小（字节）
+    ///
+    /// # 返回
+    /// - `Ok(XhResponse)`: 请求成功
+    /// - `Err(XhCurlError)`: 请求失败
+    async fn execute_single(
+        client: reqwest::Client,
+        request: XhRequest,
+        request_id: String,
+        stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
+        max_response_size: usize,
+    ) -> XhCurlResult<XhResponse> {
+        // 记录开始时间
+        let start = Instant::now();
+
+        // 将 XhRequest 转换为 reqwest 请求
+        let req_builder = request.to_reqwest(&client)?;
+
+        // 发送请求
+        let response = req_builder.send().await?;
+
+        // 获取状态码和响应头
+        let status = response.status().as_u16();
+
+        // 收集响应头
+        let mut headers_map = HashMap::new();
+        for (name, value) in response.headers().iter() {
+            if let Ok(value_str) = value.to_str() {
+                headers_map.insert(name.as_str().to_string(), value_str.to_string());
+            }
+        }
+
+        // 如果启用了流式回调，发送 Headers 事件
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send((request_id.clone(), StreamEvent::Headers {
+                status,
+                headers: headers_map.clone(),
+            })).await;
+        }
+
+        // 获取远程地址
+        let remote_addr = response.remote_addr()
+            .map(|addr| addr.to_string());
+
+        // 获取 HTTP 版本
+        let version = match response.version() {
+            reqwest::Version::HTTP_09 => Some("HTTP/0.9".to_string()),
+            reqwest::Version::HTTP_10 => Some("HTTP/1.0".to_string()),
+            reqwest::Version::HTTP_11 => Some("HTTP/1.1".to_string()),
+            reqwest::Version::HTTP_2 => Some("HTTP/2".to_string()),
+            reqwest::Version::HTTP_3 => Some("HTTP/3".to_string()),
+            _ => None,
+        };
+
+        // 获取最终 URL（可能因重定向而变化）
+        let final_url = response.url().to_string();
+
+        // 使用流式读取响应体，带大小限制
+        // 修复：不再使用 response.bytes().await（无大小限制）
+        // 改为逐块读取，累计检查大小
+        let mut body_data = Vec::new();
+        let mut body_size: usize = 0;
+        let mut size_exceeded = false;
+
+        // 使用 chunk() 流式读取
+        let mut stream = response;
+        while let Some(chunk) = stream.chunk().await? {
+            let chunk_len = chunk.len();
+
+            // 检查累计大小是否超过限制
+            // 使用 checked_add 防止整数溢出
+            let new_size = body_size.checked_add(chunk_len)
+                .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
+
+            if new_size > max_response_size {
+                // 超过限制：写入部分数据（不超过 max_response_size 的部分）
+                let remaining = max_response_size - body_size;
+                if remaining > 0 {
+                    body_data.extend_from_slice(&chunk[..remaining]);
+                }
+                body_size = max_response_size;
+                size_exceeded = true;
+                break; // 停止读取
+            }
+
+            // 未超限：写入完整 chunk
+            body_data.extend_from_slice(&chunk);
+            body_size = new_size;
+        }
+
+        // 如果启用了流式回调，发送 Chunk 事件
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send((request_id.clone(), StreamEvent::Chunk {
+                data: body_data.clone(),
+            })).await;
+        }
+
+        // 计算耗时
+        let elapsed = start.elapsed();
+
+        // 如果响应体超过大小限制，返回错误
+        if size_exceeded {
+            return Err(XhCurlError::Memory(format!(
+                "响应体超过最大限制 {} 字节",
+                max_response_size
+            )));
+        }
+
+        // 使用 from_parts 正确构建 XhResponse
+        // 修复：原代码使用 from_error 后未设置 status/url/headers 等字段
+        let xh_response = XhResponse::from_parts(
+            status,
+            final_url,
+            headers_map,
+            body_data,
+            elapsed,
+            remote_addr,
+            version,
+        );
+
+        // 如果启用了流式回调，发送 Complete 事件
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send((request_id, StreamEvent::Complete {
+                elapsed,
+                body_size,
+            })).await;
+        }
+
+        Ok(xh_response)
+    }
+
+    /// 获取待执行请求数量
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    /// 检查是否为空
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    /// 清空所有待执行请求
+    pub fn clear(&mut self) {
+        self.requests.clear();
+        self.tasks.clear();
+    }
+}
+
+impl std::fmt::Debug for XhMulti {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XhMulti")
+            .field("request_count", &self.requests.len())
+            .field("max_concurrency", &self.max_concurrency)
+            .field("max_response_size", &self.max_response_size)
+            .field("has_streaming", &self.stream_tx.is_some())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试批量执行器创建
+    #[test]
+    fn test_multi_creation() {
+        let multi = XhMulti::with_default_client().unwrap();
+        assert!(multi.is_empty());
+        assert_eq!(multi.max_concurrency, 0);
+    }
+
+    /// 测试添加请求
+    #[test]
+    fn test_add_requests() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+
+        // 添加单个请求
+        multi.add(XhRequest::new("https://httpbin.org/get")).unwrap();
+        multi.add(XhRequest::new("https://httpbin.org/status/200")).unwrap();
+
+        assert_eq!(multi.len(), 2);
+    }
+
+    /// 测试批量添加请求
+    #[test]
+    fn test_add_many_requests() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+
+        let requests = vec![
+            XhRequest::new("https://httpbin.org/get"),
+            XhRequest::new("https://httpbin.org/post"),
+        ];
+        multi.add_many(requests).unwrap();
+
+        assert_eq!(multi.len(), 2);
+    }
+
+    /// 测试请求数量上限
+    #[test]
+    fn test_request_limit() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+
+        // 添加超过上限的请求应该失败
+        let requests: Vec<XhRequest> = (0..=MAX_REQUESTS_PER_BATCH)
+            .map(|i| XhRequest::new(format!("https://httpbin.org/get?id={}", i)))
+            .collect();
+
+        let result = multi.add_many(requests);
+        assert!(result.is_err());
+    }
+
+    /// 测试流式回调启用
+    #[test]
+    fn test_enable_streaming() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+        let _rx = multi.enable_streaming();
+        assert!(multi.stream_tx.is_some());
+    }
+
+    /// 测试并发数设置
+    #[test]
+    fn test_max_concurrency() {
+        let multi = XhMulti::with_default_client().unwrap()
+            .max_concurrency(10);
+
+        assert_eq!(multi.max_concurrency, 10);
+    }
+
+    /// 测试超时设置
+    #[test]
+    fn test_timeout() {
+        let multi = XhMulti::with_default_client().unwrap()
+            .timeout(30);
+
+        assert_eq!(multi.timeout, Some(Duration::from_secs(30)));
+    }
+
+    /// 测试最大响应体大小设置
+    #[test]
+    fn test_max_response_size() {
+        let multi = XhMulti::with_default_client().unwrap()
+            .max_response_size(1024 * 1024); // 1MB
+
+        assert_eq!(multi.max_response_size, 1024 * 1024);
+    }
+
+    /// 测试清空请求
+    #[test]
+    fn test_clear() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+        multi.add(XhRequest::new("https://example.com")).unwrap();
+        assert_eq!(multi.len(), 1);
+
+        multi.clear();
+        assert!(multi.is_empty());
+    }
+
+    /// 测试流式事件
+    #[test]
+    fn test_stream_events() {
+        use StreamEvent::*;
+
+        // 测试 Headers 事件
+        let event = Headers {
+            status: 200,
+            headers: HashMap::new(),
+        };
+        if let Headers { status, .. } = event {
+            assert_eq!(status, 200);
+        }
+
+        // 测试 Chunk 事件
+        let event = Chunk { data: b"hello".to_vec() };
+        if let Chunk { data } = event {
+            assert_eq!(data, b"hello");
+        }
+
+        // 测试 Complete 事件
+        let event = Complete {
+            elapsed: Duration::from_secs(1),
+            body_size: 100,
+        };
+        if let Complete { body_size, .. } = event {
+            assert_eq!(body_size, 100);
+        }
+
+        // 测试 Error 事件
+        let event = Error { message: "超时".to_string() };
+        if let Error { message } = event {
+            assert_eq!(message, "超时");
+        }
+    }
+
+    /// 测试请求结果
+    #[test]
+    fn test_request_result() {
+        // 成功结果
+        let response = XhResponse::from_error(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            Duration::from_secs(0),
+        );
+        let success = RequestResult::success(
+            "req1".to_string(),
+            response,
+            Duration::from_secs(1),
+        );
+        assert!(success.is_success());
+        assert!(success.response.is_some());
+        assert!(success.error.is_none());
+
+        // 失败结果
+        let error = RequestResult::error(
+            "req2".to_string(),
+            "连接超时".to_string(),
+            Duration::from_secs(30),
+        );
+        assert!(!error.is_success());
+        assert!(error.response.is_none());
+        assert!(error.error.is_some());
+    }
+}
