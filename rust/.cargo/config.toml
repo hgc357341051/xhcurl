@@ -8,8 +8,21 @@
 #   （exit code 0xc0000409, STATUS_STACK_BUFFER_OVERRUN）。
 #   rust-lld 随 Rust 工具链自带，无需额外安装。
 #
+# macOS 编译配置：
+#   PHP 扩展编译为 .dylib 动态库，Zend 符号（zend_std_read_property 等）
+#   在运行时由 PHP 进程提供，链接时无法解析。必须使用
+#   -undefined dynamic_lookup 允许未定义符号，否则链接报错
+#   "symbol(s) not found for architecture arm64"。
+#
 # 注意：Windows 构建需要 Rust nightly（abi_vectorcall 调用约定是 nightly-only）
 #       见 rust/src/lib.rs 顶部的 #![cfg_attr(windows, feature(abi_vectorcall))]
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# macOS：允许未定义符号（PHP Zend API 符号在运行时由 PHP 进程提供）
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
