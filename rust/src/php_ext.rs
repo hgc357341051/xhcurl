@@ -262,6 +262,42 @@ impl PhpXhCurl {
     pub fn coroutine_run(main: &Zval) -> Result<Zval, String> {
         crate::fiber::fiber_run(main).map_err(|e| e.to_string())
     }
+
+    /// 并发发起多个 HTTP 请求，按完成顺序返回结果
+    ///
+    /// 必须在 XHCurl::run() 的回调内、且在 Fiber 上下文中调用。
+    /// 一次性将所有请求提交到 tokio 工作线程并行执行，
+    /// 返回结果按**完成顺序**排列（非请求提交顺序）。
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::gather(array $requests): array
+    #[php_method]
+    #[rename("gather")]
+    pub fn coroutine_gather(requests: &ZendHashTable) -> Result<ZBox<ZendHashTable>, String> {
+        use ext_php_rs::convert::FromZval;
+        use ext_php_rs::types::ZendClassObject;
+
+        // 从 PHP 数组中提取 XHRequest 对象，转为 Vec<XhRequest>
+        let mut req_list: Vec<XhRequest> = Vec::new();
+        let len = requests.len();
+        let mut iter = requests.iter();
+        for _ in 0..len {
+            match iter.next() {
+                Some((_key, val)) => {
+                    // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
+                    let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
+                        <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
+                    match class_obj {
+                        Some(obj) => req_list.push(obj.request.clone()),
+                        None => return Err("数组元素不是 XHRequest 对象".to_string()),
+                    }
+                }
+                None => break,
+            }
+        }
+
+        crate::fiber::fiber_gather(req_list).map_err(|e| e.to_string())
+    }
 }
 
 // +----------------------------------------------------------------------+

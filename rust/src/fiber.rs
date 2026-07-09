@@ -183,6 +183,83 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
     let result_array = result_zval_to_array(&suspended_value)?;
     Ok(result_array)
 }
+// +----------------------------------------------------------------------+
+// | 协程 API：gather（并发批量 await）                                    |
+// +----------------------------------------------------------------------+
+
+/// 并发发起多个 HTTP 请求，按**完成顺序**返回所有结果。
+///
+/// **PHP 签名**：`public static XHCurl::gather(array $requests): array`
+///
+/// 与在循环中串行调用 `await` 不同，`gather` 会：
+/// 1. 一次性将所有请求 spawn 到 tokio 工作线程（真正并行）
+/// 2. 当前 Fiber 挂起一次
+/// 3. 每个请求完成时，事件泵 resume 当前 Fiber，传入该结果
+/// 4. Fiber 循环挂起 N 次，收集所有结果
+/// 5. 返回按**完成顺序**排列的结果数组（非请求顺序）
+///
+/// **并行性证明**：返回数组中的结果顺序取决于哪个请求先完成，
+/// 而非请求的提交顺序。网络延迟波动会导致顺序打乱。
+pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, String> {
+    let total = requests.len();
+    if total == 0 {
+        return Ok(ZendHashTable::new());
+    }
+
+    // 1. 获取当前 Fiber
+    let get_current = ZendCallable::try_from_name("Fiber::getCurrent")
+        .map_err(|e| e.to_string())?;
+    let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
+    if current_fiber.is_null() || !current_fiber.is_object() {
+        return Err("XHCurl::gather 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
+    }
+
+    // 2. 一次性 spawn 所有 HTTP 请求到 tokio（并行执行）
+    let runtime = crate::php_ext::global_runtime();
+    let client = crate::php_ext::global_client().clone();
+
+    for request in requests {
+        let task_id = next_task_id();
+        let result_tx = SCHEDULER.with(|s| {
+            s.borrow()
+                .as_ref()
+                .ok_or_else(|| "调度器未初始化：gather 必须在 run() 内调用".to_string())
+                .map(|sc| sc.result_tx.clone())
+        })?;
+
+        let client_clone = client.clone();
+        let request_clone = request;
+        runtime.spawn(async move {
+            let result = execute_http_task(client_clone, request_clone, task_id).await;
+            let _ = result_tx.send(TaskMessage { task_id, result });
+        });
+
+        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
+        SCHEDULER.with(|s| {
+            s.borrow_mut()
+                .as_mut()
+                .expect("调度器未初始化")
+                .pending
+                .insert(task_id, current_fiber.shallow_clone());
+        });
+    }
+
+    // 3. 循环挂起 N 次，每次收到一个结果
+    //    事件泵收到结果 → 查 pending 表 → resume 当前 Fiber → Fiber 从 suspend 返回
+    //    Fiber 检查是否收齐，未齐则再次 suspend
+    let suspend = ZendCallable::try_from_name("Fiber::suspend")
+        .map_err(|e| e.to_string())?;
+
+    let mut results = ZendHashTable::new();
+    for i in 0..total {
+        let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
+        // suspended_value 是事件泵 resume 传入的结果数组
+        // 按完成顺序插入（整数键 0, 1, 2, ... 表示第几个完成）
+        let _ = results.insert_at_index(i as u64, suspended_value);
+    }
+
+    Ok(results)
+}
 
 // +----------------------------------------------------------------------+
 // | 协程 API：run（事件泵）                                               |
