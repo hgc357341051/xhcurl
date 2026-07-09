@@ -85,25 +85,33 @@ jobs:
             pkg-config \
             libssl-dev
 
-          # 设置 LIBCLANG_PATH 环境变量，让 bindgen 使用 LLVM 18 的 libclang
+          # 关键：彻底卸载系统预装的 LLVM 14，防止 bindgen 的 cc crate
+          # 编译 wrapper.c 时误用 LLVM 14 的 clang（导致 emmintrin.h 错误）
+          sudo apt-get purge -y libclang-dev libclang-11-dev libclang-14-dev libclang-cpp11 libclang-cpp14 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+
+          # 设置环境变量，让 bindgen 和 cc crate 都使用 LLVM 18
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+          echo "CLANG_PATH=/usr/lib/llvm-18/bin/clang" >> $GITHUB_ENV
+          echo "CC=/usr/lib/llvm-18/bin/clang" >> $GITHUB_ENV
+          echo "CXX=/usr/lib/llvm-18/bin/clang++" >> $GITHUB_ENV
+
+          # 将 LLVM 18 的 bin 目录加入 PATH（优先于系统 clang）
+          echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
 
           # 确保 libclang.so 符号链接存在（bindgen 需要此文件）
-          # libclang-18-dev 可能只安装 libclang.so.18，需要手动创建符号链接
           if [ ! -f "/usr/lib/llvm-18/lib/libclang.so" ]; then
             sudo ln -sf /usr/lib/llvm-18/lib/libclang.so.18 /usr/lib/llvm-18/lib/libclang.so
             echo "已创建 libclang.so 符号链接"
           fi
 
-          # 验证 LLVM 18 安装成功
+          # 验证 LLVM 18 安装成功且 LLVM 14 已移除
           echo "=== 验证 LLVM 版本 ==="
-          clang-18 --version
-          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib"
+          which clang && clang --version || echo "clang 未找到"
+          which clang-18 && clang-18 --version
           ls -la /usr/lib/llvm-18/lib/libclang.so || { echo "::error::libclang.so 不存在"; exit 1; }
-          ls -la /usr/lib/llvm-18/lib/libclang.so.18 || true
-          # 确认不会误用 LLVM 14
-          echo "=== 检查系统中的 libclang ==="
-          find /usr/lib -name "libclang*" -type f 2>/dev/null || true
+          echo "=== 确认 LLVM 14 已移除 ==="
+          ls -la /usr/lib/llvm-14/lib/libclang.so 2>/dev/null && echo "::warning::LLVM 14 仍存在" || echo "LLVM 14 已移除（正常）"
 
       # -----------------------------------------------------------------
       # 步骤 2.5: 清除缓存中的旧 bindgen 产物
