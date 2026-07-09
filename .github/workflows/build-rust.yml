@@ -659,3 +659,109 @@ jobs:
         run: |
           echo "=== 运行测试 ==="
           cargo test
+
+  # =====================================================================
+  # Job 5: 发布 GitHub Release
+  # 仅在推送 v* tag 时触发，收集所有平台的编译产物发布到 GitHub Releases
+  # 依赖所有 build job 和 lint job 全部通过
+  # =====================================================================
+  release:
+    name: "Publish GitHub Release"
+    runs-on: ubuntu-22.04
+    # 仅 tag 触发，且需要所有构建和检查 job 通过
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos, build-windows, lint-and-test]
+
+    permissions:
+      # 创建 Release 需要 write 权限
+      contents: write
+
+    steps:
+      # -----------------------------------------------------------------
+      # 步骤 1: 检出代码
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      # 步骤 2: 下载所有平台的编译产物
+      # actions/download-artifact 会将每个 artifact 下载到以 artifact 名命名的子目录
+      # -----------------------------------------------------------------
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # 合并所有 artifact 到同一目录（使用 pattern 匹配所有 xhcurl-rust-* artifact）
+          pattern: xhcurl-rust-*
+          path: artifacts
+          merge-multiple: false
+
+      # -----------------------------------------------------------------
+      # 步骤 3: 整理产物目录结构
+      # 将分散在各子目录的 .so/.dylib/.dll 文件统一收集到 release/ 目录
+      # -----------------------------------------------------------------
+      - name: Organize release files
+        run: |
+          mkdir -p release
+          echo "=== 下载的 artifacts 目录结构 ==="
+          find artifacts -type f | sort
+
+          echo ""
+          echo "=== 整理产物到 release/ 目录 ==="
+          # 递归查找所有扩展文件并复制到 release/
+          find artifacts -type f \( -name "*.so" -o -name "*.dylib" -o -name "*.dll" \) -exec cp {} release/ \;
+
+          echo ""
+          echo "=== 最终 release/ 目录内容 ==="
+          ls -la release/
+          echo ""
+          echo "=== 文件数量: $(ls release/ | wc -l) 个 ==="
+
+      # -----------------------------------------------------------------
+      # 步骤 4: 创建 GitHub Release 并上传所有产物
+      # -----------------------------------------------------------------
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: XHCurl ${{ github.ref_name }}
+          body: |
+            ## XHCurl Rust 扩展 - 自动编译发布
+
+            ### 产物清单
+
+            以下是所有平台 + PHP 版本的预编译扩展文件，请根据你的平台和 PHP 版本选择对应文件：
+
+            | 平台 | 文件格式 | PHP 版本 |
+            |------|----------|----------|
+            | Linux (Ubuntu 22.04, x64) | `.so` | 8.1, 8.2, 8.3, 8.4, 8.5 |
+            | macOS 14 (Apple Silicon) | `.dylib` | 8.1, 8.2, 8.3, 8.4, 8.5 |
+            | Windows (x64) | `.dll` | 8.1, 8.2, 8.3, 8.4, 8.5 (NTS/ZTS) |
+
+            ### 文件命名规则
+
+            - `xhcurl-rust-linux-php{版本}.so` - Linux
+            - `xhcurl-rust-macos-php{版本}.dylib` - macOS
+            - `xhcurl-rust-windows-php{版本}-{nts|ts}.dll` - Windows（NTS=非线程安全, TS=线程安全）
+
+            ### 安装方法
+
+            1. 根据你的平台和 PHP 版本下载对应的文件
+            2. 重命名为 `xhcurl.so`（Linux/macOS）或 `xhcurl.dll`（Windows）
+            3. 放到 PHP 扩展目录（`php-config --extension-dir` 或 Windows 的 `ext/`）
+            4. 在 `php.ini` 中添加 `extension=xhcurl`（Linux/macOS）或 `extension=xhcurl.dll`（Windows）
+
+            ### 验证安装
+
+            ```bash
+            php -m | grep xhcurl
+            php -r "echo XHCurl::version();"
+            ```
+
+            > **注意**：需要 PHP 8.1+（协程模式依赖 PHP Fiber）
+          # release/ 目录下所有文件都作为附件上传
+          files: release/*
+          # 标记为正式发布（非 prerelease）
+          prerelease: false
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
