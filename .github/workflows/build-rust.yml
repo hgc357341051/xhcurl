@@ -389,67 +389,57 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # -----------------------------------------------------------------
-      # 步骤 4: 设置 PHP SDK
-      # ext-php-rs 需要 php-config 和 php 可执行文件
-      # setup-php-sdk 会将 PHP 添加到 PATH
+      # 步骤 4: 安装 PHP（使用 shivammathur/setup-php，与 Linux/macOS 一致）
+      # ext-php-rs build script 调用 `php -i` 获取 PHP 配置信息
+      # 必须确保 php.exe 在 PATH 中
       # -----------------------------------------------------------------
-      - name: Setup PHP SDK
-        id: setup-php-sdk
-        uses: php/setup-php-sdk@v0.12
+      - name: Setup PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
         with:
-          version: ${{ matrix.php-version }}
-          arch: x64
+          php-version: ${{ matrix.php-version }}
           ts: ${{ matrix.ts }}
-          cache: true
+          extensions: curl, json
+          coverage: none
+          ini-values: memory_limit=512M
 
       # -----------------------------------------------------------------
-      # 步骤 4.5: 确保 PHP 在 PATH 中
-      # ext-php-rs build script 调用 `php -i` 获取 PHP 配置信息
-      # 如果 php 不在 PATH 中，bindgen 会失败
-      #
-      # 注意：Windows 上不存在 php-config 命令，不能调用它
+      # 步骤 4.5: 设置 PHP 开发头文件（编译扩展需要）
+      # shivammathur/setup-php 安装的 PHP 自带 devel 头文件
+      # 需要将 include 目录设置到 PHP_INCLUDE_PATH 环境变量
       # -----------------------------------------------------------------
-      - name: Verify PHP in PATH
+      - name: Setup PHP development headers
         shell: pwsh
         run: |
-          # 输出 setup-php-sdk 的 prefix 路径
-          $prefix = "${{ steps.setup-php-sdk.outputs.prefix }}"
-          Write-Host "PHP SDK prefix: $prefix"
+          # 获取 PHP 安装路径
+          $phpExe = Get-Command php | Select-Object -ExpandProperty Source
+          $phpDir = Split-Path $phpExe
+          Write-Host "PHP 安装目录: $phpDir"
 
-          # 检查 php 是否在 PATH 中
-          $phpPath = Get-Command php -ErrorAction SilentlyContinue
-          if ($phpPath) {
-            Write-Host "PHP found in PATH: $($phpPath.Source)"
-            php -v 2>&1 | Select-Object -First 1
-          } else {
-            Write-Host "::warning::PHP not in PATH, attempting to add it"
-
-            # 尝试从 prefix 路径添加 PHP 到 PATH
-            if ($prefix -and (Test-Path $prefix)) {
-              $phpExe = Join-Path $prefix "php.exe"
-              if (Test-Path $phpExe) {
-                $phpDir = Split-Path $phpExe
-                Write-Host "Adding PHP directory to PATH: $phpDir"
-                echo $phpDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-                # 同时设置当前会话的 PATH
-                $env:PATH = "$phpDir;$env:PATH"
-                php -v 2>&1 | Select-Object -First 1
-              } else {
-                Write-Host "::error::php.exe not found at $phpExe"
-                # 搜索 php.exe
-                Get-ChildItem -Path $prefix -Filter "php.exe" -Recurse -ErrorAction SilentlyContinue |
-                  ForEach-Object { Write-Host "  Found: $($_.FullName)" }
-                exit 1
-              }
-            } else {
-              Write-Host "::error::PHP SDK prefix is empty or does not exist"
-              exit 1
-            }
+          # PHP 头文件目录（devel 包含 php.h 等头文件）
+          $includePath = Join-Path $phpDir "include"
+          if (-not (Test-Path $includePath)) {
+            # 某些 PHP 版本头文件在 include/php 子目录
+            $includePath = Join-Path $phpDir "include\php"
           }
 
-          # Windows 上不存在 php-config，跳过
-          # ext-php-rs 在 Windows 上通过 php -i 获取配置，不需要 php-config
-          Write-Host "PHP 验证完成"
+          Write-Host "PHP Include Path: $includePath"
+
+          # 验证 php.h 存在
+          $phpH = Get-ChildItem -Path $phpDir -Filter "php.h" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($phpH) {
+            Write-Host "找到 php.h: $($phpH.FullName)"
+            $includePath = Split-Path $phpH.FullName
+            # 设置到环境变量
+            echo "PHP_INCLUDE_PATH=$includePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "已设置 PHP_INCLUDE_PATH=$includePath"
+          } else {
+            Write-Host "::warning::未找到 php.h，尝试使用默认 include 路径"
+            echo "PHP_INCLUDE_PATH=$includePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+          # 验证 PHP 可用
+          php -v 2>&1 | Select-Object -First 1
+          php -i 2>&1 | Select-Object -First 5
 
       # -----------------------------------------------------------------
       # 步骤 5: 设置 MSVC 编译环境
@@ -458,7 +448,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-          toolset: ${{ steps.setup-php-sdk.outputs.toolset }}
 
       # -----------------------------------------------------------------
       # 步骤 6: 缓存 cargo 编译产物
@@ -482,36 +471,27 @@ jobs:
       - name: Build Rust PHP extension
         working-directory: rust
         env:
-          # ext-php-rs 需要 PHP 的 include 路径
-          PHP_INCLUDE_PATH: ${{ steps.setup-php-sdk.outputs.prefix }}/include
           # 确保 bindgen 找到 libclang
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         shell: pwsh
         run: |
           Write-Host "=== 开始编译 XHCurl Rust 扩展 ==="
 
-          # 验证 PHP 可用
+          # 验证 PHP 可用（ext-php-rs build script 会调用 php -i）
           try {
             $phpVer = php -v 2>&1 | Select-Object -First 1
             Write-Host "PHP 版本: $phpVer"
+            # 关键：验证 php -i 可正常执行
+            $phpInfo = php -i 2>&1 | Select-Object -First 3
+            Write-Host "PHP -i 输出: $phpInfo"
           } catch {
             Write-Host "::error::PHP 不可用，请检查 PATH 设置"
             exit 1
           }
 
           Write-Host "Rust 版本: $(rustc --version)"
-          Write-Host "PHP Include: $env:PHP_INCLUDE_PATH"
           Write-Host "LIBCLANG_PATH: $env:LIBCLANG_PATH"
-
-          # 验证 include 路径是否存在
-          if (-not (Test-Path $env:PHP_INCLUDE_PATH)) {
-            Write-Host "::warning::PHP_INCLUDE_PATH 不存在: $env:PHP_INCLUDE_PATH"
-            # 尝试查找正确的 include 路径
-            $prefix = "${{ steps.setup-php-sdk.outputs.prefix }}"
-            Write-Host "Searching for include path in: $prefix"
-            Get-ChildItem -Path $prefix -Filter "php.h" -Recurse -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "  Found: $($_.FullName)" }
-          }
+          Write-Host "PHP_INCLUDE_PATH: $env:PHP_INCLUDE_PATH"
 
           # 编译
           cargo build --release --features php
