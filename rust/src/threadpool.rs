@@ -31,6 +31,7 @@ use crate::response::XhResponse;
 /// 线程池任务消息
 /// 主线程通过此消息类型向工作线程发送任务
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum TaskMessage {
     /// 执行单个请求
     Request {
@@ -49,6 +50,7 @@ pub enum TaskMessage {
 /// 线程池结果消息
 /// 工作线程通过此消息类型向主线程发送结果
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResultMessage {
     /// 请求完成
     Completed(RequestResult),

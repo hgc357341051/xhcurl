@@ -141,7 +141,7 @@ impl XhResponse {
         }
 
         // 判断是否成功（2xx）
-        let is_success = status >= 200 && status < 300;
+        let is_success = (200..300).contains(&status);
 
         // 响应体大小
         let body_size = body.len();
@@ -268,7 +268,7 @@ impl XhResponse {
 
     /// 获取响应体数据（如果已读取）
     pub fn body(&self) -> Option<&[u8]> {
-        self.body.as_ref().map(|v| v.as_slice())
+        self.body.as_deref()
     }
 
     /// 获取响应体大小

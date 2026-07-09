@@ -53,6 +53,7 @@ impl HttpMethod {
     /// # 返回
     /// - `Ok(HttpMethod)`: 解析成功
     /// - `Err(XhCurlError)`: 不支持的方法
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> XhCurlResult<HttpMethod> {
         match s.to_uppercase().as_str() {
             "GET" => Ok(HttpMethod::Get),
