@@ -265,12 +265,26 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 2: 安装系统依赖
-      # macOS 自带 clang，但需要安装 libclang 的 bindgen 依赖
+      # macOS 自带的 Xcode clang 15 在 arm64 上编译 wrapper.c 时会包含
+      # arm_neon.h，该版本对 NEON intrinsics 类型转换有 bug：
+      #   "invalid conversion between vector type 'float16x8_t' and integer type 'int'"
+      # ext-php-rs 的构建分两阶段：
+      #   (1) bindgen 用 LIBCLANG_PATH 的 libclang 生成绑定代码
+      #   (2) cc crate 用 CC 编译器编译 wrapper.c
+      # 必须让两阶段都用 Homebrew 的 LLVM（更新版本，已修复此 bug），
+      # 否则 cc crate 会用系统默认 cc（Xcode clang 15）导致 arm_neon.h 报错。
       # -----------------------------------------------------------------
       - name: Install Homebrew dependencies
         run: |
           brew install llvm 2>/dev/null || true
-          echo "LLVM_PATH=$(brew --prefix llvm)" >> $GITHUB_ENV
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "LLVM_PATH=$LLVM_PREFIX" >> $GITHUB_ENV
+          # 让 cc crate 编译 wrapper.c 时使用 Homebrew 的 clang（而非 Xcode clang 15）
+          echo "CC=$LLVM_PREFIX/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$LLVM_PREFIX/bin/clang++" >> $GITHUB_ENV
+          echo "CLANG_PATH=$LLVM_PREFIX/bin/clang" >> $GITHUB_ENV
+          # 将 Homebrew LLVM 加入 PATH（优先于系统 cc）
+          echo "$LLVM_PREFIX/bin" >> $GITHUB_PATH
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装 PHP
