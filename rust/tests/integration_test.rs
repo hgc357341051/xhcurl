@@ -196,6 +196,7 @@ fn test_threadpool_config() {
         queue_capacity: 500,
         idle_timeout: 30,
         enable_priority: true,
+        max_response_size: 10 * 1024 * 1024,
     };
 
     let client = reqwest::Client::new();

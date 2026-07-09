@@ -75,7 +75,15 @@ pub struct ThreadPoolConfig {
 
     /// 是否启用任务优先级
     pub enable_priority: bool,
+
+    /// 最大响应体大小（字节）
+    /// 防止恶意服务器返回超大响应导致内存溢出
+    /// 0 = 使用默认值 10MB
+    pub max_response_size: usize,
 }
+
+/// 默认最大响应体大小：10MB
+const DEFAULT_MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
 impl Default for ThreadPoolConfig {
     fn default() -> Self {
@@ -89,6 +97,7 @@ impl Default for ThreadPoolConfig {
             queue_capacity: 1000, // 有界队列防止内存溢出
             idle_timeout: 60,     // 60 秒空闲超时
             enable_priority: true,
+            max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
         }
     }
 }
@@ -175,10 +184,11 @@ impl XhThreadPool {
             let result_tx = result_tx.clone();
             let client = self.client.clone();
             let idle_timeout = self.config.idle_timeout;
+            let max_response_size = self.config.max_response_size;
 
             // 生成工作线程任务
             let handle = tokio::spawn(async move {
-                Self::worker_loop(worker_id, task_rx, result_tx, client, idle_timeout).await;
+                Self::worker_loop(worker_id, task_rx, result_tx, client, idle_timeout, max_response_size).await;
             });
 
             self.workers.push(handle);
@@ -204,11 +214,12 @@ impl XhThreadPool {
     /// - `client`: reqwest 客户端
     /// - `idle_timeout`: 空闲超时（秒）
     async fn worker_loop(
-        worker_id: usize,
+        _worker_id: usize,
         task_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TaskMessage>>>,
         result_tx: mpsc::Sender<ResultMessage>,
         client: reqwest::Client,
         idle_timeout: u64,
+        max_response_size: usize,
     ) {
         loop {
             // 获取任务（需要先获取锁再接收）
@@ -246,6 +257,7 @@ impl XhThreadPool {
                         request,
                         request_id.clone(),
                         stream_tx,
+                        max_response_size,
                     ).await;
 
                     let elapsed = start.elapsed();
@@ -279,11 +291,13 @@ impl XhThreadPool {
 
     /// 执行单个 HTTP 请求
     /// 使用 from_parts 正确构建 XhResponse，保留完整的 status/url/headers 信息
+    /// 使用流式读取响应体，带 max_response_size 限制，防止内存溢出
     async fn execute_request(
         client: reqwest::Client,
         request: XhRequest,
         request_id: String,
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
+        max_response_size: usize,
     ) -> XhCurlResult<XhResponse> {
         let start = Instant::now();
 
@@ -329,26 +343,57 @@ impl XhThreadPool {
         // 获取最终 URL
         let final_url = response.url().to_string();
 
-        // 读取响应体
-        let body = response.bytes().await?;
-        let body_size = body.len();
+        // 使用流式读取响应体，带大小限制（与 XhMulti 保持一致）
+        // 防止恶意服务器返回超大响应导致内存溢出
+        let mut body_data = Vec::new();
+        let mut body_size: usize = 0;
+        let mut size_exceeded = false;
+
+        let mut stream = response;
+        while let Some(chunk) = stream.chunk().await? {
+            let chunk_len = chunk.len();
+
+            // 使用 checked_add 防止整数溢出
+            let new_size = body_size.checked_add(chunk_len)
+                .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
+
+            if new_size > max_response_size {
+                // 超过限制：写入不超过 max_response_size 的部分后停止读取
+                let remaining = max_response_size - body_size;
+                if remaining > 0 {
+                    body_data.extend_from_slice(&chunk[..remaining]);
+                }
+                body_size = max_response_size;
+                size_exceeded = true;
+                break;
+            }
+
+            body_data.extend_from_slice(&chunk);
+            body_size = new_size;
+        }
 
         // 发送 Chunk 事件（有界 channel，使用 await 实现背压）
         if let Some(tx) = &stream_tx {
             let _ = tx.send((request_id.clone(), StreamEvent::Chunk {
-                data: body.to_vec(),
+                data: body_data.clone(),
             })).await;
         }
 
         let elapsed = start.elapsed();
 
+        // 如果响应体超过大小限制，返回错误（与 XhMulti 行为一致）
+        if size_exceeded {
+            return Err(XhCurlError::Memory(format!(
+                "响应体大小超过限制 {} 字节", max_response_size
+            )));
+        }
+
         // 使用 from_parts 正确构建 XhResponse
-        // 修复：原代码使用 from_error 创建空响应，丢失了 status/url/headers 等信息
         let xh_response = XhResponse::from_parts(
             status,
             final_url,
             headers_map,
-            body.to_vec(),
+            body_data,
             elapsed,
             remote_addr,
             version,
@@ -434,16 +479,23 @@ impl XhThreadPool {
         let result_rx = self.result_rx.as_mut()
             .ok_or_else(|| XhCurlError::ThreadPool("结果接收端不存在".to_string()))?;
 
-        while shutdown_count < self.config.worker_count && results.len() < request_count {
+        // 修复：原条件 `shutdown_count < worker_count && results.len() < request_count`
+        // 用 && 导致 worker 提前关闭时即使结果未收齐也退出，丢失结果。
+        // 正确逻辑：只要结果未收齐就继续等待，仅在所有 worker 关闭或 channel 关闭时退出。
+        while results.len() < request_count {
             match result_rx.recv().await {
                 Some(ResultMessage::Completed(result)) => {
                     results.push(result);
                 }
                 Some(ResultMessage::WorkerShutdown) => {
                     shutdown_count += 1;
+                    // 所有工作线程都已关闭，无法再收到结果
+                    if shutdown_count >= self.config.worker_count {
+                        break;
+                    }
                 }
                 None => {
-                    // channel 关闭
+                    // channel 关闭，无法再收到结果
                     break;
                 }
             }

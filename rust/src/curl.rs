@@ -272,20 +272,24 @@ impl XhCurlManager {
     }
 
     /// 检查是否在 CLI 模式下运行
-    /// 对应 C 版本的 xhcurl_is_cli_mode 函数
+    ///
+    /// # 注意
+    /// 核心库无法直接访问 PHP SAPI（不依赖 ext-php-rs）。
+    /// PHP 绑定层（php_ext.rs）通过 `ext_php_rs::zend::php_sapi_name()`
+    /// 实现了真实的 SAPI 检测（见 `sapi_is_cli()`）。
+    /// 此方法仅供核心库内部/测试使用，PHP 扩展不应调用。
     ///
     /// # 返回
-    /// - `true`: CLI 模式（可使用多线程运行时）
-    /// - `false`: FPM/Web 模式（使用单线程运行时）
+    /// 始终返回 true（核心库无 SAPI 上下文）
     pub fn is_cli_mode() -> bool {
-        // 在 PHP 扩展中，需要检查 sapi_module.name
-        // 这里通过 ext-php-rs 的 API 获取
-        // 暂时返回 true，实际实现需要调用 PHP SAPI 检查
-        // TODO: 通过 ext-php-rs 获取 PHP_SAPI 全局变量
         true
     }
 
     /// 创建建议的 tokio 运行时
+    ///
+    /// # 注意
+    /// PHP 绑定层已改用全局复用的运行时（见 php_ext.rs 的 `global_runtime()`），
+    /// 不再调用此方法。保留供核心库测试使用。
     ///
     /// # 返回
     /// - CLI 模式: 多线程运行时（利用所有 CPU 核心）
@@ -293,7 +297,6 @@ impl XhCurlManager {
     pub fn create_runtime() -> XhCurlResult<tokio::runtime::Runtime> {
         if Self::is_cli_mode() {
             // CLI 模式：多线程运行时
-            // 类似 goroutine 的 M:N 调度
             // tokio 的工作线程数默认等于 CPU 核心数
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all() // 启用 IO、时间、信号等

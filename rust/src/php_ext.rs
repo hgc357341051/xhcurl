@@ -16,9 +16,12 @@
 // |   修改后返回同一对象，实现 PHP 端 $this 链式调用。                      |
 // +----------------------------------------------------------------------+
 
+use std::sync::OnceLock;
+
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ArrayKey, ZendClassObject, ZendHashTable, Zval};
+use ext_php_rs::zend::php_sapi_name;
 
 use crate::curl::XhCurlManager;
 use crate::multi::XhMulti;
@@ -33,6 +36,57 @@ use crate::threadpool::{ThreadPoolConfig, XhThreadPool};
 /// 单次批量请求的最大数量限制
 /// 防止用户传入过多请求导致内存溢出
 const MAX_REQUESTS_PER_BATCH: usize = 10000;
+
+// +----------------------------------------------------------------------+
+// | 全局运行时与客户端复用                                                |
+// +----------------------------------------------------------------------+
+
+/// 检测当前是否为 CLI 模式（通过 PHP SAPI 名称）。
+///
+/// 对应 PHP 的 `php_sapi_name() === 'cli'`。
+/// FPM/fpm-fcgi 等多进程 SAPI 下返回 false，此时禁止使用多线程运行时，
+/// 避免 tokio 工作线程与 PHP 内存管理器（TSRM/内存池）冲突。
+fn sapi_is_cli() -> bool {
+    php_sapi_name() == "cli"
+}
+
+/// 获取全局共享的 reqwest 客户端。
+///
+/// reqwest Client 内部维护连接池（TCP keep-alive、TLS 会话缓存），
+/// 全局复用可避免每次请求重新建连，显著提升批量请求性能。
+/// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
+fn global_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        XhCurlManager::global()
+            .create_client()
+            .expect("初始化全局 HTTP 客户端失败")
+    })
+}
+
+/// 获取全局共享的 tokio 运行时。
+///
+/// 运行时类型根据 SAPI 自动选择：
+/// - CLI 模式：多线程运行时（真正的 M:N 并行，工作线程数 = CPU 核心数）
+/// - FPM 模式：单线程运行时（协作式并发，避免线程安全问题）
+///
+/// 全局复用避免每次 execute() 都创建/销毁运行时（线程创建、IO 驱动注册开销大）。
+/// FPM 下每个 worker 进程持有独立的运行时（进程级单例），请求间复用。
+fn global_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        let mut builder = if sapi_is_cli() {
+            tokio::runtime::Builder::new_multi_thread()
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+        };
+        builder
+            .enable_all()
+            .thread_name("xhcurl-worker")
+            .build()
+            .expect("初始化全局 tokio 运行时失败")
+    })
+}
 
 // +----------------------------------------------------------------------+
 // | PHP 类：XHCurl（全局管理器）                                          |
@@ -168,7 +222,7 @@ impl PhpXhCurl {
     /// public static XHCurl::isCli(): bool
     #[php_method]
     pub fn is_cli() -> bool {
-        XhCurlManager::is_cli_mode()
+        sapi_is_cli()
     }
 
     /// 创建请求构建器
@@ -665,28 +719,19 @@ impl PhpXhMulti {
     /// public XHMulti::execute(): array
     #[php_method]
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
-        // 创建单线程运行时（FPM 安全）
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("创建运行时失败: {}", e))?;
+        // 复用全局运行时与客户端（避免每次创建/销毁的开销）
+        // 运行时类型由 SAPI 决定：CLI 多线程并行，FPM 单线程并发
+        let client = global_client().clone();
+        let max_concurrency = self.max_concurrency;
+        let requests = std::mem::take(&mut self.requests);
 
-        // 阻塞执行异步任务
-        let results = runtime
-            .block_on(async {
-                let client = XhCurlManager::global()
-                    .create_client()
-                    .map_err(|e| e.to_string())?;
+        let results = global_runtime()
+            .block_on(async move {
                 let mut multi = XhMulti::new(client);
-
-                if self.max_concurrency > 0 {
-                    multi = multi.max_concurrency(self.max_concurrency);
+                if max_concurrency > 0 {
+                    multi = multi.max_concurrency(max_concurrency);
                 }
-
-                let requests = std::mem::take(&mut self.requests);
                 multi.add_many(requests).map_err(|e| e.to_string())?;
-
-                // 统一错误类型为 String
                 multi.execute().await.map_err(|e| e.to_string())
             })
             .map_err(|e| e.to_string())?;
@@ -703,8 +748,8 @@ impl PhpXhMulti {
 /// PHP XHThreadPool 类的 Rust 表示
 #[php_class(name = "XHThreadPool")]
 pub struct PhpXhThreadPool {
-    /// 内部线程池（按需在 execute() 中创建，不在此持有）
-    _pool: Option<XhThreadPool>,
+    /// 内部线程池（首次 execute 时创建，同对象多次 execute 复用，实现线程复用）
+    pool: Option<XhThreadPool>,
 
     /// 待执行的请求列表
     requests: Vec<XhRequest>,
@@ -723,7 +768,7 @@ impl PhpXhThreadPool {
     #[php_method]
     pub fn __construct(workers: Option<i64>) -> Self {
         Self {
-            _pool: None,
+            pool: None,
             requests: Vec::new(),
             max_concurrency: workers.unwrap_or(0) as usize,
         }
@@ -753,35 +798,35 @@ impl PhpXhThreadPool {
     #[php_method]
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
         // 安全检查：线程池仅在 CLI 模式下可用
-        // FPM 模式下多线程会与 PHP 内存管理器冲突
-        if !XhCurlManager::is_cli_mode() {
+        // FPM 模式下多线程会与 PHP 内存管理器（TSRM/内存池）冲突
+        if !sapi_is_cli() {
             return Err("XHThreadPool 仅在 CLI 模式下可用".to_string());
         }
 
-        // 创建多线程运行时（真正的并行执行）
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("创建运行时失败: {}", e))?;
+        let requests = std::mem::take(&mut self.requests);
+        let max_concurrency = self.max_concurrency;
+        // 取出现有线程池以便复用（同对象多次 execute 复用工作线程）
+        let mut pool = self.pool.take();
 
-        // 阻塞执行
-        let results = runtime
-            .block_on(async {
-                let client = XhCurlManager::global()
-                    .create_client()
-                    .map_err(|e| e.to_string())?;
-
+        // 复用全局运行时与客户端；通过 take/存回 模式避免借用 self
+        let (returned_pool, result) = global_runtime().block_on(async move {
+            // 首次调用时创建线程池，后续复用
+            if pool.is_none() {
+                let client = global_client().clone();
                 let mut config = ThreadPoolConfig::default();
-                if self.max_concurrency > 0 {
-                    config.worker_count = self.max_concurrency;
+                if max_concurrency > 0 {
+                    config.worker_count = max_concurrency;
                 }
+                pool = Some(XhThreadPool::new(config, client));
+            }
+            let p = pool.as_mut().expect("线程池已初始化");
+            let res = p.execute_all(requests).await;
+            (pool, res)
+        });
 
-                let mut pool = XhThreadPool::new(config, client);
-                let requests = std::mem::take(&mut self.requests);
-
-                pool.execute_all(requests).await.map_err(|e| e.to_string())
-            })
-            .map_err(|e| e.to_string())?;
+        // 存回线程池以便下次 execute 复用
+        self.pool = returned_pool;
+        let results = result.map_err(|e| e.to_string())?;
 
         // 转换为 PHP 数组
         results_to_php_array(&results)
