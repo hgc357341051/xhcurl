@@ -437,6 +437,9 @@ async fn execute_http_task(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("task-{}", task_id));
 
+    // 提取用户自定义数据（随结果原样带回）
+    let user_data = request.get_user_data().map(|s| s.to_string());
+
     // 执行请求（复用 XhMulti::execute_single，不启用流式回调）
     match crate::multi::XhMulti::execute_single(
         client,
@@ -447,8 +450,8 @@ async fn execute_http_task(
     )
     .await
     {
-        Ok(response) => RequestResult::success(request_id, response, start.elapsed()),
-        Err(e) => RequestResult::error(request_id, e.to_string(), start.elapsed()),
+        Ok(response) => RequestResult::success(request_id, user_data, response, start.elapsed()),
+        Err(e) => RequestResult::error(request_id, user_data, e.to_string(), start.elapsed()),
     }
 }
 
@@ -462,6 +465,12 @@ fn result_to_php_array(result: &RequestResult) -> Result<ZBox<ZendHashTable>, St
     let _ = ht.insert("id", result.id.clone());
     let _ = ht.insert("success", result.is_success());
     let _ = ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+
+    // 用户自定义数据：原样回传 JSON 字符串
+    // PHP 端可用 json_decode 还原为原结构（数组/对象）
+    if let Some(ud) = &result.user_data {
+        let _ = ht.insert("user_data", ud.clone());
+    }
 
     if let Some(err) = &result.error {
         let _ = ht.insert("error", err.clone());

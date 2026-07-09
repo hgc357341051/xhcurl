@@ -249,6 +249,9 @@ impl XhThreadPool {
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| request.get_url().to_string());
 
+                    // 提取用户自定义数据（随结果原样带回）
+                    let user_data = request.get_user_data().map(|s| s.to_string());
+
                     let start = Instant::now();
 
                     // 执行请求
@@ -265,10 +268,10 @@ impl XhThreadPool {
                     // 构建结果
                     let result_msg = match result {
                         Ok(response) => ResultMessage::Completed(
-                            RequestResult::success(request_id, response, elapsed)
+                            RequestResult::success(request_id, user_data, response, elapsed)
                         ),
                         Err(e) => ResultMessage::Completed(
-                            RequestResult::error(request_id, e.to_string(), elapsed)
+                            RequestResult::error(request_id, user_data, e.to_string(), elapsed)
                         ),
                     };
 
@@ -607,6 +610,7 @@ mod tests {
     fn test_result_message() {
         let result = RequestResult::success(
             "req1".to_string(),
+            None,
             XhResponse::from_error(
                 "test".to_string(),
                 "https://example.com".to_string(),

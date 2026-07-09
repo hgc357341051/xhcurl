@@ -104,6 +104,9 @@ pub struct RequestResult {
     /// 请求 ID（用于关联请求和响应）
     pub id: String,
 
+    /// 用户自定义数据（JSON 字符串，随请求原样带回）
+    pub user_data: Option<String>,
+
     /// 响应对象（成功时）
     pub response: Option<XhResponse>,
 
@@ -116,9 +119,10 @@ pub struct RequestResult {
 
 impl RequestResult {
     /// 创建成功结果
-    pub fn success(id: String, response: XhResponse, elapsed: Duration) -> Self {
+    pub fn success(id: String, user_data: Option<String>, response: XhResponse, elapsed: Duration) -> Self {
         Self {
             id,
+            user_data,
             response: Some(response),
             error: None,
             elapsed,
@@ -126,9 +130,10 @@ impl RequestResult {
     }
 
     /// 创建失败结果
-    pub fn error(id: String, error: String, elapsed: Duration) -> Self {
+    pub fn error(id: String, user_data: Option<String>, error: String, elapsed: Duration) -> Self {
         Self {
             id,
+            user_data,
             response: None,
             error: Some(error),
             elapsed,
@@ -338,6 +343,9 @@ impl XhMulti {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| request.get_url().to_string());
 
+            // 提取用户自定义数据（随结果原样带回）
+            let user_data = request.get_user_data().map(|s| s.to_string());
+
             // 克隆共享资源
             let client = self.client.clone();
             let result_tx = result_tx.clone();
@@ -371,8 +379,8 @@ impl XhMulti {
 
                 // 构建结果
                 let result = match result {
-                    Ok(response) => RequestResult::success(request_id, response, elapsed),
-                    Err(e) => RequestResult::error(request_id, e.to_string(), elapsed),
+                    Ok(response) => RequestResult::success(request_id, user_data, response, elapsed),
+                    Err(e) => RequestResult::error(request_id, user_data, e.to_string(), elapsed),
                 };
 
                 // 通过 channel 发送结果
@@ -715,6 +723,7 @@ mod tests {
         );
         let success = RequestResult::success(
             "req1".to_string(),
+            None,
             response,
             Duration::from_secs(1),
         );
@@ -725,6 +734,7 @@ mod tests {
         // 失败结果
         let error = RequestResult::error(
             "req2".to_string(),
+            None,
             "连接超时".to_string(),
             Duration::from_secs(30),
         );

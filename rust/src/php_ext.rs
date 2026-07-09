@@ -545,17 +545,25 @@ impl PhpXhRequest {
         this
     }
 
-    /// 设置请求 ID（用于批量请求时的结果关联）
+    /// 设置用户自定义数据
+    ///
+    /// 可携带任意结构化数据（数组/对象），随请求传递到结果中返回。
+    /// 用于批量请求时关联业务上下文（如任务索引、回调标识、业务参数等）。
+    ///
+    /// 数据以 JSON 字符串形式存储，结果中通过 `user_data` 字段返回，
+    /// PHP 端可用 `json_decode($result['user_data'], true)` 还原。
     ///
     /// # PHP 签名
-    /// public XHRequest::setId(string $id): $this
+    /// public XHRequest::setUserData(mixed $data): $this
     #[php_method]
-    pub fn set_id(
-        #[this] this: &mut ZendClassObject<Self>,
-        id: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().id(id);
-        this
+    pub fn set_user_data<'a>(
+        #[this] this: &'a mut ZendClassObject<Self>,
+        data: &ZendHashTable,
+    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+        // 将 PHP 数组序列化为 JSON 字符串存储
+        let json_str = php_array_to_json(data)?;
+        this.request = this.request.clone().user_data(json_str);
+        Ok(this)
     }
 
     /// 设置请求优先级（线程池模式下生效）
@@ -582,12 +590,6 @@ impl PhpXhRequest {
     #[php_method]
     pub fn get_method(&self) -> String {
         self.request.get_method().to_string()
-    }
-
-    /// 获取请求 ID
-    #[php_method]
-    pub fn get_id(&self) -> Option<String> {
-        self.request.get_id().map(|s| s.to_string())
     }
 }
 
@@ -943,6 +945,11 @@ fn results_to_php_array(results: &[crate::multi::RequestResult]) -> Result<ZBox<
         let _ = response_ht.insert("id", result.id.clone());
         let _ = response_ht.insert("success", result.is_success());
         let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+
+        // 用户自定义数据：原样回传 JSON 字符串
+        if let Some(ud) = &result.user_data {
+            let _ = response_ht.insert("user_data", ud.clone());
+        }
 
         if let Some(err) = &result.error {
             let _ = response_ht.insert("error", err.clone());

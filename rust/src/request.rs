@@ -180,6 +180,11 @@ pub struct XhRequest {
     /// 请求 ID（用于批量请求时的标识）
     id: Option<String>,
 
+    /// 用户自定义数据（JSON 字符串）
+    /// 可携带任意结构化数据（数组/对象），随请求传递到结果中
+    /// 用于批量请求时关联业务上下文（如任务索引、回调标识等）
+    user_data: Option<String>,
+
     /// 请求优先级（0 = 默认，数值越大优先级越高）
     /// 用于线程池模式下的任务调度
     priority: i32,
@@ -212,6 +217,7 @@ impl XhRequest {
             user_agent: None,
             proxy: None,
             id: None,
+            user_data: None,
             priority: 0,
             stream_chunk_size: 0,
         }
@@ -372,6 +378,13 @@ impl XhRequest {
         self
     }
 
+    /// 设置用户自定义数据（JSON 字符串）
+    /// 可携带任意结构化数据，随请求传递到结果中返回
+    pub fn user_data(mut self, data: impl Into<String>) -> Self {
+        self.user_data = Some(data.into());
+        self
+    }
+
     /// 设置请求优先级
     pub fn priority(mut self, priority: i32) -> Self {
         self.priority = priority;
@@ -410,6 +423,11 @@ impl XhRequest {
     /// 获取请求 ID
     pub fn get_id(&self) -> Option<&str> {
         self.id.as_deref()
+    }
+
+    /// 获取用户自定义数据
+    pub fn get_user_data(&self) -> Option<&str> {
+        self.user_data.as_deref()
     }
 
     /// 获取请求优先级
