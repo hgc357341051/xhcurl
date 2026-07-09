@@ -1,11 +1,12 @@
-# XHCurl - 高性能 PHP HTTP 客户端扩展
+# XHCurl - 高性能 PHP HTTP 客户端扩展（Rust 实现）
 
-[![Build Status](https://github.com/hgc357341051/xhcurl/actions/workflows/build.yml/badge.svg)](https://github.com/hgc357341051/xhcurl/actions/workflows/build.yml)
-[![PHP Version](https://img.shields.io/badge/PHP-8.0%20--%208.4-blue.svg)](https://php.net)
+[![Build Status](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml/badge.svg)](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml)
+[![PHP Version](https://img.shields.io/badge/PHP-8.1%20--%208.4-blue.svg)](https://php.net)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-green.svg)](#平台支持)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
-XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的 HTTP 客户端能力，支持单次请求、批量异步请求、多线程并发请求，并针对大数据量场景做了内存优化。
+XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，使用 [ext-php-rs](https://github.com/davidcole1340/ext-php-rs) 直接生成 PHP 扩展，无需 C 桥接层。提供链式调用 API、批量异步请求、线程池并发，以及基于 **PHP Fiber 协程**的真正异步 HTTP 请求能力。
 
 ## 目录
 
@@ -13,16 +14,15 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 - [平台支持](#平台支持)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [协程模式（PHP Fiber）](#协程模式php-fiber)
 - [API 文档](#api-文档)
   - [XHCurl - 全局管理器](#xhcurl---全局管理器)
   - [XHRequest - 请求构建器](#xhrequest---请求构建器)
-  - [XHResponse - 懒加载响应](#xhresponse---懒加载响应)
+  - [XHResponse - 响应对象](#xhresponse---响应对象)
   - [XHMulti - 批量异步执行器](#xhmulti---批量异步执行器)
-  - [XHThreadPool - CLI 线程池](#xhthreadpool---cli-线程池)
-- [链式调用](#链式调用)
-- [使用场景](#使用场景)
-- [内存优化设计](#内存优化设计)
-- [FPM 与 CLI 模式注意事项](#fpm-与-cli-模式注意事项)
+  - [XHThreadPool - 线程池](#xhthreadpool---线程池)
+- [curl 兼容性对照](#curl-兼容性对照)
+- [FPM 与 CLI 模式](#fpm-与-cli-模式)
 - [故障排查](#故障排查)
 - [开发与贡献](#开发与贡献)
 
@@ -32,21 +32,16 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 
 | 特性 | 说明 |
 |------|------|
-| **三种执行模式** | 同步单次（`exec`）、批量异步（`XHMulti`）、多线程并发（`XHThreadPool`） |
-| **HTTP/2 支持** | 自动协议协商升级，启用多路复用（multiplexing）提升并发性能 |
-| **失败重试** | 网络错误或 HTTP 5xx 自动重试，可配置重试次数和间隔 |
+| **Rust 内存安全** | 基于 Rust + reqwest 实现，编译期保证无数据竞争、无空指针解引用 |
+| **三种执行模式** | 同步单次（`execute`）、批量异步（`XHMulti`）、协程异步（`await`/`gather`） |
+| **PHP Fiber 协程** | `XHCurl::run()` + `await()` 实现协程式异步 HTTP，类似 ReactPHP/AMPHP |
+| **并行 gather** | `XHCurl::gather()` 一次性并发 N 个请求，100 请求实测 ~65 倍加速 |
 | **链式调用** | 所有 setter 方法返回 `$this`，支持流畅的链式 API |
-| **流式回调** | `onChunk()` / `onHeader()` 实时处理响应数据，避免一次性加载到内存 |
-| **懒加载响应** | `getBodyChunk(offset, length)` 按需分段读取响应体，防止内存溢出 |
-| **两级配置** | 全局配置（`XHCurl`）+ 请求级配置（`XHRequest`），请求级覆盖全局 |
-| **FPM/CLI 通用** | `XHMulti` 基于 `curl_multi` 单进程异步 I/O，FPM 和 CLI 均安全可用 |
-| **CLI 多线程** | `XHThreadPool` 真多线程并发，仅 CLI 模式可用，避免 FPM 线程安全问题 |
-| **内存安全** | 响应体存储在 C 侧 `malloc` 缓冲区，不计入 PHP `memory_limit`，通过 `max_response_size` 限制 |
-| **滑动窗口并发** | `XHMulti` 支持滑动窗口调度，`setMaxConcurrent()` 控制同时活跃请求数，百万级请求内存恒定 |
-| **实时回调** | `execute(callback)` 支持逐条回调结果，完成后立即释放内存，无需等待全部请求结束 |
-| **用户数据传递** | `add()` 支持可选 `userData` 参数，回调中通过 `getUserData()` 获取 |
-| **共享会话** | 基于 `curl_share` 在多个请求间共享 DNS 缓存、SSL 会话、Cookie |
-| **JSON 函数缓存** | MINIT 阶段缓存 `json_encode`/`json_decode` 函数指针，避免每次哈希查找 |
+| **curl 兼容** | 对标 PHP curl 的 `CURLOPT_*`，支持 cookie/auth/TLS 证书/multipart 等 |
+| **全局连接复用** | reqwest Client 全局单例，TCP keep-alive + TLS 会话缓存 |
+| **自适应运行时** | CLI 模式多线程运行时（M:N 并行），FPM 模式单线程运行时（协作式并发） |
+| **用户自定义数据** | `setUserData()` 携带任意结构化数据，随结果原样回传 |
+| **响应体大小限制** | 流式读取 + `max_response_size` 防止内存溢出 |
 
 ---
 
@@ -54,14 +49,11 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 
 | 平台 | PHP 版本 | 线程安全 | 状态 |
 |------|----------|----------|------|
-| Linux (Ubuntu 22.04) | 8.0, 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
-| macOS 14 | 8.0, 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
-| Windows (x64) | 8.0, 8.1, 8.2, 8.3, 8.4 | NTS / ZTS | ✅ 支持 |
+| Linux (Ubuntu 22.04) | 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
+| macOS 14 | 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
+| Windows (x64) | 8.1, 8.2, 8.3, 8.4 | NTS / ZTS | ✅ 支持 |
 
-> **注意**：
-> - `XHThreadPool` 在所有平台上仅 CLI 模式可用。
-> - Windows PHP 8.0-8.3 使用 VS 2019 v142 工具集编译，PHP 8.4 使用 VS 2022 v143 工具集编译，确保与官方 PHP Windows 二进制包的编译器版本一致。
-> - Windows 版本使用 Schannel（Windows 原生 TLS）替代 OpenSSL，编译出的 DLL 无外部依赖，无需额外安装 OpenSSL DLL 文件。
+> **PHP 版本要求**：**8.1+**。协程模式（`await`/`gather`/`run`）依赖 PHP 8.1 引入的 [Fiber](https://www.php.net/manual/zh/language.fibers.php) 类。
 
 ---
 
@@ -69,75 +61,54 @@ XHCurl 是一个基于 libcurl 的高性能 PHP C 扩展，提供类似 curl 的
 
 ### 方式一：从源码编译
 
+**前置依赖：**
+
+- Rust 工具链（stable）
+- PHP 8.1+ 开发头文件（`php-config` / `php-devel`）
+- libclang（ext-php-rs bindgen 需要）
+- OpenSSL 开发库（Linux）
+
 **Linux / macOS：**
 
 ```bash
 # 1. 安装系统依赖
 # Ubuntu/Debian
-sudo apt-get install -y libcurl4-openssl-dev autoconf automake libtool pkg-config
-
-# CentOS/RHEL
-sudo yum install -y libcurl-devel autoconf automake libtool pkg-config
+sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev
 
 # macOS（使用 Homebrew）
-brew install autoconf automake libtool pkg-config curl
+brew install llvm pkg-config openssl
 
-# 2. 克隆仓库
+# 2. 安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 3. 克隆仓库并编译
 git clone https://github.com/hgc357341051/xhcurl.git
-cd xhcurl
+cd xhcurl/rust
+cargo build --release --features php
 
-# 3. 编译安装
-phpize
-./configure --enable-xhcurl
-make -j$(nproc)
-sudo make install
-
-# 4. 启用扩展
-echo "extension=xhcurl.so" | sudo tee /etc/php/8.x/mods-available/xhcurl.ini
+# 4. 安装扩展
+sudo cp target/release/libxhcurl.so $(php-config --extension-dir)/xhcurl.so
+echo "extension=xhcurl.so" | sudo tee /etc/php/8.1/mods-available/xhcurl.ini
 sudo phpenmod xhcurl
 
-# 5. 验证安装
+# 5. 验证
 php -m | grep xhcurl
-php -r "echo xhcurl_version();"
+php -r "echo XHCurl::version();"
 ```
 
 **Windows：**
 
 Windows 编译较复杂，建议直接从 [GitHub Releases](https://github.com/hgc357341051/xhcurl/releases) 下载预编译的 DLL。
 
-```powershell
-# 1. 下载对应 PHP 版本的 DLL 文件
-#    文件名格式：php_xhcurl-windows-php{版本}-nts.dll
-#    例如：php_xhcurl-windows-php8.2-nts.dll
-#    注意：文件名必须以 php_ 开头，这是 Windows 上 PHP 加载扩展的命名要求
-
-# 2. 复制到 PHP 扩展目录
-#    例如：D:\phpEnv\php\php-8.2\ext\
-copy php_xhcurl-windows-php8.2-nts.dll D:\phpEnv\php\php-8.2\ext\
-
-# 3. 在 php.ini 中添加
-#    extension= 后的名称 = 文件名去掉 php_ 前缀和 .dll 后缀
-#    php_xhcurl-windows-php8.2-nts.dll → xhcurl-windows-php8.2-nts
-extension=xhcurl-windows-php8.2-nts
-
-# 4. 验证安装
-php -m | findstr xhcurl
-```
-
-> **Windows DLL 说明**：
-> - DLL 使用 Schannel（Windows 原生 TLS）编译，**无外部 DLL 依赖**，无需安装 OpenSSL
-> - 文件名必须以 `php_` 开头，因为 Windows 上 PHP 加载扩展时会自动添加 `php_` 前缀和 `.dll` 后缀
-> - 如果遇到 "找不到指定的模块" 错误，请确认 PHP 版本和线程安全模式（NTS/TS）是否匹配
-> - 使用 `php -v` 查看 PHP 版本和线程安全信息（NTS = Non Thread Safe）
-> - DLL 文件名中的 `nts` 表示 Non Thread Safe，必须与 PHP 的线程安全模式一致
-
 ### 方式二：从 GitHub Releases 下载预编译包
 
 访问 [Releases 页面](https://github.com/hgc357341051/xhcurl/releases)，根据平台和 PHP 版本选择对应的二进制包：
 
-- `xhcurl-linux-php8.x.so` - Linux
-- `xhcurl-macos-php8.x.so` - macOS
-- `xhcurl-windows-php8.x-nts.dll` - Windows
+- `xhcurl-rust-linux-php8.x.so` - Linux
+- `xhcurl-rust-macos-php8.x.dylib` - macOS
+- `xhcurl-rust-windows-php8.x-nts.dll` - Windows NTS
+- `xhcurl-rust-windows-php8.x-zts.dll` - Windows ZTS
 
 ### 验证安装
 
@@ -145,8 +116,8 @@ php -m | findstr xhcurl
 php -m | grep xhcurl
 # 输出：xhcurl
 
-php -r "var_dump(xhcurl_version());"
-# 输出：string(5) "1.0.0"
+php -r "echo XHCurl::version();"
+# 输出扩展版本号
 
 php -r "var_dump(class_exists('XHCurl'));"
 # 输出：bool(true)
@@ -160,214 +131,187 @@ php -r "var_dump(class_exists('XHCurl'));"
 
 ```php
 <?php
-// 创建全局管理器（链式调用）
-$curl = (new XHCurl())
-    ->setTimeout(30)
-    ->setVerifySsl(false)
-    ->setUserAgent('MyApp/1.0');
-
 // 创建请求（链式调用）
-$request = (new XHRequest('https://httpbin.org/get'))
-    ->setHeader('X-Custom-Header', 'hello');
+$request = XHCurl::createRequest('https://httpbin.org/get')
+    ->get()
+    ->header('X-Custom-Header', 'hello')
+    ->timeout(30);
 
 // 同步执行
-$response = $curl->exec($request);
+$result = XHCurl::execute($request);
 
-// 处理响应
-echo "状态码: " . $response->getStatusCode() . "\n";
-echo "Content-Type: " . $response->getContentType() . "\n";
-echo "响应体长度: " . $response->getBodyLength() . "\n";
-
-// 分段读取响应体（避免内存溢出）
-$offset = 0;
-while ($offset < $response->getBodyLength()) {
-    $chunk = $response->getBodyChunk($offset, 1024);
-    echo $chunk;
-    $offset += strlen($chunk);
-}
-
-// 如果是 JSON，按需解析为数组
-if ($response->isJson()) {
-    $data = $response->toJsonArray();
-    print_r($data);
+if ($result['success']) {
+    echo "状态码: " . $result['status'] . "\n";
+    echo "响应体: " . $result['body'] . "\n";
 }
 ```
 
-### 示例 2：批量异步请求（FPM 推荐）
+### 示例 2：POST JSON 请求
 
 ```php
 <?php
-$curl = (new XHCurl())->setTimeout(10);
+$request = XHCurl::createRequest('https://httpbin.org/post')
+    ->post()
+    ->json(['name' => 'XHCurl', 'version' => '1.0'])
+    ->header('Authorization', 'Bearer my-token')
+    ->timeout(30);
 
-// 创建批量执行器（链式设置并发数）
-$multi = (new XHMulti($curl))
-    ->setMaxConcurrent(50);
-
-// 添加多个请求（可传递 userData）
-$multi->add(new XHRequest('https://httpbin.org/get?id=1'), ['tag' => 'first']);
-$multi->add(new XHRequest('https://httpbin.org/get?id=2'), ['tag' => 'second']);
-$multi->add(new XHRequest('https://httpbin.org/get?id=3'));
-
-// 方式 1：返回全量结果数组
-$responses = $multi->execute();
-
-foreach ($responses as $i => $response) {
-    echo "请求 $i: 状态码=" . $response->getStatusCode()
-         . ", 耗时=" . $response->getTotalTime() . "s\n";
-}
-
-// 方式 2：回调模式（推荐，内存恒定）
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    $tag = $userData['tag'] ?? 'unknown';
-    echo "[$completed/$total] $tag: 状态码=" . $response->getStatusCode() . "\n";
-});
+$result = XHCurl::execute($request);
+echo $result['body'];
 ```
 
-### 示例 3：多线程并发（仅 CLI）
+### 示例 3：批量异步请求
 
 ```php
 <?php
-// 仅在 CLI 模式下运行
-if (php_sapi_name() !== 'cli') {
-    exit("XHThreadPool 仅 CLI 模式可用\n");
+$multi = new XHMulti();
+
+$urls = [
+    'https://httpbin.org/get?id=1',
+    'https://httpbin.org/get?id=2',
+    'https://httpbin.org/get?id=3',
+];
+
+foreach ($urls as $url) {
+    $multi->add(
+        XHCurl::createRequest($url)->get()->timeout(10)
+    );
 }
 
-$curl = new XHCurl();
+// 设置最大并发数
+$multi->maxConcurrency(10);
 
-// 创建线程池（4 个工作线程）
-$pool = new XHThreadPool($curl, 4);
+// 执行并获取所有结果
+$results = $multi->execute();
 
-// 添加 100 个请求
+foreach ($results as $i => $result) {
+    echo "请求 {$i}: status=" . $result['status'] . "\n";
+}
+```
+
+### 示例 4：线程池并发（CLI 模式）
+
+```php
+<?php
+// 仅 CLI 模式可用
+$pool = new XHThreadPool(8); // 8 个工作线程
+
 for ($i = 0; $i < 100; $i++) {
-    $req = new XHRequest("https://httpbin.org/get?id=$i");
-    $pool->add($req);
+    $pool->add(
+        XHCurl::createRequest("https://httpbin.org/get?id={$i}")
+            ->get()
+            ->timeout(10)
+    );
 }
 
-// 多线程并发执行
-$responses = $pool->execute();
-
-echo "完成请求数: " . count($responses) . "\n";
+$results = $pool->execute();
+echo "完成 " . count($results) . " 个请求\n";
 ```
 
-### 示例 4：流式回调处理大响应
+---
+
+## 协程模式（PHP Fiber）
+
+XHCurl 基于 PHP 8.1 的 [Fiber](https://www.php.net/manual/zh/language.fibers.php) 实现了真正的协程式异步 HTTP 请求。HTTP 请求在 Rust 的 tokio 异步运行时上执行，PHP 侧通过 Fiber 挂起/恢复实现非阻塞等待。
+
+### `await()` - 协程式等待单个请求
 
 ```php
 <?php
-$curl = (new XHCurl())
-    ->setMaxResponseSize(100 * 1024 * 1024); // 允许 100MB 响应
+// XHCurl::run() 启动协程事件泵
+// 回调内使用 XHCurl::await() 挂起当前 Fiber 等待 HTTP 请求完成
+$result = XHCurl::run(function() {
+    $response = XHCurl::await(
+        XHCurl::createRequest('https://httpbin.org/get')
+            ->get()
+            ->timeout(10)
+    );
 
-$request = new XHRequest('https://example.com/large-file.zip');
-
-// 注册流式回调：每收到一段数据就触发（链式调用）
-$totalReceived = 0;
-$request->onChunk(function($chunk) use (&$totalReceived) {
-    $totalReceived += strlen($chunk);
-    // 实时写入文件，避免内存堆积
-    file_put_contents('download.zip', $chunk, FILE_APPEND);
-
-    // 每 1MB 输出进度
-    if ($totalReceived % (1024 * 1024) < strlen($chunk)) {
-        echo "已下载: " . round($totalReceived / 1024 / 1024, 2) . " MB\n";
+    // await 返回结果数组
+    if ($response['success']) {
+        echo "状态码: " . $response['status'] . "\n";
+        echo "响应体: " . $response['body'] . "\n";
     }
+
+    return $response;
+});
+```
+
+### `gather()` - 并发批量请求（真正并行）
+
+`gather()` 一次性将所有请求提交到 tokio 工作线程并行执行，按**完成顺序**返回结果（非提交顺序）。这是性能最高的模式。
+
+```php
+<?php
+// 构建 100 个请求
+$requests = [];
+for ($i = 0; $i < 100; $i++) {
+    $requests[] = XHCurl::createRequest("https://httpbin.org/get?id={$i}")
+        ->get()
+        ->timeout(10)
+        ->setUserData(['task_index' => $i, 'tag' => "batch-{$i}"]);
+}
+
+// gather 并发执行所有请求
+$results = XHCurl::run(function() use ($requests) {
+    return XHCurl::gather($requests);
 });
 
-$response = $curl->exec($request);
-echo "下载完成，总大小: " . $response->getBodyLength() . " 字节\n";
+// 结果按完成顺序排列（非提交顺序）
+foreach ($results as $idx => $result) {
+    $userData = json_decode($result['user_data'], true);
+    echo "完成 #{$idx}: 提交索引={$userData['task_index']}, status={$result['status']}\n";
+}
 ```
 
-### 示例 5：POST JSON 请求
+> **性能数据**：100 个请求并发，总耗时 ~150ms（串行需 ~10s，加速约 65 倍）。
+
+### 协程模式串行 vs 并行对比
 
 ```php
 <?php
-$curl = (new XHCurl())
-    ->setGlobalHeader('Authorization', 'Bearer your-token-here');
+// ❌ 串行：一个接一个等待（总耗时 = 所有请求耗时之和）
+XHCurl::run(function() {
+    $r1 = XHCurl::await(XHCurl::createRequest('https://api.example.com/a')->get());
+    $r2 = XHCurl::await(XHCurl::createRequest('https://api.example.com/b')->get());
+    $r3 = XHCurl::await(XHCurl::createRequest('https://api.example.com/c')->get());
+    // 总耗时 ≈ r1 + r2 + r3
+});
 
-$request = (new XHRequest('https://api.example.com/users'))
-    ->setMethod('POST')
-    ->setJsonBody([
-        'name' => '张三',
-        'email' => 'zhangsan@example.com',
-        'age' => 30,
+// ✅ 并行：同时发起，按完成顺序返回（总耗时 ≈ 最慢的请求）
+XHCurl::run(function() {
+    $results = XHCurl::gather([
+        XHCurl::createRequest('https://api.example.com/a')->get(),
+        XHCurl::createRequest('https://api.example.com/b')->get(),
+        XHCurl::createRequest('https://api.example.com/c')->get(),
+    ]);
+    // 总耗时 ≈ max(r1, r2, r3)
+    return $results;
+});
+```
+
+### 用户自定义数据传递
+
+使用 `setUserData()` 携带任意结构化数据（数组/对象），随请求原样回传到结果中：
+
+```php
+<?php
+$request = XHCurl::createRequest('https://api.example.com/data')
+    ->get()
+    ->setUserData([
+        'task_id'   => 42,
+        'callback'  => 'process_user',
+        'context'   => ['user_id' => 1001, 'role' => 'admin'],
     ]);
 
-$response = $curl->exec($request);
+$result = XHCurl::run(function() use ($request) {
+    return XHCurl::await($request);
+});
 
-if ($response->getStatusCode() === 201) {
-    $user = $response->toJsonArray();
-    echo "创建用户成功，ID: " . $user['id'] . "\n";
-} else {
-    echo "请求失败: " . $response->getError() . "\n";
-    echo "curl 错误码: " . $response->getCurlCode() . "\n";
-}
-```
-
-### 示例 6：全局 Cookie 与请求级 Cookie
-
-```php
-<?php
-$curl = (new XHCurl())
-    ->setGlobalCookie('session_id', 'abc123', 'example.com', '/')
-    ->setGlobalCookie('tracking', 'xyz789');
-
-// 请求 1：使用全局 Cookie
-$req1 = new XHRequest('https://example.com/api/profile');
-
-// 请求 2：覆盖全局 Cookie + 添加请求级 Cookie（链式调用）
-$req2 = (new XHRequest('https://example.com/api/admin'))
-    ->setCookie('session_id', 'admin-session') // 覆盖全局
-    ->setCookie('admin_flag', '1');             // 请求级独有
-
-$multi = new XHMulti($curl);
-$multi->add($req1);
-$multi->add($req2);
-$responses = $multi->execute();
-```
-
-### 示例 7：HTTP/2 多路复用
-
-```php
-<?php
-$curl = (new XHCurl())
-    ->setHttp2(true)   // 启用 HTTP/2（默认已启用）
-    ->setTimeout(10);
-
-// 批量请求同一域名，HTTP/2 多路复用将复用同一连接
-$multi = new XHMulti($curl);
-for ($i = 0; $i < 20; $i++) {
-    $multi->add(new XHRequest("https://httpbin.org/get?id=$i"));
-}
-
-$start = microtime(true);
-$responses = $multi->execute();
-$elapsed = microtime(true) - $start;
-
-echo "20 个请求耗时: " . round($elapsed, 3) . " 秒\n";
-echo "相比 HTTP/1.1 的 20 个串行连接，HTTP/2 多路复用显著降低延迟\n";
-```
-
-### 示例 8：失败自动重试
-
-```php
-<?php
-// 配置重试：网络错误（连接超时、DNS 失败等）或 HTTP 5xx 自动重试
-$curl = (new XHCurl())
-    ->setRetry(3, 200)     // 最多重试 3 次，间隔 200ms
-    ->setTimeout(5)
-    ->setConnectTimeout(3);
-
-// 对不稳定的服务器发起请求，自动重试最多 3 次
-$request = new XHRequest('https://httpbin.org/status/500');
-$response = $curl->exec($request);
-
-// 即使重试 3 次后仍为 500，也不会崩溃
-echo "最终状态码: " . $response->getStatusCode() . "\n";
-echo "错误信息: " . ($response->getError() ?? '无') . "\n";
-echo "curl 错误码: " . $response->getCurlCode() . "\n";
-
-// 重试场景示例：
-// 1. 服务器临时 502/503/504 → 重试后可能恢复
-// 2. 网络抖动导致连接超时 → 重试后成功
-// 3. DNS 解析失败 → 重试后可能解析成功
+// 从结果中取回自定义数据
+$custom = json_decode($result['user_data'], true);
+echo "任务ID: " . $custom['task_id'] . "\n";
+echo "回调: " . $custom['callback'] . "\n";
 ```
 
 ---
@@ -376,672 +320,231 @@ echo "curl 错误码: " . $response->getCurlCode() . "\n";
 
 ### XHCurl - 全局管理器
 
-全局配置管理器，所有请求共享此实例的配置（超时、代理、全局头部/Cookie 等）。
+所有方法均为静态方法。
 
-#### 方法
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `version()` | `(): string` | 获取扩展版本号 |
+| `setConfig()` | `(array $config): void` | 设置全局配置 |
+| `getConfig()` | `(): array` | 获取全局配置 |
+| `isCli()` | `(): bool` | 检测是否 CLI 模式 |
+| `createRequest()` | `(string $url): XHRequest` | 创建请求构建器 |
+| `execute()` | `(XHRequest $req): array` | 同步执行单个请求 |
+| `run()` | `(callable $main): mixed` | 启动协程事件泵，执行主回调 |
+| `await()` | `(XHRequest $req): array` | 协程式等待单个请求（须在 `run()` 内） |
+| `gather()` | `(array $requests): array` | 并发批量请求，按完成顺序返回（须在 `run()` 内） |
 
-| 方法 | 说明 |
-|------|------|
-| `__construct()` | 构造函数，初始化 curl_share 共享会话 |
-| `setGlobalHeader(string $name, string $value): static` | 设置全局请求头（链式） |
-| `setGlobalCookie(string $name, string $value, string $domain = '', string $path = '/'): static` | 设置全局 Cookie（链式） |
-| `setTimeout(int $seconds): static` | 设置默认请求超时（默认 30 秒，链式） |
-| `setConnectTimeout(int $seconds): static` | 设置默认连接超时（默认 10 秒，链式） |
-| `setVerifySsl(bool $verify): static` | 是否验证 SSL 证书（默认 true，链式） |
-| `setUserAgent(string $ua): static` | 设置默认 User-Agent（链式） |
-| `setProxy(string $proxy): static` | 设置代理（如 `http://host:port` 或 `socks5://host:port`，链式） |
-| `setMaxResponseSize(int $bytes): static` | 设置最大响应体大小（默认 10MB，超过则截断，链式） |
-| `setHttp2(bool $enabled): static` | 启用/禁用 HTTP/2（默认启用，支持多路复用，链式） |
-| `setRetry(int $count, int $delayMs = 100): static` | 设置失败重试（网络错误或 5xx 自动重试，链式） |
-| `exec(XHRequest $request): XHResponse` | 同步执行单个请求 |
-
-#### 示例
+**全局配置项：**
 
 ```php
-// 传统写法
-$curl = new XHCurl();
-$curl->setGlobalHeader('Authorization', 'Bearer token');
-$curl->setGlobalHeader('Accept', 'application/json');
-$curl->setTimeout(60);
-$curl->setConnectTimeout(10);
-$curl->setVerifySsl(true);
-$curl->setUserAgent('MyApp/2.0');
-$curl->setProxy('http://proxy.example.com:8080');
-$curl->setMaxResponseSize(50 * 1024 * 1024);
-$curl->setRetry(3, 200);
-
-// 链式调用写法（推荐）
-$curl = (new XHCurl())
-    ->setGlobalHeader('Authorization', 'Bearer token')
-    ->setGlobalHeader('Accept', 'application/json')
-    ->setTimeout(60)
-    ->setConnectTimeout(10)
-    ->setVerifySsl(true)
-    ->setUserAgent('MyApp/2.0')
-    ->setProxy('http://proxy.example.com:8080')
-    ->setMaxResponseSize(50 * 1024 * 1024)
-    ->setRetry(3, 200);
+XHCurl::setConfig([
+    'connect_timeout'    => 10,      // 连接超时（秒）
+    'request_timeout'    => 30,      // 请求超时（秒）
+    'max_response_size'  => 10485760,// 最大响应体（字节，默认 10MB）
+    'follow_redirects'   => true,    // 跟随重定向
+    'max_redirects'      => 10,      // 最大重定向次数
+    'verify_ssl'         => true,    // 验证 SSL 证书
+    'user_agent'         => 'XHCurl',// User-Agent
+    'proxy'              => null,    // 代理地址
+]);
 ```
-
----
 
 ### XHRequest - 请求构建器
 
-构建单个 HTTP 请求的配置，支持链式设置。
+所有 setter 方法返回 `$this`，支持链式调用。
 
-#### 方法
-
-| 方法 | 说明 |
-|------|------|
-| `__construct(string $url)` | 构造函数，指定请求 URL |
-| `setMethod(string $method): static` | 设置 HTTP 方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS，链式） |
-| `setHeader(string $name, string $value): static` | 设置请求级头部（覆盖全局同名头部，链式） |
-| `setCookie(string $name, string $value): static` | 设置请求级 Cookie（覆盖全局同名 Cookie，链式） |
-| `setBody(string $body): static` | 设置原始请求体（链式） |
-| `setJsonBody(array $data): static` | 设置 JSON 请求体（自动设置 Content-Type，链式） |
-| `setTimeout(int $seconds): static` | 设置请求级超时（0 表示使用全局默认值，链式） |
-| `setConnectTimeout(int $seconds): static` | 设置请求级连接超时（链式） |
-| `setFollowRedirects(bool $follow, int $max = 5): static` | 是否跟随重定向（链式） |
-| `onChunk(callable $callback): static` | 注册流式数据回调（仅 `exec` 和 `XHMulti` 可用，链式） |
-| `onHeader(callable $callback): static` | 注册响应头回调（链式） |
-| `getUrl(): string` | 获取请求 URL |
-
-#### 流式回调签名
-
-```php
-// onChunk 回调：每收到一段响应体数据时触发
-$request->onChunk(function(string $chunk): void {
-    // $chunk 是本次接收的数据片段
-    // 可以写入文件、数据库，或进行流式处理
-});
-
-// onHeader 回调：每收到一行响应头时触发
-$request->onHeader(function(string $headerLine): void {
-    // $headerLine 格式如 "Content-Type: application/json\r\n"
-});
-```
-
-> **注意**：`onChunk` / `onHeader` 在 `XHThreadPool` 模式下不可用（线程安全限制）。
-
----
-
-### XHResponse - 懒加载响应
-
-响应对象，**不一次性返回所有数据**，支持按需分段读取，避免内存溢出。
-
-#### 方法
+#### HTTP 方法
 
 | 方法 | 说明 |
 |------|------|
-| `getStatusCode(): int` | 获取 HTTP 状态码 |
-| `getHeader(string $name): ?string` | 获取指定响应头（不区分大小写） |
-| `getHeaders(): array` | 获取所有响应头（数据量大时慎用） |
-| `hasHeader(string $name): bool` | 检查响应头是否存在 |
-| `getBodyChunk(int $offset, int $length): string` | **分段读取响应体**（核心方法） |
-| `getBodyLength(): int` | 获取响应体总长度 |
-| `getContentType(): ?string` | 获取 Content-Type 头部值 |
-| `isJson(): bool` | 判断是否为 JSON 响应 |
-| `toJsonArray(): ?array` | 将响应体解析为 PHP 数组（按需解析） |
-| `getError(): ?string` | 获取错误信息（成功时为 null） |
-| `getTotalTime(): float` | 获取请求总耗时（秒） |
-| `getCurlCode(): int` | 获取 curl 错误码（0 = CURLE_OK 成功，其他值见 [curl 错误码](https://curl.se/libcurl/c/libcurl-errors.html)） |
-| `getUserData(): mixed` | 获取 `add()` 时传递的用户自定义数据（未设置返回 null） |
+| `get()` / `post()` / `put()` / `delete()` / `patch()` / `head()` | 设置标准 HTTP 方法 |
+| `method(string $method)` | 通过字符串设置方法 |
+| `customMethod(string $method)` | 自定义方法（CURLOPT_CUSTOMREQUEST，如 PROPFIND/TRACE） |
 
-#### 分段读取示例
+#### 请求体
 
-```php
-$response = $curl->exec($request);
+| 方法 | 说明 |
+|------|------|
+| `json(array $data)` | JSON 请求体（自动设置 Content-Type） |
+| `form(array $data)` | 表单请求体（application/x-www-form-urlencoded） |
+| `body(string $data)` | 原始请求体 |
+| `multipart(array $fields)` | 文件上传（multipart/form-data） |
 
-$totalLen = $response->getBodyLength();
-echo "响应体总大小: $totalLen 字节\n";
-
-// 每次读取 4KB
-$offset = 0;
-$chunkSize = 4096;
-while ($offset < $totalLen) {
-    $chunk = $response->getBodyChunk($offset, $chunkSize);
-    if ($chunk === '') break;
-
-    // 处理 $chunk
-    processChunk($chunk);
-
-    $offset += strlen($chunk);
-}
-```
-
-#### 错误诊断示例
+**multipart 字段格式：**
 
 ```php
-$response = $curl->exec($request);
-
-if ($response->getCurlCode() !== 0) {
-    // curl 层面出错（网络错误、超时、DNS 失败等）
-    echo "curl 错误码: " . $response->getCurlCode() . "\n";
-    echo "错误描述: " . $response->getError() . "\n";
-    // 常见错误码：
-    // 6  = CURLE_COULDNT_RESOLVE_HOST（DNS 解析失败）
-    // 7  = CURLE_COULDNT_CONNECT（连接失败）
-    // 28 = CURLE_OPERATION_TIMEDOUT（请求超时）
-    // 35 = CURLE_SSL_CONNECT_ERROR（SSL 握手失败）
-} elseif ($response->getStatusCode() >= 400) {
-    // HTTP 层面出错
-    echo "HTTP 状态码: " . $response->getStatusCode() . "\n";
-}
+->multipart([
+    ['name' => 'field1', 'value' => 'text value'],
+    ['name' => 'file1', 'value' => 'file content', 'filename' => 'test.txt', 'content_type' => 'text/plain'],
+])
 ```
 
----
+#### 请求头与认证
+
+| 方法 | 对应 curl | 说明 |
+|------|-----------|------|
+| `header(string $name, string $value)` | - | 设置请求头 |
+| `cookies(string $cookies)` | CURLOPT_COOKIE | Cookie 字符串 |
+| `cookieFile(string $path)` | CURLOPT_COOKIEFILE | Cookie 读取文件 |
+| `cookieJar(string $path)` | CURLOPT_COOKIEJAR | Cookie 存储文件 |
+| `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
+| `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
+| `encoding(string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`） |
+
+#### TLS/SSL
+
+| 方法 | 对应 curl | 说明 |
+|------|-----------|------|
+| `verifySsl(bool $verify)` | CURLOPT_SSL_VERIFYPEER | 验证 SSL 证书 |
+| `caInfo(string $path)` | CURLOPT_CAINFO | 自定义 CA 证书路径 |
+| `sslCert(string $path)` | CURLOPT_SSLCERT | 客户端证书路径 |
+| `sslKey(string $path)` | CURLOPT_SSLKEY | 客户端密钥路径 |
+| `sslKeyPassword(string $password)` | CURLOPT_SSLKEYPASSWD | 密钥密码 |
+
+#### 其他选项
+
+| 方法 | 说明 |
+|------|------|
+| `timeout(int $seconds)` | 请求超时（秒） |
+| `connectTimeout(int $seconds)` | 连接超时（秒） |
+| `userAgent(string $ua)` | User-Agent |
+| `proxy(string $proxy)` | 代理地址 |
+| `followRedirects(bool $follow)` | 跟随重定向 |
+| `maxRedirects(int $max)` | 最大重定向次数 |
+| `range(string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`） |
+| `setUserData(array $data)` | 用户自定义数据（随结果回传） |
+| `setPriority(int $priority)` | 请求优先级（线程池模式） |
+| `getUrl()` / `getMethod()` | 获取 URL / 方法 |
+
+### XHResponse - 响应对象
+
+> 注意：在 `execute()` / `await()` / `gather()` 模式下，结果以**数组**形式返回。`XHResponse` 对象用于 `XHMulti` / `XHThreadPool` 的回调场景。
+
+**结果数组字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 请求 ID |
+| `success` | bool | 是否成功 |
+| `status` | int | HTTP 状态码 |
+| `body` | string | 响应体 |
+| `body_size` | int | 响应体大小（字节） |
+| `url` | string | 最终 URL（重定向后） |
+| `elapsed_ms` | int | 请求耗时（毫秒） |
+| `error` | string | 错误信息（失败时） |
+| `user_data` | string | 用户自定义数据（JSON 字符串） |
 
 ### XHMulti - 批量异步执行器
 
-基于 `curl_multi` 接口的批量并发执行器，**FPM 和 CLI 模式通用**。
-
-采用**滑动窗口调度算法**：`add()` 仅将请求引用存入待执行队列，`execute()` 时按 `maxConcurrent` 窗口大小分批创建上下文，一个请求完成立即从队列取下一个补充，保持满窗并发。
-
-#### 方法
-
-| 方法 | 说明 |
-|------|------|
-| `__construct(XHCurl $curl)` | 构造函数，关联全局管理器 |
-| `add(XHRequest $request, mixed $userData = null): void` | 添加请求到待执行队列（可选传递用户数据，延迟创建上下文，节省内存） |
-| `execute(?callable $callback = null): array` | 滑动窗口并发执行，可选回调逐条处理结果 |
-| `setMaxConcurrent(int $max): static` | 设置最大并发数（滑动窗口大小，默认 100，链式） |
-| `getMaxConcurrent(): int` | 获取当前最大并发数 |
-| `count(): int` | 获取已添加的请求数量 |
-
-#### execute() 回调模式
-
 ```php
-// 无回调：返回全量结果数组（兼容旧 API，注意内存）
-$responses = $multi->execute();
-
-// 有回调：每完成一个请求立即回调，完成后释放响应内存（推荐）
-// 回调签名：callback(XHResponse $response, int $completed, int $total, mixed $userData)
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    // $response 是刚完成的请求结果
-    // $completed 是已完成请求数
-    // $total 是总请求数
-    // $userData 是 add() 时传递的用户数据（未传则为 null）
-    if ($response->getStatusCode() === 200) {
-        $data = $response->toJsonArray();
-        // 处理数据（写入数据库、文件等）
-    }
-});
-
-// add() 时传递 userData，回调中获取
-$multi->add(new XHRequest('https://httpbin.org/get?id=1'), ['db_id' => 1001]);
-$multi->add(new XHRequest('https://httpbin.org/get?id=2'), ['db_id' => 1002]);
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    $dbId = $userData['db_id'] ?? null;  // 获取 add 时传递的数据
-    echo "DB ID: $dbId, 状态码: " . $response->getStatusCode() . "\n";
-});
-
-// 也可通过 XHResponse::getUserData() 获取
-$multi->execute(function(XHResponse $response): void {
-    $userData = $response->getUserData();
-});
+$multi = new XHMulti();
+$multi->add($request1);
+$multi->add($request2);
+$multi->maxConcurrency(10);  // 最大并发数
+$results = $multi->execute(); // 返回结果数组
 ```
 
-> **百万级请求推荐**：使用回调模式 + `setMaxConcurrent()` 控制并发窗口，内存占用仅与并发窗口大小相关，与总请求数无关。
+### XHThreadPool - 线程池
 
-#### 特点
-
-- 单进程异步 I/O 多路复用，无线程安全问题
-- 滑动窗口调度：内存占用仅与 `maxConcurrent` 相关，与总请求数无关
-- 支持 `onChunk` / `onHeader` 流式回调
-- 哈希表 O(1) 查找请求上下文，避免线性扫描
-- 执行后自动清空队列，可重复使用
-- 支持用户数据传递（`add()` 第二参数 → 回调第四参数 / `getUserData()`）
-
-#### 示例
+仅 CLI 模式可用。创建独立工作线程池处理请求。
 
 ```php
-$curl = new XHCurl();
-$multi = (new XHMulti($curl))
-    ->setMaxConcurrent(50); // 链式设置最大并发数
-
-// 添加请求（可带 userData）
-for ($i = 0; $i < 10; $i++) {
-    $multi->add(new XHRequest("https://httpbin.org/get?id=$i"), ['index' => $i]);
-}
-
-echo "待执行请求数: " . $multi->count() . "\n";
-echo "最大并发数: " . $multi->getMaxConcurrent() . "\n";
-
-// 方式 1：无回调，返回全量结果数组
-$responses = $multi->execute();
-
-foreach ($responses as $i => $response) {
-    echo "[$i] 状态码: " . $response->getStatusCode() . "\n";
-}
-
-// 方式 2：回调模式（推荐，内存恒定）
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    $index = $userData['index'] ?? '?';
-    echo "[$completed/$total] index=$index: " . $response->getStatusCode() . "\n";
-});
+$pool = new XHThreadPool(8);  // 8 个工作线程
+$pool->add($request1);
+$pool->add($request2);
+$results = $pool->execute();
 ```
 
 ---
 
-### XHThreadPool - CLI 线程池
+## curl 兼容性对照
 
-基于 POSIX 线程的并发执行器，**仅 CLI 模式可用**。工作线程只执行 C 层面的 curl 操作，不调用 PHP 函数，确保线程安全。
-
-#### 方法
-
-| 方法 | 说明 |
-|------|------|
-| `__construct(XHCurl $curl, int $threads = 4)` | 构造函数，指定工作线程数 |
-| `add(XHRequest $request, mixed $userData = null): void` | 添加请求到待执行队列（可选传递用户数据，延迟创建上下文，节省内存） |
-| `execute(): array` | 多线程并发执行所有请求，返回 XHResponse 数组 |
-
-#### 限制
-
-- **仅 CLI 模式**：FPM 下构造即抛出 `XHCurlException`
-- **不支持流式回调**：`onChunk` / `onHeader` 在线程池中无效
-
-#### 示例
-
-```php
-<?php
-if (php_sapi_name() !== 'cli') {
-    exit("XHThreadPool 仅 CLI 模式可用\n");
-}
-
-$curl = new XHCurl();
-$pool = new XHThreadPool($curl, 8); // 8 个工作线程
-
-// 添加请求（可带 userData，通过 XHResponse::getUserData() 获取）
-for ($i = 0; $i < 100; $i++) {
-    $pool->add(new XHRequest("https://httpbin.org/get?id=$i"), ['index' => $i]);
-}
-
-$responses = $pool->execute();
-
-foreach ($responses as $response) {
-    $userData = $response->getUserData(); // 获取 add() 时传递的用户数据
-    $index = $userData['index'] ?? '?';
-    if ($response->getStatusCode() === 200) {
-        echo "[$index] 请求成功\n";
-    } else {
-        echo "[$index] 请求失败: " . $response->getError() . "\n";
-    }
-}
-```
+| PHP curl 选项 | XHCurl 方法 | 状态 |
+|---------------|-------------|------|
+| CURLOPT_URL | `createRequest($url)` | ✅ |
+| CURLOPT_HTTPGET / POST / PUT / DELETE | `get()` / `post()` / `put()` / `delete()` | ✅ |
+| CURLOPT_CUSTOMREQUEST | `customMethod()` | ✅ |
+| CURLOPT_HTTPHEADER | `header()` | ✅ |
+| CURLOPT_POSTFIELDS (JSON) | `json()` | ✅ |
+| CURLOPT_POSTFIELDS (form) | `form()` | ✅ |
+| CURLOPT_HTTPPOST (multipart) | `multipart()` | ✅ |
+| CURLOPT_COOKIE | `cookies()` | ✅ |
+| CURLOPT_COOKIEFILE | `cookieFile()` | ✅ |
+| CURLOPT_COOKIEJAR | `cookieJar()` | ✅ |
+| CURLOPT_USERPWD | `basicAuth()` | ✅ |
+| CURLOPT_XOAUTH2_BEARER | `bearerToken()` | ✅ |
+| CURLOPT_CAINFO | `caInfo()` | ✅ |
+| CURLOPT_SSLCERT | `sslCert()` | ✅ |
+| CURLOPT_SSLKEY | `sslKey()` | ✅ |
+| CURLOPT_SSLKEYPASSWD | `sslKeyPassword()` | ✅ |
+| CURLOPT_SSL_VERIFYPEER | `verifySsl()` | ✅ |
+| CURLOPT_ENCODING | `encoding()` | ✅ |
+| CURLOPT_RANGE | `range()` | ✅ |
+| CURLOPT_TIMEOUT | `timeout()` | ✅ |
+| CURLOPT_CONNECTTIMEOUT | `connectTimeout()` | ✅ |
+| CURLOPT_USERAGENT | `userAgent()` | ✅ |
+| CURLOPT_PROXY | `proxy()` | ✅ |
+| CURLOPT_FOLLOWLOCATION | `followRedirects()` | ✅ |
+| CURLOPT_MAXREDIRS | `maxRedirects()` | ✅ |
 
 ---
 
-## 链式调用
+## FPM 与 CLI 模式
 
-所有 setter 方法均返回 `$this`，支持链式调用，让代码更简洁优雅。
+XHCurl 根据 PHP SAPI 自动选择运行时：
 
-### XHCurl 链式调用
-
-```php
-// 传统写法
-$curl = new XHCurl();
-$curl->setTimeout(30);
-$curl->setConnectTimeout(10);
-$curl->setVerifySsl(false);
-$curl->setUserAgent('MyApp/1.0');
-$curl->setGlobalHeader('Authorization', 'Bearer token');
-$curl->setGlobalCookie('session', 'abc123');
-$curl->setRetry(3, 200);
-
-// 链式调用写法（推荐）
-$curl = (new XHCurl())
-    ->setTimeout(30)
-    ->setConnectTimeout(10)
-    ->setVerifySsl(false)
-    ->setUserAgent('MyApp/1.0')
-    ->setGlobalHeader('Authorization', 'Bearer token')
-    ->setGlobalCookie('session', 'abc123')
-    ->setRetry(3, 200);
-```
-
-### XHRequest 链式调用
+| 模式 | 运行时类型 | 并发模型 | 可用功能 |
+|------|-----------|----------|---------|
+| **CLI** | 多线程 tokio 运行时 | M:N 并行（工作线程 = CPU 核心数） | 全部功能，含 `XHThreadPool` |
+| **FPM** | 单线程 tokio 运行时 | 协作式并发（类似 Node.js） | 除 `XHThreadPool` 外全部功能 |
 
 ```php
-// 传统写法
-$request = new XHRequest('https://api.example.com/users');
-$request->setMethod('POST');
-$request->setHeader('X-Custom', 'value');
-$request->setJsonBody(['name' => '张三']);
-$request->setTimeout(10);
-$request->setFollowRedirects(true, 3);
-
-// 链式调用写法（推荐）
-$request = (new XHRequest('https://api.example.com/users'))
-    ->setMethod('POST')
-    ->setHeader('X-Custom', 'value')
-    ->setJsonBody(['name' => '张三'])
-    ->setTimeout(10)
-    ->setFollowRedirects(true, 3);
-```
-
-### XHMulti 链式调用
-
-```php
-// 链式设置最大并发数
-$multi = (new XHMulti($curl))
-    ->setMaxConcurrent(50);
-```
-
-### 完整链式调用示例
-
-```php
-// 一步到位：创建管理器 + 请求 + 执行
-$response = (new XHCurl())
-    ->setTimeout(10)
-    ->setVerifySsl(false)
-    ->setRetry(2, 100)
-    ->exec(
-        (new XHRequest('https://httpbin.org/post'))
-            ->setMethod('POST')
-            ->setJsonBody(['key' => 'value'])
-    );
-
-echo $response->getStatusCode(); // 200
-```
-
----
-
-## 使用场景
-
-### 场景 1：FPM Web 服务（推荐 XHMulti）
-
-```php
-<?php
-// 在 FPM Web 服务中处理多个 API 调用
-$curl = (new XHCurl())
-    ->setGlobalHeader('Authorization', 'Bearer ' . $apiToken)
-    ->setTimeout(5); // FPM 下建议短超时
-
-$multi = new XHMulti($curl);
-
-// 并发获取用户信息、订单、消息（带 userData 标识）
-$multi->add(new XHRequest("https://api.example.com/user/$userId"), ['type' => 'user']);
-$multi->add(new XHRequest("https://api.example.com/orders/$userId"), ['type' => 'orders']);
-$multi->add(new XHRequest("https://api.example.com/messages/$userId"), ['type' => 'messages']);
-
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    $type = $userData['type'];
-    $data = $response->toJsonArray();
-    // 按 type 分别处理
-});
-```
-
-### 场景 2：CLI 批量任务（推荐 XHThreadPool）
-
-```php
-<?php
-// CLI 脚本批量爬取数据
-$curl = (new XHCurl())
-    ->setProxy('http://proxy:8080')
-    ->setMaxResponseSize(5 * 1024 * 1024); // 限制 5MB
-
-$pool = new XHThreadPool($curl, 16); // 16 线程
-
-$urls = file('urls.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-foreach ($urls as $url) {
-    $pool->add(new XHRequest(trim($url)));
-}
-
-$responses = $pool->execute();
-
-foreach ($responses as $i => $response) {
-    if ($response->getStatusCode() === 200) {
-        // 分段读取，避免内存溢出
-        $content = '';
-        $offset = 0;
-        while ($offset < $response->getBodyLength()) {
-            $content .= $response->getBodyChunk($offset, 8192);
-            $offset += 8192;
-        }
-        file_put_contents("output/$i.html", $content);
-    }
+if (XHCurl::isCli()) {
+    // CLI 模式：可用线程池
+    $pool = new XHThreadPool(8);
+} else {
+    // FPM 模式：用 XHMulti 或协程
+    $multi = new XHMulti();
 }
 ```
 
-### 场景 3：大文件下载（流式回调）
-
-```php
-<?php
-$curl = (new XHCurl())
-    ->setMaxResponseSize(1024 * 1024 * 1024); // 允许 1GB
-
-$request = new XHRequest('https://example.com/huge-file.bin');
-
-$fp = fopen('huge-file.bin', 'wb');
-$request->onChunk(function($chunk) use ($fp) {
-    fwrite($fp, $chunk); // 直接写入文件，内存占用恒定
-});
-
-$response = $curl->exec($request);
-fclose($fp);
-
-echo "下载完成: " . $response->getBodyLength() . " 字节\n";
-```
-
----
-
-## 内存优化设计
-
-XHCurl 针对大数据量场景做了以下内存优化：
-
-### 1. 响应体存储在 C 侧缓冲区
-
-响应体数据存储在 C 语言的 `malloc` 缓冲区中，**不计入 PHP `memory_limit`**，避免因 PHP 内存限制导致请求失败。
-
-### 2. 分段读取（懒加载）
-
-`XHResponse::getBodyChunk($offset, $length)` 允许按需分段读取响应体，而不是一次性返回整个字符串。这对于大响应体（如文件下载）至关重要：
-
-```php
-// ❌ 错误：一次性读取（可能内存溢出）
-$body = '';
-for ($i = 0; $i < $response->getBodyLength(); $i += 1024) {
-    $body .= $response->getBodyChunk($i, 1024); // 字符串拼接低效
-}
-
-// ✅ 正确：流式处理
-$offset = 0;
-while ($offset < $response->getBodyLength()) {
-    $chunk = $response->getBodyChunk($offset, 8192);
-    processChunk($chunk); // 立即处理，不累积
-    $offset += strlen($chunk);
-}
-```
-
-### 3. 最大响应体限制
-
-`XHCurl::setMaxResponseSize($bytes)` 设置硬限制，超过此大小的响应会被截断并返回错误，防止恶意服务器导致内存耗尽。
-
-### 4. 流式回调
-
-`onChunk` 回调在数据到达时实时触发，可以立即写入文件或数据库，内存占用恒定，与响应体大小无关。
-
-### 5. 滑动窗口并发控制
-
-`XHMulti` 采用滑动窗口调度算法，内存占用仅与 `maxConcurrent`（并发窗口大小）相关，与总请求数无关：
-
-- `add()` 仅存储请求引用（zval），不创建 curl 上下文
-- `execute()` 按窗口大小分批创建上下文，一个完成立即补充下一个
-- 回调模式下，完成的请求结果立即释放，内存恒定
-- 哈希表 O(1) 查找请求上下文，避免线性扫描
-
-```
-内存占用 ≈ maxConcurrent × 单请求上下文大小
-例如：maxConcurrent=200，单上下文约 50KB → 总内存约 10MB（无论总请求数是 100 还是 100 万）
-```
-
-### 6. 延迟上下文创建
-
-`XHThreadPool` 的 `add()` 仅将请求引用存入待执行队列，`execute()` 时按工作线程数分配创建上下文，避免一次性为所有请求分配资源。
-
-### 7. 缓冲区扩容策略
-
-C 侧缓冲区采用指数增长策略（每次翻倍），减少频繁 `realloc` 调用。
-
-### 8. HTTP/2 多路复用
-
-启用 HTTP/2 后，对同一主机的多个请求复用单个 TCP 连接，减少连接建立开销和内存占用。`XHMulti` 批量请求场景下性能提升尤为明显。
-
-### 9. JSON 函数指针缓存
-
-在 `MINIT` 阶段一次性查找 `json_encode`/`json_decode` 函数指针并缓存，后续调用直接使用 `zend_call_known_function`，避免每次调用都做函数表哈希查找。
-
----
-
-## FPM 与 CLI 模式注意事项
-
-### FPM 模式
-
-| 项目 | 说明 |
-|------|------|
-| **可用功能** | `XHCurl`、`XHRequest`、`XHResponse`、`XHMulti` |
-| **不可用** | `XHThreadPool`（会抛出 `XHCurlException`） |
-| **超时建议** | 设置较短超时（5-10 秒），避免占用 worker 进程 |
-| **内存** | 响应体不计入 `memory_limit`，但仍需通过 `setMaxResponseSize` 限制 |
-| **对象生命周期** | 每个请求独立，请求结束后 PHP GC 自动回收，无跨请求泄漏 |
-| **并发** | 使用 `XHMulti` 基于 `curl_multi` 单进程异步 I/O |
-
-### CLI 模式
-
-| 项目 | 说明 |
-|------|------|
-| **可用功能** | 所有功能，包括 `XHThreadPool` |
-| **多线程** | `XHThreadPool` 真多线程，工作线程不调用 PHP 函数（线程安全） |
-| **流式回调** | `onChunk`/`onHeader` 仅在 `exec` 和 `XHMulti` 中可用，`XHThreadPool` 中无效 |
-| **高并发** | `XHMulti` 支持滑动窗口 + 回调模式，百万级请求内存恒定 |
-| **长时间运行** | 适合批量任务、爬虫、数据同步等场景 |
-| **资源释放** | 脚本结束时自动释放所有资源 |
-
-### 内存泄漏防护
-
-- 所有 C 侧资源（`malloc`、`curl_easy`、`curl_multi`、`curl_share`）都有对应的释放函数
-- PHP 对象析构时（`free_obj`）自动释放关联的 C 资源
-- `RSHUTDOWN` 钩子提供兜底清理
-- 缓冲区所有权转移设计避免重复释放
+> **安全说明**：FPM 多进程模式下，每个 worker 进程持有独立的 tokio 运行时（进程级单例），请求间复用。tokio 工作线程绝不触碰 PHP API/zval，结果通过线程安全 channel 回传。
 
 ---
 
 ## 故障排查
 
-### 常见问题
+### 扩展加载失败
 
-**Q: 编译报错 `curl/curl.h: No such file or directory`**
-
-A: 未安装 libcurl 开发库。安装方式：
 ```bash
-# Ubuntu/Debian
-sudo apt-get install libcurl4-openssl-dev
+# 检查 PHP 错误日志
+php -d display_errors=1 -d extension=xhcurl -r "echo XHCurl::version();"
 
-# CentOS/RHEL
-sudo yum install libcurl-devel
-
-# macOS
-brew install curl
+# 常见原因：
+# 1. PHP 版本低于 8.1（需要 8.1+，Fiber 协程依赖）
+# 2. 扩展文件与 PHP 版本/线程安全模式不匹配
+# 3. 缺少系统依赖（Linux: libssl, macOS: 无额外依赖）
 ```
 
-**Q: FPM 下使用 `XHThreadPool` 报错**
+### 协程模式报错 "await 必须在 run() 内调用"
 
-A: `XHThreadPool` 仅 CLI 模式可用。在 FPM 下请使用 `XHMulti`。
+`await()` 和 `gather()` 必须在 `XHCurl::run()` 的回调内调用：
 
-**Q: `getBodyChunk` 返回空字符串**
-
-A: 检查：
-1. `offset` 是否超出 `getBodyLength()` 范围
-2. `length` 是否为 0 或负数
-3. 响应是否成功（`getStatusCode()` 是否为 200）
-
-**Q: 大响应体导致内存溢出**
-
-A:
-1. 使用 `setMaxResponseSize()` 限制最大响应体大小
-2. 使用 `onChunk` 流式回调，实时处理数据而非累积
-3. 使用 `getBodyChunk` 分段读取，而非一次性获取
-
-**Q: `toJsonArray()` 返回 null**
-
-A:
-1. 检查 `isJson()` 是否为 true
-2. 检查响应体是否为有效的 JSON
-3. JSON 解析失败时返回 null（不抛出异常）
-
-**Q: 多线程模式下流式回调不触发**
-
-A: `XHThreadPool` 模式下不支持流式回调（线程安全限制）。如需流式处理，请使用 `XHMulti` 或 `exec`。
-
-**Q: 如何判断请求是网络错误还是 HTTP 错误？**
-
-A: 使用 `getCurlCode()` 区分：
 ```php
-if ($response->getCurlCode() !== 0) {
-    // curl 层面出错（网络错误、超时、DNS 失败等）
-    echo "curl 错误: " . $response->getError() . " (code=" . $response->getCurlCode() . ")\n";
-} elseif ($response->getStatusCode() >= 400) {
-    // HTTP 层面出错（4xx 客户端错误、5xx 服务器错误）
-    echo "HTTP 错误: " . $response->getStatusCode() . "\n";
-}
-```
+// ❌ 错误：在 run() 外调用
+XHCurl::await($request);
 
-**Q: Windows 加载 DLL 报错 "找不到指定的模块"**
-
-A: 此错误通常由以下原因导致：
-
-1. **PHP 版本不匹配**：DLL 文件名中的 PHP 版本必须与实际 PHP 版本一致。使用 `php -v` 确认版本。
-   ```
-   # 正确：PHP 8.2 NTS → xhcurl-windows-php8.2-nts.dll
-   # 错误：PHP 8.2 NTS → xhcurl-windows-php8.3-nts.dll（版本不匹配）
-   ```
-
-2. **线程安全模式不匹配**：NTS（Non Thread Safe）PHP 只能加载 NTS 编译的 DLL。使用 `php -v` 查看：
-   ```
-   # NTS 版本（显示 NTS）：
-   PHP 8.2.0 (cli) (NTS Visual C++ 2019 x64)
-   # TS 版本（显示 ZTS）：
-   PHP 8.2.0 (cli) (ZTS Visual C++ 2019 x64)
-   ```
-
-3. **php.ini 中 extension 名称错误**：`extension=` 后的名称必须与 ext 目录中的文件名一致（不含 .dll 后缀）
-   ```ini
-   ; 如果文件名是 xhcurl-windows-php8.2-nts.dll：
-   extension=xhcurl-windows-php8.2-nts
-
-   ; 如果文件名是 php_xhcurl.dll：
-   extension=php_xhcurl
-   ```
-
-4. **缺少依赖 DLL**（已修复）：v1.0.0 之前的版本可能依赖 OpenSSL DLL。v1.0.0+ 使用 Schannel 编译，无外部依赖。
-
-5. **排查步骤**：
-   ```powershell
-   # 1. 确认 PHP 版本和线程安全模式
-   php -v
-
-   # 2. 确认 DLL 文件存在于扩展目录
-   dir D:\phpEnv\php\php-8.2\ext\xhcurl*
-
-   # 3. 检查 DLL 依赖（需要 Visual Studio 开发者命令提示符）
-   dumpbin /dependents xhcurl-windows-php8.2-nts.dll
-   # 正常应只看到系统 DLL（KERNEL32.dll, WS2_32.dll 等）和 php8.dll
-   # 如果看到 libssl-3-x64.dll 或 libcrypto-3-x64.dll，说明需要安装 OpenSSL
-   ```
-
-**Q: 百万级请求内存溢出怎么办？**
-
-A: 使用 `XHMulti` 的回调模式 + `setMaxConcurrent()` 控制并发窗口：
-```php
-$multi = (new XHMulti($curl))
-    ->setMaxConcurrent(200); // 同时最多 200 个活跃请求
-
-// 回调模式：每完成一个请求立即处理 + 释放内存
-$multi->execute(function(XHResponse $response, int $completed, int $total, $userData): void {
-    // 处理结果后内存立即释放
+// ✅ 正确：在 run() 回调内调用
+XHCurl::run(function() {
+    XHCurl::await($request);
 });
 ```
-内存占用仅与 `maxConcurrent` 相关，与总请求数无关。
+
+### Windows DLL 加载失败
+
+- 确认 PHP 版本和线程安全模式（NTS/ZTS）与 DLL 匹配
+- 使用 `php -v` 查看线程安全信息
+- NTS = Non Thread Safe，ZTS = Zend Thread Safe
 
 ---
 
@@ -1051,69 +554,59 @@ $multi->execute(function(XHResponse $response, int $completed, int $total, $user
 
 ```
 xhcurl/
-├── config.m4              # Unix 构建配置
-├── config.w32             # Windows 构建配置
-├── php_xhcurl.h           # 公共头文件
-├── xhcurl_priv.h          # 私有头文件（数据结构+内部声明）
-├── xhcurl.c               # 模块入口 + XHCurl 类
-├── xhcurl_buffer.c        # 缓冲区管理 + 头部/Cookie/回调/上下文实现
-├── xhcurl_response.c      # XHResponse 懒加载响应类
-├── xhcurl_request.c       # XHRequest 请求构建器类
-├── xhcurl_multi.c         # XHMulti 批量异步执行器类
-├── xhcurl_threadpool.c    # XHThreadPool CLI线程池类
-├── tests/                 # 测试套件
-│   ├── 001_basic.phpt
-│   ├── 002_sync.phpt
-│   ├── 003_multi.phpt
-│   ├── 004_streaming.phpt
-│   └── 005_lazy_loading.phpt
-└── .github/workflows/
-    └── build.yml          # CI/CD 流水线
+├── rust/                    # Rust 源码
+│   ├── src/
+│   │   ├── lib.rs          # 库入口
+│   │   ├── php_ext.rs      # PHP 扩展绑定（ext-php-rs）
+│   │   ├── fiber.rs        # PHP Fiber 协程桥接
+│   │   ├── request.rs      # 请求构建器
+│   │   ├── response.rs     # 响应对象
+│   │   ├── multi.rs        # 批量异步执行器
+│   │   ├── threadpool.rs   # 线程池
+│   │   ├── curl.rs         # 客户端管理器
+│   │   ├── header.rs       # 请求头管理
+│   │   ├── cookie.rs       # Cookie 管理
+│   │   ├── buffer.rs       # 缓冲区
+│   │   └── error.rs        # 错误类型
+│   ├── Cargo.toml
+│   └── tests/              # PHP 测试脚本
+├── .github/workflows/
+│   └── build-rust.yml      # CI/CD 流水线
+└── README.md
 ```
 
 ### 本地开发
 
 ```bash
-# 克隆仓库
-git clone https://github.com/hgc357341051/xhcurl.git
-cd xhcurl
+cd rust
 
-# 编译（开发模式，带调试符号）
-phpize
-./configure --enable-xhcurl CFLAGS="-g -O0 -Wall -Wextra"
-make -j$(nproc)
+# 编译（debug 模式）
+cargo build --features php
 
-# 运行测试
-make test NO_INTERACTION=1
+# 运行单元测试
+cargo test --lib
 
-# 手动测试
-php -d extension=modules/xhcurl.so tests/manual_test.php
+# 代码格式检查
+cargo fmt -- --check
+
+# 静态分析
+cargo clippy -- -D warnings
+
+# 加载扩展测试
+php -d extension=target/debug/libxhcurl.so -r "echo XHCurl::version();"
 ```
 
-### CI/CD
+### CI/CD 流水线
 
-项目使用 GitHub Actions 自动编译多平台二进制：
+GitHub Actions（`build-rust.yml`）在 push 到 main 或创建 tag 时自动触发，编译以下矩阵：
 
-- **触发条件**：push 到 `main` 分支、创建 `v*` 标签、Pull Request
-- **支持平台**：Linux (Ubuntu 22.04)、macOS (13/14)、Windows (Server 2022)
-- **支持 PHP 版本**：8.0, 8.1, 8.2, 8.3, 8.4
-- **发布**：创建 `v1.0.0` 等标签时自动发布 GitHub Release
-
-### 提交代码
-
-```bash
-# 创建功能分支
-git checkout -b feature/your-feature
-
-# 提交（遵循 Conventional Commits）
-git commit -m "feat: add new feature"
-
-# 推送并发起 PR
-git push origin feature/your-feature
-```
+- **Linux**：PHP 8.1~8.4（Ubuntu 22.04）
+- **macOS**：PHP 8.1~8.3（macOS 14）
+- **Windows**：PHP 8.1~8.4 NTS/ZTS（Windows 2022）
+- **Lint & Test**：cargo fmt + clippy + 单元测试
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT

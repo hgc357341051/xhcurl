@@ -3,24 +3,23 @@
 # | 自动化编译：Linux / macOS / Windows 多平台 + 多 PHP 版本              |
 # | 使用 cargo 构建 Rust 代码，ext-php-rs 生成 PHP 扩展                  |
 # | 编译产物：各平台 .so/.dylib/.dll 扩展文件                             |
+# |                                                                      |
+# | PHP 版本要求：8.1+                                                   |
+# | 原因：XHCurl 协程模式（await/gather）依赖 PHP 8.1 引入的 Fiber 类    |
 # +----------------------------------------------------------------------+
 
 name: Build XHCurl Rust Extension
 
 # 触发条件：
 #   1. push 到 main 分支
-#   2. 创建 v* 或 rust-v* tag 时触发（支持 v1.0.0 和 rust-v1.0.0 两种格式）
+#   2. 创建 v* tag 时触发
 #   3. PR 到 main 分支（仅 rust/ 目录变更时）
 on:
   push:
     branches: [ main ]
-    # 支持 v* 和 rust-v* 两种 tag 格式
-    # v1.0.0 - 同时触发 C 和 Rust 版本编译
-    # rust-v1.0.0 - 仅触发 Rust 版本编译
-    tags: [ 'v*', 'rust-v*' ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
-    # 仅在 rust/ 目录变更时触发
     paths:
       - 'rust/**'
       - '.github/workflows/build-rust.yml'
@@ -35,7 +34,7 @@ env:
 jobs:
   # =====================================================================
   # Job 1: Linux 平台编译（Ubuntu 22.04）
-  # 支持 PHP 8.0 ~ 8.4
+  # 支持 PHP 8.1 ~ 8.4（Fiber 协程需要 PHP 8.1+）
   # 使用 cargo + ext-php-rs 编译为 .so 扩展
   # =====================================================================
   build-linux:
@@ -44,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false  # 某个版本失败不影响其他版本继续编译
       matrix:
-        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        php-version: ['8.1', '8.2', '8.3', '8.4']
         ubuntu: ['22.04']
 
     steps:
@@ -214,7 +213,7 @@ jobs:
 
   # =====================================================================
   # Job 2: macOS 平台编译（macOS 14 / Apple Silicon）
-  # 支持 PHP 8.0 ~ 8.3
+  # 支持 PHP 8.1 ~ 8.3（Fiber 协程需要 PHP 8.1+）
   # ext-php-rs 在 macOS 上编译为 .dylib 扩展
   # =====================================================================
   build-macos:
@@ -223,7 +222,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.0', '8.1', '8.2', '8.3']
+        php-version: ['8.1', '8.2', '8.3']
 
     steps:
       # -----------------------------------------------------------------
@@ -326,6 +325,7 @@ jobs:
   # =====================================================================
   # Job 3: Windows 平台编译
   # 使用 cargo + ext-php-rs 编译为 .dll 扩展
+  # 支持 PHP 8.1 ~ 8.4（Fiber 协程需要 PHP 8.1+）
   #
   # Windows 编译注意事项：
   #   1. 需要安装 Rust MSVC 工具链
@@ -339,7 +339,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.0', '8.1', '8.2', '8.3', '8.4']
+        php-version: ['8.1', '8.2', '8.3', '8.4']
         # NTS 和 ZTS 分别编译
         ts: ['nts', 'zts']
 
