@@ -1,3 +1,8 @@
+// ext-php-rs 在 Windows 上需要 abi_vectorcall 调用约定来生成 PHP 可调用的导出函数。
+// 该调用约定是 nightly-only 特性，因此 Windows 构建必须使用 Rust nightly。
+// 参考：https://docs.rs/ext-php-rs（官方示例同样在 crate 根添加此属性）
+#![cfg_attr(all(windows, feature = "php"), feature(abi_vectorcall))]
+
 // +----------------------------------------------------------------------+
 // | XHCurl 扩展 - Rust 核心引擎入口                                       |
 // |                                                                        |

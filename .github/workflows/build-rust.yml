@@ -28,8 +28,12 @@ on:
 env:
   # 扩展名称
   EXTENSION_NAME: xhcurl
-  # Rust 工具链版本
+  # Rust 工具链版本（Linux / macOS 使用 stable）
   RUST_TOOLCHAIN: stable
+  # Windows 专用 Rust 工具链
+  # ext-php-rs 在 Windows 上需要 abi_vectorcall 调用约定（nightly-only），
+  # 见 rust/src/lib.rs 顶部的 #![cfg_attr(windows, feature(abi_vectorcall))]
+  RUST_TOOLCHAIN_WINDOWS: nightly
 
 jobs:
   # =====================================================================
@@ -355,11 +359,15 @@ jobs:
   # 使用 cargo + ext-php-rs 编译为 .dll 扩展
   # 支持 PHP 8.1 ~ 8.4（Fiber 协程需要 PHP 8.1+）
   #
-  # Windows 编译注意事项：
-  #   1. 需要安装 Rust MSVC 工具链
-  #   2. 需要安装 PHP 开发头文件（php-devel）
-  #   3. libclang 需要 LLVM 安装
-  #   4. ext-php-rs 的 bindgen 在 Windows 上需要特殊配置
+  # Windows 编译注意事项（ext-php-rs 官方要求）：
+  #   1. 必须使用 Rust nightly —— abi_vectorcall 调用约定是 nightly-only
+  #      （见 rust/src/lib.rs 顶部 #![cfg_attr(windows, feature(abi_vectorcall))]）
+  #   2. 必须使用 rust-lld 链接器 —— MSVC link.exe 会导致 build script 崩溃
+  #      （STATUS_STACK_BUFFER_OVERRUN, exit code 0xc0000409）
+  #      配置在 rust/.cargo/config.toml 中
+  #   3. 需要 MSVC cl.exe（cc crate 编译 wrapper.c 需要）—— 由 ilammy/msvc-dev-cmd 提供
+  #   4. 需要 libclang（bindgen 需要）—— 由 choco llvm 提供
+  #   5. 需要 PHP 可执行文件（build script 调用 php -i）—— 由 shivammathur/setup-php 提供
   # =====================================================================
   build-windows:
     name: "Windows Rust (PHP ${{ matrix.php-version }}, ${{ matrix.ts }})"
@@ -379,13 +387,15 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------------------------------------
-      # 步骤 2: 安装 Rust 工具链（MSVC 目标）
+      # 步骤 2: 安装 Rust nightly 工具链（MSVC 目标）
+      # ext-php-rs 在 Windows 上需要 nightly（abi_vectorcall 调用约定）
       # -----------------------------------------------------------------
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN_WINDOWS }}
           targets: x86_64-pc-windows-msvc
+          components: rust-src
 
       # -----------------------------------------------------------------
       # 步骤 3: 安装 LLVM（bindgen 依赖）
@@ -459,6 +469,7 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 6: 缓存 cargo 编译产物
+      # key 包含 nightly 标识，从 stable 切换到 nightly 时自动失效旧缓存
       # -----------------------------------------------------------------
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -467,14 +478,17 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: windows-rust-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: windows-rust-nightly-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            windows-rust-php${{ matrix.php-version }}-${{ matrix.ts }}-
+            windows-rust-nightly-php${{ matrix.php-version }}-${{ matrix.ts }}-
 
       # -----------------------------------------------------------------
       # 步骤 7: 编译 Rust PHP 扩展
-      # Windows 上 ext-php-rs 需要 PHP_INCLUDE_PATH 环境变量
-      # 同时需要确保 php.exe 在 PATH 中（build script 调用 php -i）
+      # Windows 上 ext-php-rs 需要：
+      #   - PHP_INCLUDE_PATH 环境变量（PHP 开发头文件路径）
+      #   - php.exe 在 PATH 中（build script 调用 php -i）
+      #   - rust-lld 作为链接器（配置在 .cargo/config.toml，避免 link.exe 崩溃）
+      #   - cl.exe 在 PATH 中（cc crate 编译 wrapper.c 需要，由 msvc-dev-cmd 提供）
       # -----------------------------------------------------------------
       - name: Build Rust PHP extension
         working-directory: rust
@@ -500,6 +514,41 @@ jobs:
           Write-Host "Rust 版本: $(rustc --version)"
           Write-Host "LIBCLANG_PATH: $env:LIBCLANG_PATH"
           Write-Host "PHP_INCLUDE_PATH: $env:PHP_INCLUDE_PATH"
+
+          # 验证 nightly 工具链（abi_vectorcall 需要 nightly）
+          $rustcChannel = (rustc --version)
+          if ($rustcChannel -notmatch 'nightly') {
+            Write-Host "::error::Rust 工具链不是 nightly，无法使用 abi_vectorcall 特性"
+            Write-Host "当前版本: $rustcChannel"
+            exit 1
+          }
+
+          # 验证 rust-lld 链接器可用（.cargo/config.toml 配置使用它）
+          $lldPath = (Get-Command rust-lld -ErrorAction SilentlyContinue).Source
+          if (-not $lldPath) {
+            # nightly MSVC 工具链自带 rust-lld，可能在 rustlib 目录
+            $rustlib = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin"
+            $lldPath = Join-Path $rustlib "rust-lld.exe"
+            if (-not (Test-Path $lldPath)) {
+              Write-Host "::error::rust-lld 未找到，ext-php-rs 需要 rust-lld 链接器"
+              exit 1
+            }
+          }
+          Write-Host "rust-lld 路径: $lldPath"
+
+          # 验证 cl.exe（cc crate 编译 wrapper.c 需要 MSVC 编译器）
+          $clPath = (Get-Command cl -ErrorAction SilentlyContinue).Source
+          if (-not $clPath) {
+            Write-Host "::warning::cl.exe 未在 PATH 中，cc crate 可能无法编译 wrapper.c"
+          } else {
+            Write-Host "cl.exe 路径: $clPath"
+          }
+
+          # 清除缓存的 ext-php-rs build 输出（避免 stable 缓存残留）
+          if (Test-Path "target\release\build\ext-php-rs-*") {
+            Remove-Item -Recurse -Force "target\release\build\ext-php-rs-*" -ErrorAction SilentlyContinue
+            Write-Host "已清除旧的 ext-php-rs build 缓存"
+          }
 
           # 编译
           cargo build --release --features php

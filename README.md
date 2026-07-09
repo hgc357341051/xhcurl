@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml/badge.svg)](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml)
 [![PHP Version](https://img.shields.io/badge/PHP-8.1%20--%208.4-blue.svg)](https://php.net)
-[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-stable%20%7C%20nightly%20(Win)-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-green.svg)](#平台支持)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
@@ -63,7 +63,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 
 **前置依赖：**
 
-- Rust 工具链（stable）
+- Rust 工具链（Linux/macOS 用 stable；Windows 用 nightly —— ext-php-rs 的 `abi_vectorcall` 调用约定是 nightly-only）
 - PHP 8.1+ 开发头文件（`php-config` / `php-devel`）
 - libclang（ext-php-rs bindgen 需要）
 - OpenSSL 开发库（Linux）

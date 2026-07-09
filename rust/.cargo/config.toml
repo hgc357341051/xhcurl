@@ -1,0 +1,15 @@
+# +----------------------------------------------------------------------+
+# | XHCurl 扩展 - Cargo 构建配置                                         |
+# +----------------------------------------------------------------------+
+#
+# Windows 编译配置：
+#   ext-php-rs 在 Windows 上推荐使用 rust-lld 链接器。
+#   MSVC 默认的 link.exe 会导致 ext-php-rs build script 崩溃
+#   （exit code 0xc0000409, STATUS_STACK_BUFFER_OVERRUN）。
+#   rust-lld 随 Rust 工具链自带，无需额外安装。
+#
+# 注意：Windows 构建需要 Rust nightly（abi_vectorcall 调用约定是 nightly-only）
+#       见 rust/src/lib.rs 顶部的 #![cfg_attr(windows, feature(abi_vectorcall))]
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
