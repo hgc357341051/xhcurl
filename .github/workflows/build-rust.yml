@@ -88,11 +88,22 @@ jobs:
           # 设置 LIBCLANG_PATH 环境变量，让 bindgen 使用 LLVM 18 的 libclang
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
 
+          # 确保 libclang.so 符号链接存在（bindgen 需要此文件）
+          # libclang-18-dev 可能只安装 libclang.so.18，需要手动创建符号链接
+          if [ ! -f "/usr/lib/llvm-18/lib/libclang.so" ]; then
+            sudo ln -sf /usr/lib/llvm-18/lib/libclang.so.18 /usr/lib/llvm-18/lib/libclang.so
+            echo "已创建 libclang.so 符号链接"
+          fi
+
           # 验证 LLVM 18 安装成功
           echo "=== 验证 LLVM 版本 ==="
           clang-18 --version
-          ls -la /usr/lib/llvm-18/lib/libclang.so 2>/dev/null || echo "libclang-18.so not found"
-          ls -la /usr/lib/llvm-18/lib/libclang-18.so 2>/dev/null || echo "libclang-18.so.18 not found"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib"
+          ls -la /usr/lib/llvm-18/lib/libclang.so || { echo "::error::libclang.so 不存在"; exit 1; }
+          ls -la /usr/lib/llvm-18/lib/libclang.so.18 || true
+          # 确认不会误用 LLVM 14
+          echo "=== 检查系统中的 libclang ==="
+          find /usr/lib -name "libclang*" -type f 2>/dev/null || true
 
       # -----------------------------------------------------------------
       # 步骤 2.5: 清除缓存中的旧 bindgen 产物
@@ -136,10 +147,10 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          # key 中包含 llvm18 标识，LLVM 版本变更时自动失效旧缓存
-          key: linux-rust-llvm18-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          # key 中包含 llvm18v2 标识，LLVM 版本变更时自动失效旧缓存
+          key: linux-rust-llvm18v2-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            linux-rust-llvm18-php${{ matrix.php-version }}-
+            linux-rust-llvm18v2-php${{ matrix.php-version }}-
 
       # -----------------------------------------------------------------
       # 步骤 5.5: 清除缓存中可能残留的旧 bindgen 产物
@@ -156,14 +167,23 @@ jobs:
       # 步骤 6: 编译 Rust PHP 扩展
       # 使用 --features php 启用 ext-php-rs 绑定
       # --release 优化编译产物
+      #
+      # 重要：LIBCLANG_PATH 必须在此步骤的 env 中显式设置，
+      # 确保 bindgen 使用 LLVM 18 的 libclang（而非系统自带的 LLVM 14）
       # -----------------------------------------------------------------
       - name: Build Rust PHP extension
         working-directory: rust
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
         run: |
           echo "=== 开始编译 XHCurl Rust 扩展 ==="
           echo "PHP 版本: $(php -v | head -n 1)"
           echo "Rust 版本: $(rustc --version)"
           echo "Cargo 版本: $(cargo --version)"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH"
+
+          # 验证 libclang 可用
+          ls -la "$LIBCLANG_PATH/libclang.so" || { echo "::error::libclang.so 未找到"; exit 1; }
 
           # 编译 Rust PHP 扩展（启用 php feature）
           cargo build --release --features php
@@ -592,9 +612,9 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: linux-rust-llvm18-lint-${{ hashFiles('rust/Cargo.lock') }}
+          key: linux-rust-llvm18v2-lint-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            linux-rust-llvm18-lint-
+            linux-rust-llvm18v2-lint-
 
       # -----------------------------------------------------------------
       # 步骤 4.5: 清除缓存中可能残留的旧 bindgen 产物
