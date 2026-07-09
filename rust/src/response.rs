@@ -5,7 +5,7 @@
 // +----------------------------------------------------------------------+
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::header::HeaderManager;

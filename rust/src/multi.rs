@@ -27,7 +27,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::curl::XhCurlManager;
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::request::XhRequest;
 use crate::response::XhResponse;

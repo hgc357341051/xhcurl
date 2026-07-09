@@ -5,11 +5,8 @@
 // | 支持流式上传和下载                                                     |
 // +----------------------------------------------------------------------+
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cookie::CookieManager;
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::header::HeaderManager;
 
@@ -332,13 +329,13 @@ impl XhRequest {
     /// # 参数
     /// - `name`: 头部名称
     /// - `value`: 头部值
-    pub fn header(mut self, name: &str, value: &str) -> Self {
+    pub fn header(self, name: &str, value: &str) -> Self {
         let _ = self.headers.set(name, value);
         self
     }
 
     /// 批量添加请求头
-    pub fn headers<I, S>(mut self, headers: I) -> Self
+    pub fn headers<I, S>(self, headers: I) -> Self
     where
         I: IntoIterator<Item = (S, S)>,
         S: AsRef<str>,
