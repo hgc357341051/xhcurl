@@ -18,7 +18,7 @@
 
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::prelude::*;
-use ext_php_rs::types::{ZendClassObject, ZendHashTable, Zval};
+use ext_php_rs::types::{ArrayKey, ZendClassObject, ZendHashTable, Zval};
 
 use crate::curl::XhCurlManager;
 use crate::multi::XhMulti;
@@ -601,8 +601,8 @@ impl PhpXhResponse {
 /// PHP XHMulti 类的 Rust 表示
 #[php_class(name = "XHMulti")]
 pub struct PhpXhMulti {
-    /// 内部批量执行器（延迟创建）
-    multi: Option<XhMulti>,
+    /// 内部批量执行器（按需在 execute() 中创建，不在此持有）
+    _multi: Option<XhMulti>,
 
     /// 待执行的请求列表
     requests: Vec<XhRequest>,
@@ -618,7 +618,7 @@ impl PhpXhMulti {
     #[php_method]
     pub fn __construct() -> Self {
         Self {
-            multi: None,
+            _multi: None,
             requests: Vec::new(),
             max_concurrency: 0,
         }
@@ -684,7 +684,7 @@ impl PhpXhMulti {
                 }
 
                 let requests = std::mem::take(&mut self.requests);
-                multi.add_many(requests);
+                multi.add_many(requests).map_err(|e| e.to_string())?;
 
                 // 统一错误类型为 String
                 multi.execute().await.map_err(|e| e.to_string())
@@ -703,8 +703,8 @@ impl PhpXhMulti {
 /// PHP XHThreadPool 类的 Rust 表示
 #[php_class(name = "XHThreadPool")]
 pub struct PhpXhThreadPool {
-    /// 内部线程池（延迟创建）
-    pool: Option<XhThreadPool>,
+    /// 内部线程池（按需在 execute() 中创建，不在此持有）
+    _pool: Option<XhThreadPool>,
 
     /// 待执行的请求列表
     requests: Vec<XhRequest>,
@@ -723,7 +723,7 @@ impl PhpXhThreadPool {
     #[php_method]
     pub fn __construct(workers: Option<i64>) -> Self {
         Self {
-            pool: None,
+            _pool: None,
             requests: Vec::new(),
             max_concurrency: workers.unwrap_or(0) as usize,
         }
@@ -792,8 +792,42 @@ impl PhpXhThreadPool {
 // | 辅助函数                                                              |
 // +----------------------------------------------------------------------+
 
+// +----------------------------------------------------------------------+
+// | 安全迭代辅助函数                                                      |
+// +----------------------------------------------------------------------+
+
+/// 安全地遍历 PHP 哈希表的所有键值对。
+///
+/// 规避 ext-php-rs 0.12.0 中 `Iter` 的终止条件 bug：
+/// `Iter::next_zval` 用 `key_type == -1` 判断结束，
+/// 但 PHP 的 `HASH_KEY_NON_EXISTENT == 3`，该判断永不成立，
+/// 导致遍历完最后一个元素后再调用 `next()` 会触发空指针解引用。
+///
+/// 本函数通过精确迭代 `ht.len()` 次来避免触发有缺陷的终止路径，
+/// 仅在剩余次数内调用 `iter.next()`。
+fn for_each_kv<F>(ht: &ZendHashTable, mut f: F) -> Result<(), String>
+where
+    F: FnMut(&ArrayKey, &Zval) -> Result<(), String>,
+{
+    let len = ht.len();
+    let mut iter = ht.iter();
+    for _ in 0..len {
+        match iter.next() {
+            Some((key, val)) => f(&key, val)?,
+            None => break,
+        }
+    }
+    // 关键：此处不再调用 iter.next()，避免触发 ext-php-rs 的终止 bug
+    Ok(())
+}
+
 /// 将请求结果列表转换为 PHP 数组
 /// 用于 XHMulti::execute() 和 XHThreadPool::execute() 的返回值
+///
+/// 注意：使用 `insert_at_index`（整数键）而非 `insert(&str)`（字符串键）。
+/// 因为 `insert` 内部调用 `zend_hash_str_update`，对 "0"/"1" 等数字字符串
+/// 不会规范化为整数键，导致 PHP 端 `$res["0"]` 与 `$res[0]` 均无法命中。
+/// 使用 `insert_at_index` 直接以整数键写入，PHP 端可用 `$res[0]` 访问。
 fn results_to_php_array(results: &[crate::multi::RequestResult]) -> Result<ZBox<ZendHashTable>, String> {
     let mut ht = ZendHashTable::new();
     for (i, result) in results.iter().enumerate() {
@@ -815,7 +849,8 @@ fn results_to_php_array(results: &[crate::multi::RequestResult]) -> Result<ZBox<
             let _ = response_ht.insert("url", resp.url().to_string());
         }
 
-        let _ = ht.insert(&i.to_string(), response_ht);
+        // 使用整数键，确保 PHP 端 $res[0] 可访问
+        let _ = ht.insert_at_index(i as u64, response_ht);
     }
     Ok(ht)
 }
@@ -825,12 +860,13 @@ fn results_to_php_array(results: &[crate::multi::RequestResult]) -> Result<ZBox<
 fn php_array_to_json(ht: &ZendHashTable) -> Result<String, String> {
     let mut map = serde_json::Map::new();
 
-    // 遍历 PHP 数组（iter 产出 (ArrayKey, &Zval)）
-    for (key, val) in ht.iter() {
+    // 使用安全迭代器（规避 ext-php-rs 0.12.0 的 Iter 终止 bug）
+    for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
         let json_val = zval_to_json(val)?;
         map.insert(key_str, json_val);
-    }
+        Ok(())
+    })?;
 
     let value = serde_json::Value::Object(map);
     serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -851,9 +887,11 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
         Ok(serde_json::Value::Bool(b))
     } else if let Some(ht) = val.array() {
         let mut map = serde_json::Map::new();
-        for (key, v) in ht.iter() {
+        // 嵌套数组同样使用安全迭代器
+        for_each_kv(ht, |key, v| {
             map.insert(key.to_string(), zval_to_json(v)?);
-        }
+            Ok(())
+        })?;
         Ok(serde_json::Value::Object(map))
     } else {
         Ok(serde_json::Value::Null)
@@ -865,7 +903,8 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
 fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
     let mut form = Vec::new();
 
-    for (key, val) in ht.iter() {
+    // 使用安全迭代器（规避 ext-php-rs 0.12.0 的 Iter 终止 bug）
+    let _ = for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
         let val_str = if let Some(s) = val.string() {
             s
@@ -876,10 +915,11 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
         } else if let Some(b) = val.bool() {
             if b { "1" } else { "0" }.to_string()
         } else {
-            continue;
+            return Ok(());
         };
         form.push((key_str, val_str));
-    }
+        Ok(())
+    });
 
     form
 }
@@ -911,10 +951,15 @@ fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, St
                 serde_json::Value::Array(arr) => {
                     let mut arr_ht = ZendHashTable::new();
                     for (i, item) in arr.iter().enumerate() {
+                        // 使用整数键（与 PHP 数组索引语义一致）
                         if let Some(s) = item.as_str() {
-                            let _ = arr_ht.insert(&i.to_string(), s);
+                            let _ = arr_ht.insert_at_index(i as u64, s);
                         } else if let Some(n) = item.as_i64() {
-                            let _ = arr_ht.insert(&i.to_string(), n);
+                            let _ = arr_ht.insert_at_index(i as u64, n);
+                        } else if let Some(f) = item.as_f64() {
+                            let _ = arr_ht.insert_at_index(i as u64, f);
+                        } else if let Some(b) = item.as_bool() {
+                            let _ = arr_ht.insert_at_index(i as u64, b);
                         }
                     }
                     let _ = ht.insert(key.as_str(), arr_ht);
