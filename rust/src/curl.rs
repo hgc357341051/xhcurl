@@ -175,6 +175,8 @@ impl XhCurlManager {
     ///
     /// # 示例
     /// ```
+    /// use xhcurl::XhCurlManager;
+    /// let manager = XhCurlManager::global();
     /// manager.modify_config(|c| {
     ///     c.connect_timeout = 60;
     ///     c.verify_ssl = false;
@@ -236,8 +238,7 @@ impl XhCurlManager {
             })
             // SSL 证书验证
             .danger_accept_invalid_certs(!config.verify_ssl)
-            // HTTP/2 支持
-            .http2_prior_knowledge_disabled() // 允许 HTTP/1.1 回退
+            // HTTP/2 支持：reqwest 默认协商升级 HTTP/2，无需显式配置
             // TCP Keep-Alive
             .tcp_keepalive(if config.tcp_keepalive {
                 Some(Duration::from_secs(config.tcp_keepalive_interval))
@@ -284,12 +285,12 @@ impl XhCurlManager {
         true
     }
 
-    /// 获取建议的 tokio 运行时配置
+    /// 创建建议的 tokio 运行时
     ///
     /// # 返回
     /// - CLI 模式: 多线程运行时（利用所有 CPU 核心）
     /// - FPM 模式: 单线程运行时（避免线程安全问题）
-    pub fn runtime_builder() -> tokio::runtime::Builder {
+    pub fn create_runtime() -> XhCurlResult<tokio::runtime::Runtime> {
         if Self::is_cli_mode() {
             // CLI 模式：多线程运行时
             // 类似 goroutine 的 M:N 调度
@@ -297,11 +298,15 @@ impl XhCurlManager {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all() // 启用 IO、时间、信号等
                 .thread_name("xhcurl-worker") // 线程名称，便于调试
+                .build()
+                .map_err(|e| XhCurlError::Generic(format!("创建多线程运行时失败: {}", e)))
         } else {
             // FPM 模式：单线程运行时
             // 避免多线程与 PHP 内存管理器冲突
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
+                .build()
+                .map_err(|e| XhCurlError::Generic(format!("创建单线程运行时失败: {}", e)))
         }
     }
 }

@@ -211,27 +211,24 @@ impl XhThreadPool {
         idle_timeout: u64,
     ) {
         loop {
-            // 获取任务（需要先获取锁）
-            // 使用 timeout 避免永久阻塞
-            let task = {
-                let mut rx = if idle_timeout > 0 {
-                    // 有空闲超时
-                    match tokio::time::timeout(
-                        Duration::from_secs(idle_timeout),
-                        rx_lock(&task_rx).await,
-                    ).await {
-                        Ok(guard) => guard,
-                        Err(_) => {
-                            // 空闲超时，退出工作线程
-                            break;
-                        }
+            // 获取任务（需要先获取锁再接收）
+            // 使用 timeout 包裹整个 lock+recv，避免永久阻塞
+            // 注意：recv() 在持有锁期间 await，多个工作线程串行竞争接收
+            let task = if idle_timeout > 0 {
+                // 有空闲超时：限制 lock+recv 的总耗时
+                match tokio::time::timeout(
+                    Duration::from_secs(idle_timeout),
+                    async { task_rx.lock().await.recv().await },
+                ).await {
+                    Ok(task) => task,
+                    Err(_) => {
+                        // 空闲超时，退出工作线程
+                        break;
                     }
-                } else {
-                    // 无超时，永久等待
-                    rx_lock(&task_rx).await
-                };
-
-                rx.recv().await
+                }
+            } else {
+                // 无超时，永久等待
+                task_rx.lock().await.recv().await
             };
 
             match task {
@@ -499,13 +496,6 @@ impl Drop for XhThreadPool {
             }
         }
     }
-}
-
-/// 辅助函数：获取 Mutex 锁
-async fn rx_lock(
-    task_rx: &Arc<tokio::sync::Mutex<mpsc::Receiver<TaskMessage>>>,
-) -> tokio::sync::MutexGuard<'_, mpsc::Receiver<TaskMessage>> {
-    task_rx.lock().await
 }
 
 impl std::fmt::Debug for XhThreadPool {

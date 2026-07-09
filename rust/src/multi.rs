@@ -181,7 +181,8 @@ pub struct XhMulti {
     stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
 
     /// 已启动的异步任务句柄
-    tasks: Vec<JoinHandle<RequestResult>>,
+    /// 任务结果通过 channel 收集，句柄仅用于等待任务完成
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl XhMulti {
@@ -337,7 +338,7 @@ impl XhMulti {
             let semaphore = semaphore.clone();
 
             // 生成异步任务（类似 go func() { ... }()）
-            let handle = tokio::spawn(async move {
+            let handle: JoinHandle<()> = tokio::spawn(async move {
                 // 如果有并发限制，获取 Semaphore 许可
                 // _permit 在作用域结束时自动释放
                 let _permit = if let Some(sem) = &semaphore {
@@ -369,9 +370,8 @@ impl XhMulti {
 
                 // 通过 channel 发送结果
                 // 如果发送失败，说明接收端已关闭（通常不会发生）
+                // 结果统一从 channel 收集，无需再从任务返回值获取
                 let _ = result_tx.send(result).await;
-
-                result
             });
 
             self.tasks.push(handle);

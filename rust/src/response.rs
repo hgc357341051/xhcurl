@@ -183,17 +183,20 @@ impl XhResponse {
     }
 
     /// 读取响应体（懒加载触发）
-    /// 将完整的响应体读入内存
+    /// 消费 reqwest::Response 并将完整响应体读入内存
     ///
     /// # 注意
-    /// 对于大响应体，建议使用 `stream_body` 方法流式读取
+    /// 对于大响应体，建议使用流式读取（multi.rs 中的 chunk() 方式）
+    ///
+    /// # 参数
+    /// - `response`: reqwest 响应对象（被消费）
     ///
     /// # 返回
-    /// - `Ok(&[u8])`: 响应体数据引用
+    /// - `Ok(())`: 读取成功，可通过 `body()` 获取数据
     /// - `Err`: 读取失败
-    pub async fn read_body(&mut self, response: &mut reqwest::Response) -> XhCurlResult<&[u8]> {
+    pub async fn read_body(&mut self, response: reqwest::Response) -> XhCurlResult<()> {
         if self.body.is_none() {
-            // 读取完整响应体
+            // 读取完整响应体（bytes() 消费 response）
             let body = response.bytes()
                 .await
                 .map_err(XhCurlError::from)?;
@@ -201,7 +204,7 @@ impl XhResponse {
             self.body = Some(body.to_vec());
         }
 
-        Ok(self.body.as_ref().unwrap().as_slice())
+        Ok(())
     }
 
     /// 直接设置响应体数据（用于流式读取后设置）

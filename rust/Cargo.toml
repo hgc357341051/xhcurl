@@ -48,7 +48,7 @@ tokio = { version = "1", features = ["full"] }
 # features:
 #   - json: 内置 JSON 序列化支持
 #   - stream: 流式响应支持（替代 curl 的 WRITEFUNCTION 回调）
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 
 # 并发原语（Channel、无锁数据结构）
 # 用于工作线程与主线程间的安全通信（替代回调机制）

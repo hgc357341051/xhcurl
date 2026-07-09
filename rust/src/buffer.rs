@@ -38,6 +38,7 @@ impl ResponseBuffer {
     ///
     /// # 示例
     /// ```
+    /// use xhcurl::ResponseBuffer;
     /// let buf = ResponseBuffer::new(4096, 10 * 1024 * 1024);
     /// ```
     pub fn new(initial_capacity: usize, max_size: usize) -> Self {

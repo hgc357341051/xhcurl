@@ -527,7 +527,7 @@ mod tests {
             .header("Authorization", "Bearer token")
             .header("Accept", "application/json")
             .body_json_str(r#"{"name": "test", "age": 18}"#).unwrap()
-            .timeout(30)
+            .request_timeout(30)
             .verify_ssl(true);
 
         assert_eq!(req.get_url(), "https://api.example.com/users");

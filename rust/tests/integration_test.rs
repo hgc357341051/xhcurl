@@ -16,7 +16,7 @@ fn test_request_build_flow() {
         .header("X-Custom", "custom-value")
         .body_json_str(r#"{"key": "value"}"#)
         .unwrap()
-        .timeout(30)
+        .request_timeout(30)
         .verify_ssl(true)
         .id("test-request-001");
 
