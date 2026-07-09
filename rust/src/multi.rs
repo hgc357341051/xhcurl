@@ -416,7 +416,7 @@ impl XhMulti {
     /// # 返回
     /// - `Ok(XhResponse)`: 请求成功
     /// - `Err(XhCurlError)`: 请求失败
-    async fn execute_single(
+    pub async fn execute_single(
         client: reqwest::Client,
         request: XhRequest,
         request_id: String,

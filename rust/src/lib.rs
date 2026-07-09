@@ -62,6 +62,11 @@ pub mod multi;
 /// 基于 tokio + channel 实现真正的多线程并发
 pub mod threadpool;
 
+/// PHP Fiber 协程桥接模块
+/// 实现 PHP 端协程式 await 异步 HTTP 请求
+#[cfg(feature = "php")]
+pub mod fiber;
+
 /// PHP 扩展入口模块
 /// 使用 ext-php-rs 直接生成 PHP 扩展
 #[cfg(feature = "php")]

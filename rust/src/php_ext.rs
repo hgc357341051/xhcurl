@@ -55,7 +55,7 @@ fn sapi_is_cli() -> bool {
 /// reqwest Client 内部维护连接池（TCP keep-alive、TLS 会话缓存），
 /// 全局复用可避免每次请求重新建连，显著提升批量请求性能。
 /// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
-fn global_client() -> &'static reqwest::Client {
+pub(crate) fn global_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         XhCurlManager::global()
@@ -72,7 +72,7 @@ fn global_client() -> &'static reqwest::Client {
 ///
 /// 全局复用避免每次 execute() 都创建/销毁运行时（线程创建、IO 驱动注册开销大）。
 /// FPM 下每个 worker 进程持有独立的运行时（进程级单例），请求间复用。
-fn global_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn global_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         let mut builder = if sapi_is_cli() {
@@ -235,6 +235,33 @@ impl PhpXhCurl {
             request: XhRequest::new(url),
         })
     }
+
+    /// 协程式等待单个 HTTP 请求完成
+    ///
+    /// 必须在 XHCurl::run() 的回调内、且在 Fiber 上下文中调用。
+    /// 调用后挂起当前 Fiber，HTTP 请求在 tokio 工作线程上异步执行，
+    /// 完成后由事件泵恢复 Fiber 并返回结果数组。
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::await(XHRequest $request): array
+    #[php_method]
+    #[rename("await")]
+    pub fn coroutine_await(request: &ZendClassObject<PhpXhRequest>) -> Result<ZBox<ZendHashTable>, String> {
+        crate::fiber::fiber_await(&request.request).map_err(|e| e.to_string())
+    }
+
+    /// 启动协程事件泵，执行主回调
+    ///
+    /// 主回调中可调用 XHCurl::await() 挂起当前 Fiber 等待 HTTP 请求，
+    /// 实现协程式异步编程（类似 ReactPHP/AMPHP）。
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::run(callable $main): mixed
+    #[php_method]
+    #[rename("run")]
+    pub fn coroutine_run(main: &Zval) -> Result<Zval, String> {
+        crate::fiber::fiber_run(main).map_err(|e| e.to_string())
+    }
 }
 
 // +----------------------------------------------------------------------+
@@ -244,8 +271,8 @@ impl PhpXhCurl {
 /// PHP XHRequest 类的 Rust 表示
 #[php_class(name = "XHRequest")]
 pub struct PhpXhRequest {
-    /// 内部请求构建器
-    request: XhRequest,
+    /// 内部请求构建器（pub 供 fiber 模块访问）
+    pub request: XhRequest,
 }
 
 /// PHP XHRequest 类的方法实现
