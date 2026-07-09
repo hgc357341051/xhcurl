@@ -253,7 +253,7 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
         let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
         // suspended_value 是事件泵 resume 传入的结果数组
         // 按完成顺序插入（整数键 0, 1, 2, ... 表示第几个完成）
-        let _ = results.insert_at_index(i as u64, suspended_value);
+        let _ = results.insert_at_index(i as i64, suspended_value);
     }
 
     Ok(results)
@@ -492,7 +492,7 @@ fn result_zval_to_array(zval: &Zval) -> Result<ZBox<ZendHashTable>, String> {
         let mut new_ht = ZendHashTable::new();
         for_each_kv(ht, |key, val| {
             new_ht
-                .insert(&key.to_string(), val.shallow_clone())
+                .insert(key.to_string(), val.shallow_clone())
                 .map_err(|e| e.to_string())?;
             Ok(())
         })?;

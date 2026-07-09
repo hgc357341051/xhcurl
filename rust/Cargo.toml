@@ -36,7 +36,15 @@ php = ["dep:ext-php-rs"]
 # PHP 扩展绑定库（直接生成 PHP 扩展，无需 C 桥接层）
 # 提供类型安全的 PHP 互操作，自动处理引用计数和 arginfo 生成
 # 仅在 php feature 启用时编译
-ext-php-rs = { version = "0.12", optional = true }
+#
+# 版本要求：>= 0.15
+# 原因：
+#   1. 0.12 在 Windows 上硬编码 vs16，PHP 8.4+ 改用 vs17，导致
+#      php-devel-pack URL 404。0.13+ 构建系统根据 PHP 版本动态选择 vs16/vs17。
+#   2. 0.12 依赖 bindgen 0.68.1，遇到 LLVM 18+ 的 _Complex _Float16 内建类型
+#      会 panic。0.15+ 使用 fork 版 bindgen 0.72.1 已修复。
+#   3. 0.15+ 支持 PHP 8.5（ApiVersion::Php85）。
+ext-php-rs = { version = "0.15", optional = true }
 
 # 异步运行时（M:N 调度模型，类似 goroutine）
 # features:

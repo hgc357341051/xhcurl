@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false  # 某个版本失败不影响其他版本继续编译
       matrix:
-        php-version: ['8.1', '8.2', '8.3', '8.4']
+        php-version: ['8.1', '8.2', '8.3', '8.4', '8.5']
         ubuntu: ['22.04']
 
     steps:
@@ -160,9 +160,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           # key 中包含 llvm18v2 标识，LLVM 版本变更时自动失效旧缓存
-          key: linux-rust-llvm18v2-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: linux-rust-ephprs015-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            linux-rust-llvm18v2-php${{ matrix.php-version }}-
+            linux-rust-ephprs015-php${{ matrix.php-version }}-
 
       # -----------------------------------------------------------------
       # 步骤 5.5: 清除缓存中可能残留的旧 bindgen 产物
@@ -226,9 +226,9 @@ jobs:
       # -----------------------------------------------------------------
       - name: Verify extension loads
         run: |
-          # 临时复制扩展到 PHP 扩展目录
+          # 临时复制扩展到 PHP 扩展目录（扩展目录需要 root 权限）
           EXT_DIR=$(php-config --extension-dir)
-          cp "dist/linux/xhcurl-rust-linux-php${{ matrix.php-version }}.so" "$EXT_DIR/xhcurl.so"
+          sudo cp "dist/linux/xhcurl-rust-linux-php${{ matrix.php-version }}.so" "$EXT_DIR/xhcurl.so"
 
           # 尝试加载扩展
           php -d extension=xhcurl -r "echo 'XHCurl Rust 扩展加载成功';" || true
@@ -254,7 +254,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.1', '8.2', '8.3']
+        php-version: ['8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
       # -----------------------------------------------------------------
@@ -301,9 +301,9 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos-rust-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: macos-rust-ephprs015-php${{ matrix.php-version }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            macos-rust-php${{ matrix.php-version }}-
+            macos-rust-ephprs015-php${{ matrix.php-version }}-
 
       # -----------------------------------------------------------------
       # 步骤 6: 编译 Rust PHP 扩展
@@ -375,7 +375,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.1', '8.2', '8.3', '8.4']
+        php-version: ['8.1', '8.2', '8.3', '8.4', '8.5']
         # NTS 和 TS 分别编译（值必须为 setup-php 的 phpts 可识别值：nts / ts）
         ts: ['nts', 'ts']
 
@@ -469,9 +469,9 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: windows-rust-nightlyv3-llvm17-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: windows-rust-ephprs015-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            windows-rust-nightlyv3-llvm17-php${{ matrix.php-version }}-${{ matrix.ts }}-
+            windows-rust-ephprs015-php${{ matrix.php-version }}-${{ matrix.ts }}-
 
       # -----------------------------------------------------------------
       # 步骤 6: 编译 Rust PHP 扩展

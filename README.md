@@ -49,9 +49,9 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 
 | 平台 | PHP 版本 | 线程安全 | 状态 |
 |------|----------|----------|------|
-| Linux (Ubuntu 22.04) | 8.1, 8.2, 8.3, 8.4 | NTS | ✅ 支持 |
-| macOS 14 | 8.1, 8.2, 8.3 | NTS | ✅ 支持 |
-| Windows (x64) | 8.1, 8.2, 8.3, 8.4 | NTS / TS | ✅ 支持 |
+| Linux (Ubuntu 22.04) | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS | ✅ 支持 |
+| macOS 14 | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS | ✅ 支持 |
+| Windows (x64) | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS / TS | ✅ 支持 |
 
 > **PHP 版本要求**：**8.1+**。协程模式（`await`/`gather`/`run`）依赖 PHP 8.1 引入的 [Fiber](https://www.php.net/manual/zh/language.fibers.php) 类。
 

@@ -12,7 +12,7 @@
 // |   XHThreadPool→ 线程池                                                 |
 // |                                                                        |
 // | 链式调用实现：                                                          |
-// |   使用 #[this] 参数属性获取 &mut ZendClassObject<Self>，              |
+// |   ext-php-rs 0.14+：方法第一个参数命名为 self_（类型 &mut ZendClassObject<>），|
 // |   修改后返回同一对象，实现 PHP 端 $this 链式调用。                      |
 // +----------------------------------------------------------------------+
 
@@ -94,7 +94,8 @@ pub(crate) fn global_runtime() -> &'static tokio::runtime::Runtime {
 
 /// PHP XHCurl 类的 Rust 表示
 /// 对应 C 版本的 XHCurl 全局管理器
-#[php_class(name = "XHCurl")]
+#[php_class]
+#[php(name = "XHCurl")]
 pub struct PhpXhCurl;
 
 /// PHP XHCurl 类的方法实现
@@ -104,7 +105,7 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::version(): string
-    #[php_method]
+
     pub fn version() -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
@@ -113,7 +114,7 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::setConfig(array $config): void
-    #[php_method]
+
     pub fn set_config(config: &ZendHashTable) -> Result<(), String> {
         // 获取全局管理器单例
         let manager = XhCurlManager::global();
@@ -187,7 +188,7 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::getConfig(): array
-    #[php_method]
+
     pub fn get_config() -> Result<ZBox<ZendHashTable>, String> {
         // 获取全局管理器单例
         let manager = XhCurlManager::global();
@@ -220,7 +221,7 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::isCli(): bool
-    #[php_method]
+
     pub fn is_cli() -> bool {
         sapi_is_cli()
     }
@@ -229,7 +230,7 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::createRequest(string $url): XHRequest
-    #[php_method]
+
     pub fn create_request(url: String) -> Result<PhpXhRequest, String> {
         Ok(PhpXhRequest {
             request: XhRequest::new(url),
@@ -244,8 +245,8 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::await(XHRequest $request): array
-    #[php_method]
-    #[rename("await")]
+
+    #[php(name = "await")]
     pub fn coroutine_await(
         request: &ZendClassObject<PhpXhRequest>,
     ) -> Result<ZBox<ZendHashTable>, String> {
@@ -259,8 +260,8 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::run(callable $main): mixed
-    #[php_method]
-    #[rename("run")]
+
+    #[php(name = "run")]
     pub fn coroutine_run(main: &Zval) -> Result<Zval, String> {
         crate::fiber::fiber_run(main).map_err(|e| e.to_string())
     }
@@ -273,8 +274,8 @@ impl PhpXhCurl {
     ///
     /// # PHP 签名
     /// public static XHCurl::gather(array $requests): array
-    #[php_method]
-    #[rename("gather")]
+
+    #[php(name = "gather")]
     pub fn coroutine_gather(requests: &ZendHashTable) -> Result<ZBox<ZendHashTable>, String> {
         use ext_php_rs::convert::FromZval;
         use ext_php_rs::types::ZendClassObject;
@@ -307,7 +308,8 @@ impl PhpXhCurl {
 // +----------------------------------------------------------------------+
 
 /// PHP XHRequest 类的 Rust 表示
-#[php_class(name = "XHRequest")]
+#[php_class]
+#[php(name = "XHRequest")]
 pub struct PhpXhRequest {
     /// 内部请求构建器（pub 供 fiber 模块访问）
     pub request: XhRequest,
@@ -316,7 +318,7 @@ pub struct PhpXhRequest {
 /// PHP XHRequest 类的方法实现
 ///
 /// 链式调用实现：
-/// 使用 #[this] 获取 &mut ZendClassObject<Self>，
+/// ext-php-rs 0.14+：方法第一个参数命名为 self_（&mut ZendClassObject<PhpXhCurl>），
 /// 修改内部状态后返回同一对象引用，
 /// 使 PHP 端可以 $req->get()->header("X","Y")->timeout(30) 链式调用。
 #[php_impl]
@@ -325,7 +327,7 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::__construct(string $url)
-    #[php_method]
+
     pub fn __construct(url: String) -> Self {
         Self {
             request: XhRequest::new(url),
@@ -335,216 +337,216 @@ impl PhpXhRequest {
     /// 设置 HTTP 方法
     ///
     /// # PHP 签名
-    /// public XHRequest::method(string $method): $this
-    #[php_method]
+    /// public XHRequest::method(string $method): $self_
+
     pub fn method(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         method: String,
-    ) -> Result<&mut ZendClassObject<Self>, String> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
         let m = HttpMethod::from_str(&method).map_err(|e| e.to_string())?;
-        this.request = this.request.clone().method(m);
-        Ok(this)
+        self_.request = self_.request.clone().method(m);
+        Ok(self_)
     }
 
     /// 设置为 GET 方法
     ///
     /// # PHP 签名
-    /// public XHRequest::get(): $this
-    #[php_method]
-    pub fn get(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().get();
-        this
+    /// public XHRequest::get(): $self_
+
+    pub fn get(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().get();
+        self_
     }
 
     /// 设置为 POST 方法
-    #[php_method]
-    pub fn post(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().post();
-        this
+
+    pub fn post(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().post();
+        self_
     }
 
     /// 设置为 PUT 方法
-    #[php_method]
-    pub fn put(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().put();
-        this
+
+    pub fn put(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().put();
+        self_
     }
 
     /// 设置为 DELETE 方法
-    #[php_method]
-    pub fn delete(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().delete();
-        this
+
+    pub fn delete(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().delete();
+        self_
     }
 
     /// 设置为 PATCH 方法
-    #[php_method]
-    pub fn patch(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().patch();
-        this
+
+    pub fn patch(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().patch();
+        self_
     }
 
     /// 设置为 HEAD 方法（仅获取响应头，不返回响应体）
-    #[php_method]
-    pub fn head(#[this] this: &mut ZendClassObject<Self>) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().head();
-        this
+
+    pub fn head(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().head();
+        self_
     }
 
     /// 设置请求头
     ///
     /// # PHP 签名
-    /// public XHRequest::header(string $name, string $value): $this
-    #[php_method]
+    /// public XHRequest::header(string $name, string $value): $self_
+
     pub fn header(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         name: String,
         value: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().header(&name, &value);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().header(&name, &value);
+        self_
     }
 
     /// 设置 JSON 请求体
     ///
     /// # PHP 签名
-    /// public XHRequest::json(array $data): $this
-    #[php_method]
+    /// public XHRequest::json(array $data): $self_
+
     pub fn json<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         let json_str = php_array_to_json(data)?;
-        this.request = this
+        self_.request = self_
             .request
             .clone()
             .body_json_str(&json_str)
             .map_err(|e| e.to_string())?;
-        Ok(this)
+        Ok(self_)
     }
 
     /// 设置表单数据
     ///
     /// # PHP 签名
-    /// public XHRequest::form(array $data): $this
-    #[php_method]
+    /// public XHRequest::form(array $data): $self_
+
     pub fn form<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         let form = php_array_to_form(data);
-        this.request = this.request.clone().body_form(form);
-        Ok(this)
+        self_.request = self_.request.clone().body_form(form);
+        Ok(self_)
     }
 
     /// 设置原始请求体
     ///
     /// # PHP 签名
-    /// public XHRequest::body(string $data): $this
-    #[php_method]
+    /// public XHRequest::body(string $data): $self_
+
     pub fn body(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         data: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().body_bytes(data.into_bytes());
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().body_bytes(data.into_bytes());
+        self_
     }
 
     /// 设置请求超时（秒）
     ///
     /// # PHP 签名
-    /// public XHRequest::timeout(int $seconds): $this
-    #[php_method]
+    /// public XHRequest::timeout(int $seconds): $self_
+
     pub fn timeout(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().request_timeout(seconds as u64);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().request_timeout(seconds as u64);
+        self_
     }
 
     /// 设置连接超时（秒）
     /// 与 timeout 不同，此方法仅控制连接阶段的超时
     ///
     /// # PHP 签名
-    /// public XHRequest::connectTimeout(int $seconds): $this
-    #[php_method]
+    /// public XHRequest::connectTimeout(int $seconds): $self_
+
     pub fn connect_timeout(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().connect_timeout(seconds as u64);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().connect_timeout(seconds as u64);
+        self_
     }
 
     /// 设置是否验证 SSL 证书
     ///
     /// # PHP 签名
-    /// public XHRequest::verifySsl(bool $verify): $this
-    #[php_method]
+    /// public XHRequest::verifySsl(bool $verify): $self_
+
     pub fn verify_ssl(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         verify: bool,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().verify_ssl(verify);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().verify_ssl(verify);
+        self_
     }
 
     /// 设置 User-Agent
     ///
     /// # PHP 签名
-    /// public XHRequest::userAgent(string $ua): $this
-    #[php_method]
+    /// public XHRequest::userAgent(string $ua): $self_
+
     pub fn user_agent(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         ua: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().user_agent(ua);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().user_agent(ua);
+        self_
     }
 
     /// 设置代理地址
     /// 支持 HTTP/HTTPS/SOCKS5 代理
     ///
     /// # PHP 签名
-    /// public XHRequest::proxy(string $proxy): $this
+    /// public XHRequest::proxy(string $proxy): $self_
     ///
     /// # 示例
     /// $req->proxy("http://127.0.0.1:7890");
     /// $req->proxy("socks5://127.0.0.1:1080");
-    #[php_method]
+
     pub fn proxy(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         proxy: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().proxy(proxy);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().proxy(proxy);
+        self_
     }
 
     /// 设置是否跟随重定向
     ///
     /// # PHP 签名
-    /// public XHRequest::followRedirects(bool $follow): $this
-    #[php_method]
+    /// public XHRequest::followRedirects(bool $follow): $self_
+
     pub fn follow_redirects(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         follow: bool,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().follow_redirects(follow);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().follow_redirects(follow);
+        self_
     }
 
     /// 设置最大重定向次数
     ///
     /// # PHP 签名
-    /// public XHRequest::maxRedirects(int $max): $this
-    #[php_method]
+    /// public XHRequest::maxRedirects(int $max): $self_
+
     pub fn max_redirects(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         max: i64,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().max_redirects(max as u32);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().max_redirects(max as u32);
+        self_
     }
 
     /// 设置用户自定义数据
@@ -556,30 +558,30 @@ impl PhpXhRequest {
     /// PHP 端可用 `json_decode($result['user_data'], true)` 还原。
     ///
     /// # PHP 签名
-    /// public XHRequest::setUserData(mixed $data): $this
-    #[php_method]
+    /// public XHRequest::setUserData(mixed $data): $self_
+
     pub fn set_user_data<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         // 将 PHP 数组序列化为 JSON 字符串存储
         let json_str = php_array_to_json(data)?;
-        this.request = this.request.clone().user_data(json_str);
-        Ok(this)
+        self_.request = self_.request.clone().user_data(json_str);
+        Ok(self_)
     }
 
     /// 设置请求优先级（线程池模式下生效）
     /// 数值越大优先级越高
     ///
     /// # PHP 签名
-    /// public XHRequest::setPriority(int $priority): $this
-    #[php_method]
+    /// public XHRequest::setPriority(int $priority): $self_
+
     pub fn set_priority(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         priority: i64,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().priority(priority as i32);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().priority(priority as i32);
+        self_
     }
 
     /// 设置 Cookie 字符串
@@ -588,14 +590,14 @@ impl PhpXhRequest {
     /// 格式: "name1=value1; name2=value2"
     ///
     /// # PHP 签名
-    /// public XHRequest::cookies(string $cookies): $this
-    #[php_method]
+    /// public XHRequest::cookies(string $cookies): $self_
+
     pub fn cookies(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         cookies: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().cookies(cookies);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().cookies(cookies);
+        self_
     }
 
     /// 设置 Cookie 读取文件路径
@@ -604,14 +606,14 @@ impl PhpXhRequest {
     /// 启动时从该文件读取 cookie。
     ///
     /// # PHP 签名
-    /// public XHRequest::cookieFile(string $path): $this
-    #[php_method]
+    /// public XHRequest::cookieFile(string $path): $self_
+
     pub fn cookie_file(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         path: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().cookie_file(path);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().cookie_file(path);
+        self_
     }
 
     /// 设置 Cookie 存储文件路径
@@ -620,14 +622,14 @@ impl PhpXhRequest {
     /// 请求结束后将 cookie 保存到该文件。
     ///
     /// # PHP 签名
-    /// public XHRequest::cookieJar(string $path): $this
-    #[php_method]
+    /// public XHRequest::cookieJar(string $path): $self_
+
     pub fn cookie_jar(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         path: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().cookie_jar(path);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().cookie_jar(path);
+        self_
     }
 
     /// 设置 HTTP 基本认证
@@ -636,14 +638,14 @@ impl PhpXhRequest {
     /// 格式: "username:password"
     ///
     /// # PHP 签名
-    /// public XHRequest::basicAuth(string $credentials): $this
-    #[php_method]
+    /// public XHRequest::basicAuth(string $credentials): $self_
+
     pub fn basic_auth(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         credentials: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().basic_auth(credentials);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().basic_auth(credentials);
+        self_
     }
 
     /// 设置 Bearer Token 认证
@@ -652,14 +654,14 @@ impl PhpXhRequest {
     /// 自动设置 Authorization: Bearer {token}
     ///
     /// # PHP 签名
-    /// public XHRequest::bearerToken(string $token): $this
-    #[php_method]
+    /// public XHRequest::bearerToken(string $token): $self_
+
     pub fn bearer_token(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         token: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().bearer_token(token);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().bearer_token(token);
+        self_
     }
 
     /// 设置自定义 CA 证书路径
@@ -667,14 +669,14 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_CAINFO。
     ///
     /// # PHP 签名
-    /// public XHRequest::caInfo(string $path): $this
-    #[php_method]
+    /// public XHRequest::caInfo(string $path): $self_
+
     pub fn ca_info(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         path: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().ca_info(path);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().ca_info(path);
+        self_
     }
 
     /// 设置客户端证书路径
@@ -682,14 +684,14 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_SSLCERT。
     ///
     /// # PHP 签名
-    /// public XHRequest::sslCert(string $path): $this
-    #[php_method]
+    /// public XHRequest::sslCert(string $path): $self_
+
     pub fn ssl_cert(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         path: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().ssl_cert(path);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().ssl_cert(path);
+        self_
     }
 
     /// 设置客户端证书密钥路径
@@ -697,14 +699,14 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_SSLKEY。
     ///
     /// # PHP 签名
-    /// public XHRequest::sslKey(string $path): $this
-    #[php_method]
+    /// public XHRequest::sslKey(string $path): $self_
+
     pub fn ssl_key(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         path: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().ssl_key(path);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().ssl_key(path);
+        self_
     }
 
     /// 设置客户端证书密钥密码
@@ -712,14 +714,14 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_SSLKEYPASSWD。
     ///
     /// # PHP 签名
-    /// public XHRequest::sslKeyPassword(string $password): $this
-    #[php_method]
+    /// public XHRequest::sslKeyPassword(string $password): $self_
+
     pub fn ssl_key_password(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         password: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().ssl_key_password(password);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().ssl_key_password(password);
+        self_
     }
 
     /// 设置 Accept-Encoding
@@ -728,14 +730,14 @@ impl PhpXhRequest {
     /// 如 "gzip, deflate, br"
     ///
     /// # PHP 签名
-    /// public XHRequest::encoding(string $encoding): $this
-    #[php_method]
+    /// public XHRequest::encoding(string $encoding): $self_
+
     pub fn encoding(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         encoding: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().encoding(encoding);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().encoding(encoding);
+        self_
     }
 
     /// 设置自定义请求方法
@@ -744,14 +746,14 @@ impl PhpXhRequest {
     /// 用于非标准 HTTP 方法（CONNECT/TRACE/PROPFIND 等）。
     ///
     /// # PHP 签名
-    /// public XHRequest::customMethod(string $method): $this
-    #[php_method]
+    /// public XHRequest::customMethod(string $method): $self_
+
     pub fn custom_method(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         method: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().custom_method(method);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().custom_method(method);
+        self_
     }
 
     /// 设置 Range 请求范围
@@ -760,14 +762,14 @@ impl PhpXhRequest {
     /// 格式: "0-1023" 或 "0-" 或 "-1023"
     ///
     /// # PHP 签名
-    /// public XHRequest::range(string $range): $this
-    #[php_method]
+    /// public XHRequest::range(string $range): $self_
+
     pub fn range(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhRequest>,
         range: String,
-    ) -> &mut ZendClassObject<Self> {
-        this.request = this.request.clone().range(range);
-        this
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().range(range);
+        self_
     }
 
     /// 设置多部分表单数据（支持文件上传）
@@ -780,12 +782,12 @@ impl PhpXhRequest {
     ///   ]
     ///
     /// # PHP 签名
-    /// public XHRequest::multipart(array $fields): $this
-    #[php_method]
+    /// public XHRequest::multipart(array $fields): $self_
+
     pub fn multipart<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
         fields: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         use crate::request::MultipartField;
 
         let mut mp_fields = Vec::new();
@@ -849,18 +851,18 @@ impl PhpXhRequest {
             }
         }
 
-        this.request = this.request.clone().body_multipart(mp_fields);
-        Ok(this)
+        self_.request = self_.request.clone().body_multipart(mp_fields);
+        Ok(self_)
     }
 
     /// 获取请求 URL
-    #[php_method]
+
     pub fn get_url(&self) -> String {
         self.request.get_url().to_string()
     }
 
     /// 获取 HTTP 方法
-    #[php_method]
+
     pub fn get_method(&self) -> String {
         self.request.get_method().to_string()
     }
@@ -871,7 +873,8 @@ impl PhpXhRequest {
 // +----------------------------------------------------------------------+
 
 /// PHP XHResponse 类的 Rust 表示
-#[php_class(name = "XHResponse")]
+#[php_class]
+#[php(name = "XHResponse")]
 pub struct PhpXhResponse {
     /// 内部响应对象
     response: Option<XhResponse>,
@@ -881,7 +884,7 @@ pub struct PhpXhResponse {
 #[php_impl]
 impl PhpXhResponse {
     /// 获取状态码
-    #[php_method]
+
     pub fn status(&self) -> i64 {
         self.response
             .as_ref()
@@ -890,7 +893,7 @@ impl PhpXhResponse {
     }
 
     /// 检查是否成功（2xx 状态码）
-    #[php_method]
+
     pub fn is_success(&self) -> bool {
         self.response
             .as_ref()
@@ -899,25 +902,25 @@ impl PhpXhResponse {
     }
 
     /// 获取指定响应头
-    #[php_method]
+
     pub fn header(&self, name: String) -> Option<String> {
         self.response.as_ref().and_then(|r| r.header(&name))
     }
 
     /// 获取所有响应头
-    #[php_method]
+
     pub fn headers(&self) -> ZBox<ZendHashTable> {
         let mut ht = ZendHashTable::new();
         if let Some(response) = &self.response {
             for (name, value) in response.headers().all() {
-                let _ = ht.insert(&name, value);
+                let _ = ht.insert(name.as_str(), value);
             }
         }
         ht
     }
 
     /// 获取响应体（字符串）
-    #[php_method]
+
     pub fn body(&self) -> Result<String, String> {
         self.response
             .as_ref()
@@ -927,7 +930,7 @@ impl PhpXhResponse {
     }
 
     /// 获取响应体（JSON 解析为数组）
-    #[php_method]
+
     pub fn json(&self) -> Result<ZBox<ZendHashTable>, String> {
         let response = self.response.as_ref().ok_or("响应不存在".to_string())?;
         let json = response.body_json().map_err(|e| e.to_string())?;
@@ -935,7 +938,7 @@ impl PhpXhResponse {
     }
 
     /// 获取响应体大小（字节）
-    #[php_method]
+
     pub fn body_size(&self) -> i64 {
         self.response
             .as_ref()
@@ -944,7 +947,7 @@ impl PhpXhResponse {
     }
 
     /// 获取最终 URL（可能因重定向而与请求 URL 不同）
-    #[php_method]
+
     pub fn url(&self) -> String {
         self.response
             .as_ref()
@@ -953,7 +956,7 @@ impl PhpXhResponse {
     }
 
     /// 获取请求耗时（毫秒）
-    #[php_method]
+
     pub fn elapsed_ms(&self) -> i64 {
         self.response
             .as_ref()
@@ -962,7 +965,7 @@ impl PhpXhResponse {
     }
 
     /// 获取错误信息
-    #[php_method]
+
     pub fn error(&self) -> Option<String> {
         self.response
             .as_ref()
@@ -970,7 +973,7 @@ impl PhpXhResponse {
     }
 
     /// 获取远程服务器地址（IP:Port）
-    #[php_method]
+
     pub fn remote_addr(&self) -> Option<String> {
         self.response
             .as_ref()
@@ -978,7 +981,7 @@ impl PhpXhResponse {
     }
 
     /// 获取 HTTP 协议版本
-    #[php_method]
+
     pub fn version(&self) -> Option<String> {
         self.response
             .as_ref()
@@ -991,7 +994,8 @@ impl PhpXhResponse {
 // +----------------------------------------------------------------------+
 
 /// PHP XHMulti 类的 Rust 表示
-#[php_class(name = "XHMulti")]
+#[php_class]
+#[php(name = "XHMulti")]
 pub struct PhpXhMulti {
     /// 内部批量执行器（按需在 execute() 中创建，不在此持有）
     _multi: Option<XhMulti>,
@@ -1007,7 +1011,7 @@ pub struct PhpXhMulti {
 #[php_impl]
 impl PhpXhMulti {
     /// 构造函数
-    #[php_method]
+
     pub fn __construct() -> Self {
         Self {
             _multi: None,
@@ -1020,42 +1024,42 @@ impl PhpXhMulti {
     /// 带数量上限检查，防止内存溢出
     ///
     /// # PHP 签名
-    /// public XHMulti::add(XHRequest $request): $this
-    #[php_method]
+    /// public XHMulti::add(XHRequest $request): $self_
+
     pub fn add<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhMulti>,
         request: &ZendClassObject<PhpXhRequest>,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhMulti>, String> {
         // 检查请求数量是否超过上限
-        if this.requests.len() >= MAX_REQUESTS_PER_BATCH {
+        if self_.requests.len() >= MAX_REQUESTS_PER_BATCH {
             return Err(format!(
                 "批量请求数量超过上限 {}，请分批执行",
                 MAX_REQUESTS_PER_BATCH
             ));
         }
         // 通过 Deref 访问 PhpXhRequest.request，克隆后添加
-        this.requests.push(request.request.clone());
-        Ok(this)
+        self_.requests.push(request.request.clone());
+        Ok(self_)
     }
 
     /// 设置最大并发数
     ///
     /// # PHP 签名
-    /// public XHMulti::maxConcurrency(int $max): $this
-    #[php_method]
+    /// public XHMulti::maxConcurrency(int $max): $self_
+
     pub fn max_concurrency(
-        #[this] this: &mut ZendClassObject<Self>,
+        self_: &mut ZendClassObject<PhpXhMulti>,
         max: i64,
-    ) -> &mut ZendClassObject<Self> {
-        this.max_concurrency = max as usize;
-        this
+    ) -> &mut ZendClassObject<PhpXhMulti> {
+        self_.max_concurrency = max as usize;
+        self_
     }
 
     /// 执行所有请求
     ///
     /// # PHP 签名
     /// public XHMulti::execute(): array
-    #[php_method]
+
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
         // 复用全局运行时与客户端（避免每次创建/销毁的开销）
         // 运行时类型由 SAPI 决定：CLI 多线程并行，FPM 单线程并发
@@ -1084,7 +1088,8 @@ impl PhpXhMulti {
 // +----------------------------------------------------------------------+
 
 /// PHP XHThreadPool 类的 Rust 表示
-#[php_class(name = "XHThreadPool")]
+#[php_class]
+#[php(name = "XHThreadPool")]
 pub struct PhpXhThreadPool {
     /// 内部线程池（首次 execute 时创建，同对象多次 execute 复用，实现线程复用）
     pool: Option<XhThreadPool>,
@@ -1103,7 +1108,7 @@ impl PhpXhThreadPool {
     ///
     /// # PHP 签名
     /// public XHThreadPool::__construct(int $workers = 0)
-    #[php_method]
+
     pub fn __construct(workers: Option<i64>) -> Self {
         Self {
             pool: None,
@@ -1114,26 +1119,26 @@ impl PhpXhThreadPool {
 
     /// 添加请求到线程池
     /// 带数量上限检查，防止内存溢出
-    #[php_method]
+
     pub fn add<'a>(
-        #[this] this: &'a mut ZendClassObject<Self>,
+        self_: &'a mut ZendClassObject<PhpXhThreadPool>,
         request: &ZendClassObject<PhpXhRequest>,
-    ) -> Result<&'a mut ZendClassObject<Self>, String> {
-        if this.requests.len() >= MAX_REQUESTS_PER_BATCH {
+    ) -> Result<&'a mut ZendClassObject<PhpXhThreadPool>, String> {
+        if self_.requests.len() >= MAX_REQUESTS_PER_BATCH {
             return Err(format!(
                 "批量请求数量超过上限 {}，请分批执行",
                 MAX_REQUESTS_PER_BATCH
             ));
         }
-        this.requests.push(request.request.clone());
-        Ok(this)
+        self_.requests.push(request.request.clone());
+        Ok(self_)
     }
 
     /// 执行所有请求
     ///
     /// # PHP 签名
     /// public XHThreadPool::execute(): array
-    #[php_method]
+
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
         // 安全检查：线程池仅在 CLI 模式下可用
         // FPM 模式下多线程会与 PHP 内存管理器（TSRM/内存池）冲突
@@ -1240,7 +1245,7 @@ fn results_to_php_array(
         }
 
         // 使用整数键，确保 PHP 端 $res[0] 可访问
-        let _ = ht.insert_at_index(i as u64, response_ht);
+        let _ = ht.insert_at_index(i as i64, response_ht);
     }
     Ok(ht)
 }
@@ -1343,13 +1348,13 @@ fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, St
                     for (i, item) in arr.iter().enumerate() {
                         // 使用整数键（与 PHP 数组索引语义一致）
                         if let Some(s) = item.as_str() {
-                            let _ = arr_ht.insert_at_index(i as u64, s);
+                            let _ = arr_ht.insert_at_index(i as i64, s);
                         } else if let Some(n) = item.as_i64() {
-                            let _ = arr_ht.insert_at_index(i as u64, n);
+                            let _ = arr_ht.insert_at_index(i as i64, n);
                         } else if let Some(f) = item.as_f64() {
-                            let _ = arr_ht.insert_at_index(i as u64, f);
+                            let _ = arr_ht.insert_at_index(i as i64, f);
                         } else if let Some(b) = item.as_bool() {
-                            let _ = arr_ht.insert_at_index(i as u64, b);
+                            let _ = arr_ht.insert_at_index(i as i64, b);
                         }
                     }
                     let _ = ht.insert(key.as_str(), arr_ht);
@@ -1368,12 +1373,17 @@ fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, St
 // +----------------------------------------------------------------------+
 // | PHP 模块入口                                                          |
 // | 注意：#[php_module] 宏必须放在文件最后                                 |
-// | 宏会自动收集前面所有 #[php_class] 标注的类进行注册                    |
-// | 不需要手动调用 .class::<>() 方法                                       |
+// |                                                                       |
+// | ext-php-rs 0.14+ 改用 inventory crate，不再通过全局状态自动收集类，  |
+// | 必须在 #[php_module] 函数体中显式调用 .class::<T>() 注册每个类。      |
 // +----------------------------------------------------------------------+
 
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
-    // 类注册由 #[php_class] 宏自动完成
     module
+        .class::<PhpXhCurl>()
+        .class::<PhpXhRequest>()
+        .class::<PhpXhResponse>()
+        .class::<PhpXhMulti>()
+        .class::<PhpXhThreadPool>()
 }
