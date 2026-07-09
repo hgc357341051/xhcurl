@@ -399,15 +399,46 @@ jobs:
           components: rustfmt, clippy
 
       # -----------------------------------------------------------------
-      # 步骤 3: 安装 LLVM（bindgen 依赖 libclang）
-      # windows-latest 自带 Visual Studio 的 clang，但为 ext-php-rs 0.12
-      # 的 build script 保险起见显式安装并设置 LIBCLANG_PATH
+      # 步骤 3: 安装 LLVM 17（bindgen 依赖 libclang）
+      #
+      # 关键：必须固定到 LLVM 17，不能用 choco install llvm（会装最新的 19）。
+      # 原因：ext-php-rs 0.12.0 依赖 bindgen 0.68.1，该版本在遇到
+      #   `_Complex _Float16` 内建类型时会 panic（context.rs:2020）。
+      #   该内建类型由 LLVM 18+ 的 libclang 声明。LLVM 17 不会声明它，
+      #   因此 bindgen 0.68.1 能正常工作。
+      #   参考：ext-php-rs 0.12 官方 CI 使用 clang "15"/"17" 均通过；
+      #         Mozilla bug 1878536（bindgen > 0.69.2 才修复此 panic）。
+      # 使用 KyleMayes/install-llvm-action 与 ext-php-rs 官方 CI 一致。
       # -----------------------------------------------------------------
-      - name: Install LLVM
+      - name: Cache LLVM 17
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llvm-17
+          key: windows-llvm-17
+
+      - name: Setup LLVM 17
+        id: clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "17"
+          directory: ${{ runner.temp }}/llvm-17
+          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
+
+      - name: Configure LIBCLANG_PATH
+        shell: pwsh
         run: |
-          choco install llvm -y
-          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Windows 上 libclang.dll 位于 LLVM 安装目录的 bin 下
+          echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "LLVM 版本: $(${{ steps.clang.outputs.version }})"
+          Write-Host "LIBCLANG_PATH: $env:LLVM_PATH\bin"
+          # 验证 libclang.dll 存在
+          if (Test-Path "$env:LLVM_PATH\bin\libclang.dll") {
+            Write-Host "libclang.dll 已就绪"
+          } else {
+            Write-Host "::error::libclang.dll 未找到于 $env:LLVM_PATH\bin"
+            exit 1
+          }
 
       # -----------------------------------------------------------------
       # 步骤 4: 安装 PHP
@@ -438,9 +469,9 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: windows-rust-nightlyv2-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: windows-rust-nightlyv3-llvm17-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            windows-rust-nightlyv2-php${{ matrix.php-version }}-${{ matrix.ts }}-
+            windows-rust-nightlyv3-llvm17-php${{ matrix.php-version }}-${{ matrix.ts }}-
 
       # -----------------------------------------------------------------
       # 步骤 6: 编译 Rust PHP 扩展
@@ -455,8 +486,6 @@ jobs:
       # -----------------------------------------------------------------
       - name: Build Rust PHP extension
         working-directory: rust
-        env:
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         shell: pwsh
         run: |
           Write-Host "=== 开始编译 XHCurl Rust 扩展 ==="
@@ -464,7 +493,15 @@ jobs:
           Write-Host "Rust 版本: $(rustc --version)"
           Write-Host "LIBCLANG_PATH: $env:LIBCLANG_PATH"
 
-          # 清除缓存的 ext-php-rs build 输出（避免旧 nightly 缓存残留）
+          # 验证 libclang 可用（LLVM 17）
+          if (-not (Test-Path "$env:LIBCLANG_PATH\libclang.dll")) {
+            Write-Host "::error::libclang.dll 未找到于 $env:LIBCLANG_PATH"
+            Get-ChildItem $env:LIBCLANG_PATH -Filter "libclang*" -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "libclang: $(Get-ChildItem "$env:LIBCLANG_PATH\libclang*")"
+
+          # 清除缓存的 ext-php-rs build 输出（避免旧 LLVM 19 缓存残留触发 _Complex _Float16 panic）
           if (Test-Path "target\release\build\ext-php-rs-*") {
             Remove-Item -Recurse -Force "target\release\build\ext-php-rs-*" -ErrorAction SilentlyContinue
             Write-Host "已清除旧的 ext-php-rs build 缓存"
