@@ -376,8 +376,8 @@ jobs:
       fail-fast: false
       matrix:
         php-version: ['8.1', '8.2', '8.3', '8.4']
-        # NTS 和 ZTS 分别编译
-        ts: ['nts', 'zts']
+        # NTS 和 TS 分别编译（值必须为 setup-php 的 phpts 可识别值：nts / ts）
+        ts: ['nts', 'ts']
 
     steps:
       # -----------------------------------------------------------------
@@ -388,17 +388,20 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 2: 安装 Rust nightly 工具链（MSVC 目标）
-      # ext-php-rs 在 Windows 上需要 nightly（abi_vectorcall 调用约定）
+      # ext-php-rs 在 Windows 上需要 nightly（abi_vectorcall 调用约定是 nightly-only）
+      # 参考 ext-php-rs 官方 CI：Windows 矩阵排除 stable，仅用 nightly
       # -----------------------------------------------------------------
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_WINDOWS }}
           targets: x86_64-pc-windows-msvc
-          components: rust-src
+          components: rustfmt, clippy
 
       # -----------------------------------------------------------------
-      # 步骤 3: 安装 LLVM（bindgen 依赖）
+      # 步骤 3: 安装 LLVM（bindgen 依赖 libclang）
+      # windows-latest 自带 Visual Studio 的 clang，但为 ext-php-rs 0.12
+      # 的 build script 保险起见显式安装并设置 LIBCLANG_PATH
       # -----------------------------------------------------------------
       - name: Install LLVM
         run: |
@@ -407,68 +410,25 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # -----------------------------------------------------------------
-      # 步骤 4: 安装 PHP（使用 shivammathur/setup-php，与 Linux/macOS 一致）
-      # ext-php-rs build script 调用 `php -i` 获取 PHP 配置信息
-      # 必须确保 php.exe 在 PATH 中
+      # 步骤 4: 安装 PHP
+      # 参考 ext-php-rs 官方 CI：用 shivammathur/setup-php，
+      # 线程安全通过 env: phpts 传入（ts/nts），并开启 debug 构建
+      # ext-php-rs build script 通过 `php -i` 自动定位 PHP 头文件，
+      # 无需手动设置 PHP_INCLUDE_PATH
       # -----------------------------------------------------------------
       - name: Setup PHP ${{ matrix.php-version }}
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-version }}
-          ts: ${{ matrix.ts }}
           extensions: curl, json
           coverage: none
           ini-values: memory_limit=512M
+        env:
+          phpts: ${{ matrix.ts }}
+          debug: true
 
       # -----------------------------------------------------------------
-      # 步骤 4.5: 设置 PHP 开发头文件（编译扩展需要）
-      # shivammathur/setup-php 安装的 PHP 自带 devel 头文件
-      # 需要将 include 目录设置到 PHP_INCLUDE_PATH 环境变量
-      # -----------------------------------------------------------------
-      - name: Setup PHP development headers
-        shell: pwsh
-        run: |
-          # 获取 PHP 安装路径
-          $phpExe = Get-Command php | Select-Object -ExpandProperty Source
-          $phpDir = Split-Path $phpExe
-          Write-Host "PHP 安装目录: $phpDir"
-
-          # PHP 头文件目录（devel 包含 php.h 等头文件）
-          $includePath = Join-Path $phpDir "include"
-          if (-not (Test-Path $includePath)) {
-            # 某些 PHP 版本头文件在 include/php 子目录
-            $includePath = Join-Path $phpDir "include\php"
-          }
-
-          Write-Host "PHP Include Path: $includePath"
-
-          # 验证 php.h 存在
-          $phpH = Get-ChildItem -Path $phpDir -Filter "php.h" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($phpH) {
-            Write-Host "找到 php.h: $($phpH.FullName)"
-            $includePath = Split-Path $phpH.FullName
-            # 设置到环境变量
-            echo "PHP_INCLUDE_PATH=$includePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Host "已设置 PHP_INCLUDE_PATH=$includePath"
-          } else {
-            Write-Host "::warning::未找到 php.h，尝试使用默认 include 路径"
-            echo "PHP_INCLUDE_PATH=$includePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
-
-          # 验证 PHP 可用
-          php -v 2>&1 | Select-Object -First 1
-          php -i 2>&1 | Select-Object -First 5
-
-      # -----------------------------------------------------------------
-      # 步骤 5: 设置 MSVC 编译环境
-      # -----------------------------------------------------------------
-      - name: Setup MSVC developer command prompt
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # -----------------------------------------------------------------
-      # 步骤 6: 缓存 cargo 编译产物
+      # 步骤 5: 缓存 cargo 编译产物
       # key 包含 nightly 标识，从 stable 切换到 nightly 时自动失效旧缓存
       # -----------------------------------------------------------------
       - name: Cache cargo artifacts
@@ -478,79 +438,38 @@ jobs:
             rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: windows-rust-nightly-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: windows-rust-nightlyv2-php${{ matrix.php-version }}-${{ matrix.ts }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            windows-rust-nightly-php${{ matrix.php-version }}-${{ matrix.ts }}-
+            windows-rust-nightlyv2-php${{ matrix.php-version }}-${{ matrix.ts }}-
 
       # -----------------------------------------------------------------
-      # 步骤 7: 编译 Rust PHP 扩展
+      # 步骤 6: 编译 Rust PHP 扩展
       # Windows 上 ext-php-rs 需要：
-      #   - PHP_INCLUDE_PATH 环境变量（PHP 开发头文件路径）
-      #   - php.exe 在 PATH 中（build script 调用 php -i）
-      #   - rust-lld 作为链接器（配置在 .cargo/config.toml，避免 link.exe 崩溃）
-      #   - cl.exe 在 PATH 中（cc crate 编译 wrapper.c 需要，由 msvc-dev-cmd 提供）
+      #   - nightly Rust（abi_vectorcall 调用约定，见 lib.rs 顶部）
+      #   - rust-lld 链接器（配置在 .cargo/config.toml，避免 MSVC link.exe 崩溃：
+      #     STATUS_STACK_BUFFER_OVERRUN, exit code 0xc0000409）
+      #   - php.exe 在 PATH 中（build script 调用 php -i 定位头文件）
+      #   - libclang（bindgen 需要，由步骤 3 LLVM 提供）
+      #   - cl.exe（cc crate 编译 wrapper.c；windows-latest runner 默认自带）
+      # 参考 ext-php-rs 官方 CI：不使用 msvc-dev-cmd，不设置 PHP_INCLUDE_PATH
       # -----------------------------------------------------------------
       - name: Build Rust PHP extension
         working-directory: rust
         env:
-          # 确保 bindgen 找到 libclang
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         shell: pwsh
         run: |
           Write-Host "=== 开始编译 XHCurl Rust 扩展 ==="
-
-          # 验证 PHP 可用（ext-php-rs build script 会调用 php -i）
-          try {
-            $phpVer = php -v 2>&1 | Select-Object -First 1
-            Write-Host "PHP 版本: $phpVer"
-            # 关键：验证 php -i 可正常执行
-            $phpInfo = php -i 2>&1 | Select-Object -First 3
-            Write-Host "PHP -i 输出: $phpInfo"
-          } catch {
-            Write-Host "::error::PHP 不可用，请检查 PATH 设置"
-            exit 1
-          }
-
+          Write-Host "PHP 版本: $(php -v 2>&1 | Select-Object -First 1)"
           Write-Host "Rust 版本: $(rustc --version)"
           Write-Host "LIBCLANG_PATH: $env:LIBCLANG_PATH"
-          Write-Host "PHP_INCLUDE_PATH: $env:PHP_INCLUDE_PATH"
 
-          # 验证 nightly 工具链（abi_vectorcall 需要 nightly）
-          $rustcChannel = (rustc --version)
-          if ($rustcChannel -notmatch 'nightly') {
-            Write-Host "::error::Rust 工具链不是 nightly，无法使用 abi_vectorcall 特性"
-            Write-Host "当前版本: $rustcChannel"
-            exit 1
-          }
-
-          # 验证 rust-lld 链接器可用（.cargo/config.toml 配置使用它）
-          $lldPath = (Get-Command rust-lld -ErrorAction SilentlyContinue).Source
-          if (-not $lldPath) {
-            # nightly MSVC 工具链自带 rust-lld，可能在 rustlib 目录
-            $rustlib = "$env:USERPROFILE\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin"
-            $lldPath = Join-Path $rustlib "rust-lld.exe"
-            if (-not (Test-Path $lldPath)) {
-              Write-Host "::error::rust-lld 未找到，ext-php-rs 需要 rust-lld 链接器"
-              exit 1
-            }
-          }
-          Write-Host "rust-lld 路径: $lldPath"
-
-          # 验证 cl.exe（cc crate 编译 wrapper.c 需要 MSVC 编译器）
-          $clPath = (Get-Command cl -ErrorAction SilentlyContinue).Source
-          if (-not $clPath) {
-            Write-Host "::warning::cl.exe 未在 PATH 中，cc crate 可能无法编译 wrapper.c"
-          } else {
-            Write-Host "cl.exe 路径: $clPath"
-          }
-
-          # 清除缓存的 ext-php-rs build 输出（避免 stable 缓存残留）
+          # 清除缓存的 ext-php-rs build 输出（避免旧 nightly 缓存残留）
           if (Test-Path "target\release\build\ext-php-rs-*") {
             Remove-Item -Recurse -Force "target\release\build\ext-php-rs-*" -ErrorAction SilentlyContinue
             Write-Host "已清除旧的 ext-php-rs build 缓存"
           }
 
-          # 编译
           cargo build --release --features php
 
           if ($LASTEXITCODE -eq 0) {
