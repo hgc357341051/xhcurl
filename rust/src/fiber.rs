@@ -27,7 +27,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::convert::{FromZval, IntoZvalDyn};
 use ext_php_rs::types::{ArrayKey, ZendCallable, ZendHashTable, Zval};
@@ -152,8 +152,8 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
     });
 
     // 2. 获取当前 PHP Fiber 对象
-    let get_current = ZendCallable::try_from_name("Fiber::getCurrent")
-        .map_err(|e| e.to_string())?;
+    let get_current =
+        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
     let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
 
     // current_fiber 为 null 表示不在 Fiber 上下文中
@@ -173,8 +173,7 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
     // 4. 调用 Fiber::suspend() 挂起当前 Fiber
     //    控制权回到 $fiber->start() 的调用者（即 run() 事件泵）
     //    Rust 栈帧随 Fiber 一起被冻结，resume 后从下一行继续
-    let suspend = ZendCallable::try_from_name("Fiber::suspend")
-        .map_err(|e| e.to_string())?;
+    let suspend = ZendCallable::try_from_name("Fiber::suspend").map_err(|e| e.to_string())?;
     let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
 
     // 5. 事件泵收到结果后调用 $fiber->resume($result)
@@ -207,8 +206,8 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
     }
 
     // 1. 获取当前 Fiber
-    let get_current = ZendCallable::try_from_name("Fiber::getCurrent")
-        .map_err(|e| e.to_string())?;
+    let get_current =
+        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
     let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
     if current_fiber.is_null() || !current_fiber.is_object() {
         return Err("XHCurl::gather 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
@@ -247,8 +246,7 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
     // 3. 循环挂起 N 次，每次收到一个结果
     //    事件泵收到结果 → 查 pending 表 → resume 当前 Fiber → Fiber 从 suspend 返回
     //    Fiber 检查是否收齐，未齐则再次 suspend
-    let suspend = ZendCallable::try_from_name("Fiber::suspend")
-        .map_err(|e| e.to_string())?;
+    let suspend = ZendCallable::try_from_name("Fiber::suspend").map_err(|e| e.to_string())?;
 
     let mut results = ZendHashTable::new();
     for i in 0..total {
@@ -354,16 +352,12 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 // 超时：检查是否有 pending 任务
-                let pending_count = SCHEDULER.with(|s| {
-                    s.borrow()
-                        .as_ref()
-                        .map(|sc| sc.pending.len())
-                        .unwrap_or(0)
-                });
+                let pending_count =
+                    SCHEDULER.with(|s| s.borrow().as_ref().map(|sc| sc.pending.len()).unwrap_or(0));
                 if pending_count == 0 {
                     // 无 pending 任务但主 Fiber 仍挂起，可能是死锁
                     return Err(
-                        "事件泵空闲但主 Fiber 未终止（可能未在 Fiber 内调用 await）".to_string(),
+                        "事件泵空闲但主 Fiber 未终止（可能未在 Fiber 内调用 await）".to_string()
                     );
                 }
                 // 有 pending 任务但超时，继续等待
@@ -391,9 +385,8 @@ fn create_fiber(main: &Zval) -> Result<Zval, String> {
     use ext_php_rs::zend::ClassEntry;
 
     // 查找 Fiber 类入口
-    let ce = ClassEntry::try_find("Fiber").ok_or_else(|| {
-        "Fiber 类未找到（需要 PHP 8.1+）".to_string()
-    })?;
+    let ce = ClassEntry::try_find("Fiber")
+        .ok_or_else(|| "Fiber 类未找到（需要 PHP 8.1+）".to_string())?;
 
     // 创建对象实例（create_object handler 会初始化 zend_object_std）
     let mut obj = ZendObject::new(ce);

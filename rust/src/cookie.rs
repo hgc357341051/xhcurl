@@ -255,8 +255,7 @@ impl CookieManager {
             return None;
         }
 
-        let mut cookie = Cookie::new(name, value)
-            .with_domain(default_domain.to_string());
+        let mut cookie = Cookie::new(name, value).with_domain(default_domain.to_string());
 
         // 解析属性
         for part in parts {
@@ -373,7 +372,11 @@ mod tests {
     fn test_clean_expired() {
         let cm = CookieManager::new();
         cm.set(Cookie::new("session", "val").with_domain("example.com")); // 会话级
-        cm.set(Cookie::new("temp", "val").with_domain("example.com").with_expires(1000)); // 已过期
+        cm.set(
+            Cookie::new("temp", "val")
+                .with_domain("example.com")
+                .with_expires(1000),
+        ); // 已过期
 
         assert_eq!(cm.len(), 2);
 

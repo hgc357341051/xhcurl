@@ -119,7 +119,12 @@ pub struct RequestResult {
 
 impl RequestResult {
     /// 创建成功结果
-    pub fn success(id: String, user_data: Option<String>, response: XhResponse, elapsed: Duration) -> Self {
+    pub fn success(
+        id: String,
+        user_data: Option<String>,
+        response: XhResponse,
+        elapsed: Duration,
+    ) -> Self {
         Self {
             id,
             user_data,
@@ -247,7 +252,9 @@ impl XhMulti {
         if new_count > MAX_REQUESTS_PER_BATCH {
             return Err(XhCurlError::Memory(format!(
                 "批量请求数量超过上限 {}（当前 {} + 新增 {}），请分批执行",
-                MAX_REQUESTS_PER_BATCH, self.requests.len(), requests.len()
+                MAX_REQUESTS_PER_BATCH,
+                self.requests.len(),
+                requests.len()
             )));
         }
         self.requests.extend(requests);
@@ -282,7 +289,11 @@ impl XhMulti {
     /// # 参数
     /// - `max_size`: 最大字节数（0 = 使用默认值 10MB）
     pub fn max_response_size(mut self, max_size: usize) -> Self {
-        self.max_response_size = if max_size > 0 { max_size } else { DEFAULT_MAX_RESPONSE_SIZE };
+        self.max_response_size = if max_size > 0 {
+            max_size
+        } else {
+            DEFAULT_MAX_RESPONSE_SIZE
+        };
         self
     }
 
@@ -321,7 +332,9 @@ impl XhMulti {
         }
 
         // 创建结果 channel（有界，缓冲区 = 请求数 * 倍数）
-        let channel_capacity = self.requests.len()
+        let channel_capacity = self
+            .requests
+            .len()
             .saturating_mul(RESULT_CHANNEL_MULTIPLIER)
             .max(16); // 最小 16 个缓冲位
         let (result_tx, mut result_rx) = mpsc::channel(channel_capacity);
@@ -339,7 +352,8 @@ impl XhMulti {
         // 为每个请求创建异步任务
         for request in self.requests.drain(..) {
             // 获取请求 ID（如果没有则使用 URL 作为 ID）
-            let request_id = request.get_id()
+            let request_id = request
+                .get_id()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| request.get_url().to_string());
 
@@ -372,14 +386,17 @@ impl XhMulti {
                     request_id.clone(),
                     stream_tx,
                     max_response_size,
-                ).await;
+                )
+                .await;
 
                 // 计算耗时
                 let elapsed = start.elapsed();
 
                 // 构建结果
                 let result = match result {
-                    Ok(response) => RequestResult::success(request_id, user_data, response, elapsed),
+                    Ok(response) => {
+                        RequestResult::success(request_id, user_data, response, elapsed)
+                    }
                     Err(e) => RequestResult::error(request_id, user_data, e.to_string(), elapsed),
                 };
 
@@ -453,15 +470,19 @@ impl XhMulti {
 
         // 如果启用了流式回调，发送 Headers 事件
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id.clone(), StreamEvent::Headers {
-                status,
-                headers: headers_map.clone(),
-            })).await;
+            let _ = tx
+                .send((
+                    request_id.clone(),
+                    StreamEvent::Headers {
+                        status,
+                        headers: headers_map.clone(),
+                    },
+                ))
+                .await;
         }
 
         // 获取远程地址
-        let remote_addr = response.remote_addr()
-            .map(|addr| addr.to_string());
+        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
 
         // 获取 HTTP 版本
         let version = match response.version() {
@@ -490,7 +511,8 @@ impl XhMulti {
 
             // 检查累计大小是否超过限制
             // 使用 checked_add 防止整数溢出
-            let new_size = body_size.checked_add(chunk_len)
+            let new_size = body_size
+                .checked_add(chunk_len)
                 .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
 
             if new_size > max_response_size {
@@ -511,9 +533,14 @@ impl XhMulti {
 
         // 如果启用了流式回调，发送 Chunk 事件
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id.clone(), StreamEvent::Chunk {
-                data: body_data.clone(),
-            })).await;
+            let _ = tx
+                .send((
+                    request_id.clone(),
+                    StreamEvent::Chunk {
+                        data: body_data.clone(),
+                    },
+                ))
+                .await;
         }
 
         // 计算耗时
@@ -541,10 +568,9 @@ impl XhMulti {
 
         // 如果启用了流式回调，发送 Complete 事件
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id, StreamEvent::Complete {
-                elapsed,
-                body_size,
-            })).await;
+            let _ = tx
+                .send((request_id, StreamEvent::Complete { elapsed, body_size }))
+                .await;
         }
 
         Ok(xh_response)
@@ -596,8 +622,12 @@ mod tests {
         let mut multi = XhMulti::with_default_client().unwrap();
 
         // 添加单个请求
-        multi.add(XhRequest::new("https://httpbin.org/get")).unwrap();
-        multi.add(XhRequest::new("https://httpbin.org/status/200")).unwrap();
+        multi
+            .add(XhRequest::new("https://httpbin.org/get"))
+            .unwrap();
+        multi
+            .add(XhRequest::new("https://httpbin.org/status/200"))
+            .unwrap();
 
         assert_eq!(multi.len(), 2);
     }
@@ -641,8 +671,7 @@ mod tests {
     /// 测试并发数设置
     #[test]
     fn test_max_concurrency() {
-        let multi = XhMulti::with_default_client().unwrap()
-            .max_concurrency(10);
+        let multi = XhMulti::with_default_client().unwrap().max_concurrency(10);
 
         assert_eq!(multi.max_concurrency, 10);
     }
@@ -650,8 +679,7 @@ mod tests {
     /// 测试超时设置
     #[test]
     fn test_timeout() {
-        let multi = XhMulti::with_default_client().unwrap()
-            .timeout(30);
+        let multi = XhMulti::with_default_client().unwrap().timeout(30);
 
         assert_eq!(multi.timeout, Some(Duration::from_secs(30)));
     }
@@ -659,7 +687,8 @@ mod tests {
     /// 测试最大响应体大小设置
     #[test]
     fn test_max_response_size() {
-        let multi = XhMulti::with_default_client().unwrap()
+        let multi = XhMulti::with_default_client()
+            .unwrap()
             .max_response_size(1024 * 1024); // 1MB
 
         assert_eq!(multi.max_response_size, 1024 * 1024);
@@ -691,7 +720,9 @@ mod tests {
         }
 
         // 测试 Chunk 事件
-        let event = Chunk { data: b"hello".to_vec() };
+        let event = Chunk {
+            data: b"hello".to_vec(),
+        };
         if let Chunk { data } = event {
             assert_eq!(data, b"hello");
         }
@@ -706,7 +737,9 @@ mod tests {
         }
 
         // 测试 Error 事件
-        let event = Error { message: "超时".to_string() };
+        let event = Error {
+            message: "超时".to_string(),
+        };
         if let Error { message } = event {
             assert_eq!(message, "超时");
         }
@@ -721,12 +754,8 @@ mod tests {
             "https://example.com".to_string(),
             Duration::from_secs(0),
         );
-        let success = RequestResult::success(
-            "req1".to_string(),
-            None,
-            response,
-            Duration::from_secs(1),
-        );
+        let success =
+            RequestResult::success("req1".to_string(), None, response, Duration::from_secs(1));
         assert!(success.is_success());
         assert!(success.response.is_some());
         assert!(success.error.is_none());

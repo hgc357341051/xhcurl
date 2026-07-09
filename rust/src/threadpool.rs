@@ -163,13 +163,11 @@ impl XhThreadPool {
         }
 
         // 创建任务 channel（有界队列防止内存溢出）
-        let (task_tx, task_rx) = mpsc::channel(
-            if self.config.queue_capacity > 0 {
-                self.config.queue_capacity
-            } else {
-                usize::MAX // 无界
-            }
-        );
+        let (task_tx, task_rx) = mpsc::channel(if self.config.queue_capacity > 0 {
+            self.config.queue_capacity
+        } else {
+            usize::MAX // 无界
+        });
 
         // 创建结果 channel
         let (result_tx, result_rx) = mpsc::channel(self.config.queue_capacity.max(100));
@@ -188,7 +186,15 @@ impl XhThreadPool {
 
             // 生成工作线程任务
             let handle = tokio::spawn(async move {
-                Self::worker_loop(worker_id, task_rx, result_tx, client, idle_timeout, max_response_size).await;
+                Self::worker_loop(
+                    worker_id,
+                    task_rx,
+                    result_tx,
+                    client,
+                    idle_timeout,
+                    max_response_size,
+                )
+                .await;
             });
 
             self.workers.push(handle);
@@ -227,10 +233,11 @@ impl XhThreadPool {
             // 注意：recv() 在持有锁期间 await，多个工作线程串行竞争接收
             let task = if idle_timeout > 0 {
                 // 有空闲超时：限制 lock+recv 的总耗时
-                match tokio::time::timeout(
-                    Duration::from_secs(idle_timeout),
-                    async { task_rx.lock().await.recv().await },
-                ).await {
+                match tokio::time::timeout(Duration::from_secs(idle_timeout), async {
+                    task_rx.lock().await.recv().await
+                })
+                .await
+                {
                     Ok(task) => task,
                     Err(_) => {
                         // 空闲超时，退出工作线程
@@ -243,9 +250,14 @@ impl XhThreadPool {
             };
 
             match task {
-                Some(TaskMessage::Request { request, client: _, stream_tx }) => {
+                Some(TaskMessage::Request {
+                    request,
+                    client: _,
+                    stream_tx,
+                }) => {
                     // 执行请求
-                    let request_id = request.get_id()
+                    let request_id = request
+                        .get_id()
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| request.get_url().to_string());
 
@@ -261,18 +273,22 @@ impl XhThreadPool {
                         request_id.clone(),
                         stream_tx,
                         max_response_size,
-                    ).await;
+                    )
+                    .await;
 
                     let elapsed = start.elapsed();
 
                     // 构建结果
                     let result_msg = match result {
-                        Ok(response) => ResultMessage::Completed(
-                            RequestResult::success(request_id, user_data, response, elapsed)
-                        ),
-                        Err(e) => ResultMessage::Completed(
-                            RequestResult::error(request_id, user_data, e.to_string(), elapsed)
-                        ),
+                        Ok(response) => ResultMessage::Completed(RequestResult::success(
+                            request_id, user_data, response, elapsed,
+                        )),
+                        Err(e) => ResultMessage::Completed(RequestResult::error(
+                            request_id,
+                            user_data,
+                            e.to_string(),
+                            elapsed,
+                        )),
                     };
 
                     // 发送结果
@@ -323,15 +339,19 @@ impl XhThreadPool {
 
         // 发送 Headers 事件（有界 channel，使用 await 实现背压）
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id.clone(), StreamEvent::Headers {
-                status,
-                headers: headers_map.clone(),
-            })).await;
+            let _ = tx
+                .send((
+                    request_id.clone(),
+                    StreamEvent::Headers {
+                        status,
+                        headers: headers_map.clone(),
+                    },
+                ))
+                .await;
         }
 
         // 获取远程地址
-        let remote_addr = response.remote_addr()
-            .map(|addr| addr.to_string());
+        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
 
         // 获取 HTTP 版本
         let version = match response.version() {
@@ -357,7 +377,8 @@ impl XhThreadPool {
             let chunk_len = chunk.len();
 
             // 使用 checked_add 防止整数溢出
-            let new_size = body_size.checked_add(chunk_len)
+            let new_size = body_size
+                .checked_add(chunk_len)
                 .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
 
             if new_size > max_response_size {
@@ -377,9 +398,14 @@ impl XhThreadPool {
 
         // 发送 Chunk 事件（有界 channel，使用 await 实现背压）
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id.clone(), StreamEvent::Chunk {
-                data: body_data.clone(),
-            })).await;
+            let _ = tx
+                .send((
+                    request_id.clone(),
+                    StreamEvent::Chunk {
+                        data: body_data.clone(),
+                    },
+                ))
+                .await;
         }
 
         let elapsed = start.elapsed();
@@ -387,7 +413,8 @@ impl XhThreadPool {
         // 如果响应体超过大小限制，返回错误（与 XhMulti 行为一致）
         if size_exceeded {
             return Err(XhCurlError::Memory(format!(
-                "响应体大小超过限制 {} 字节", max_response_size
+                "响应体大小超过限制 {} 字节",
+                max_response_size
             )));
         }
 
@@ -404,10 +431,9 @@ impl XhThreadPool {
 
         // 发送 Complete 事件（有界 channel，使用 await 实现背压）
         if let Some(tx) = &stream_tx {
-            let _ = tx.send((request_id, StreamEvent::Complete {
-                elapsed,
-                body_size,
-            })).await;
+            let _ = tx
+                .send((request_id, StreamEvent::Complete { elapsed, body_size }))
+                .await;
         }
 
         Ok(xh_response)
@@ -422,15 +448,19 @@ impl XhThreadPool {
     /// - `Ok(())`: 提交成功
     /// - `Err`: 线程池未启动或队列已满
     pub fn submit(&self, request: XhRequest) -> XhCurlResult<()> {
-        let task_tx = self.task_tx.as_ref()
+        let task_tx = self
+            .task_tx
+            .as_ref()
             .ok_or_else(|| XhCurlError::ThreadPool("线程池未启动".to_string()))?;
 
         // 使用 try_send 避免阻塞（如果队列满会立即返回错误）
-        task_tx.try_send(TaskMessage::Request {
-            request,
-            client: self.client.clone(),
-            stream_tx: None,
-        }).map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        task_tx
+            .try_send(TaskMessage::Request {
+                request,
+                client: self.client.clone(),
+                stream_tx: None,
+            })
+            .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
 
         Ok(())
     }
@@ -441,14 +471,18 @@ impl XhThreadPool {
         request: XhRequest,
         stream_tx: mpsc::Sender<(String, StreamEvent)>,
     ) -> XhCurlResult<()> {
-        let task_tx = self.task_tx.as_ref()
+        let task_tx = self
+            .task_tx
+            .as_ref()
             .ok_or_else(|| XhCurlError::ThreadPool("线程池未启动".to_string()))?;
 
-        task_tx.try_send(TaskMessage::Request {
-            request,
-            client: self.client.clone(),
-            stream_tx: Some(stream_tx),
-        }).map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        task_tx
+            .try_send(TaskMessage::Request {
+                request,
+                client: self.client.clone(),
+                stream_tx: Some(stream_tx),
+            })
+            .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
 
         Ok(())
     }
@@ -460,7 +494,10 @@ impl XhThreadPool {
     ///
     /// # 返回
     /// 所有请求的结果列表
-    pub async fn execute_all(&mut self, requests: Vec<XhRequest>) -> XhCurlResult<Vec<RequestResult>> {
+    pub async fn execute_all(
+        &mut self,
+        requests: Vec<XhRequest>,
+    ) -> XhCurlResult<Vec<RequestResult>> {
         if !self.is_running {
             self.start()?;
         }
@@ -479,7 +516,9 @@ impl XhThreadPool {
         let mut results = Vec::with_capacity(request_count);
         let mut shutdown_count = 0;
 
-        let result_rx = self.result_rx.as_mut()
+        let result_rx = self
+            .result_rx
+            .as_mut()
             .ok_or_else(|| XhCurlError::ThreadPool("结果接收端不存在".to_string()))?;
 
         // 修复：原条件 `shutdown_count < worker_count && results.len() < request_count`

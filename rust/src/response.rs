@@ -84,8 +84,7 @@ impl XhResponse {
         }
 
         // 获取远程地址
-        let remote_addr = response.remote_addr()
-            .map(|addr| addr.to_string());
+        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
 
         // 获取 HTTP 版本
         let version = match response.version() {
@@ -197,9 +196,7 @@ impl XhResponse {
     pub async fn read_body(&mut self, response: reqwest::Response) -> XhCurlResult<()> {
         if self.body.is_none() {
             // 读取完整响应体（bytes() 消费 response）
-            let body = response.bytes()
-                .await
-                .map_err(XhCurlError::from)?;
+            let body = response.bytes().await.map_err(XhCurlError::from)?;
             self.body_size = body.len();
             self.body = Some(body.to_vec());
         }
@@ -262,7 +259,8 @@ impl XhResponse {
 
     /// 获取 Content-Length 响应头
     pub fn content_length(&self) -> Option<usize> {
-        self.headers.get("content-length")
+        self.headers
+            .get("content-length")
             .and_then(|s| s.parse().ok())
     }
 
@@ -284,7 +282,9 @@ impl XhResponse {
     /// - `Ok(String)`: 转换成功
     /// - `Err`: 响应体未读取或不是有效 UTF-8
     pub fn body_text(&self) -> XhCurlResult<String> {
-        let body = self.body.as_ref()
+        let body = self
+            .body
+            .as_ref()
             .ok_or_else(|| XhCurlError::Generic("响应体尚未读取".to_string()))?;
         String::from_utf8(body.clone())
             .map_err(|e| XhCurlError::Generic(format!("UTF-8 转换失败: {}", e)))
@@ -296,7 +296,9 @@ impl XhResponse {
     /// - `Ok(serde_json::Value)`: 解析成功
     /// - `Err`: 响应体未读取或 JSON 格式错误
     pub fn body_json(&self) -> XhCurlResult<serde_json::Value> {
-        let body = self.body.as_ref()
+        let body = self
+            .body
+            .as_ref()
             .ok_or_else(|| XhCurlError::Generic("响应体尚未读取".to_string()))?;
         serde_json::from_slice(body).map_err(XhCurlError::from)
     }

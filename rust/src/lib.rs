@@ -74,15 +74,15 @@ pub mod php_ext;
 
 // 导出常用类型，简化外部使用
 // 使用 pub use 重导出，提供简洁的 API
-pub use error::{XhCurlError, XhCurlResult};
 pub use buffer::ResponseBuffer;
-pub use header::HeaderManager;
 pub use cookie::{Cookie, CookieManager};
 pub use curl::{GlobalConfig, XhCurlManager};
-pub use request::{HttpMethod, XhRequest, BodyType, MultipartField};
+pub use error::{XhCurlError, XhCurlResult};
+pub use header::HeaderManager;
+pub use multi::{RequestResult, StreamEvent, XhMulti};
+pub use request::{BodyType, HttpMethod, MultipartField, XhRequest};
 pub use response::XhResponse;
-pub use multi::{XhMulti, RequestResult, StreamEvent};
-pub use threadpool::{XhThreadPool, ThreadPoolConfig, TaskMessage, ResultMessage};
+pub use threadpool::{ResultMessage, TaskMessage, ThreadPoolConfig, XhThreadPool};
 
 // +----------------------------------------------------------------------+
 // | 库级别测试                                                            |

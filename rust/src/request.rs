@@ -66,7 +66,8 @@ impl HttpMethod {
             "HEAD" => Ok(HttpMethod::Head),
             "OPTIONS" => Ok(HttpMethod::Options),
             _ => Err(XhCurlError::InvalidArgument(format!(
-                "不支持的 HTTP 方法: {}", s
+                "不支持的 HTTP 方法: {}",
+                s
             ))),
         }
     }
@@ -185,6 +186,50 @@ pub struct XhRequest {
     /// 用于批量请求时关联业务上下文（如任务索引、回调标识等）
     user_data: Option<String>,
 
+    /// 请求 Cookie 字符串（CURLOPT_COOKIE）
+    /// 格式: "name1=value1; name2=value2"
+    cookies: Option<String>,
+
+    /// Cookie 文件路径（CURLOPT_COOKIEFILE）
+    /// 读取该文件中的 cookie 加入请求
+    cookie_file: Option<String>,
+
+    /// Cookie 存储文件路径（CURLOPT_COOKIEJAR）
+    /// 请求结束后将 cookie 保存到该文件
+    cookie_jar: Option<String>,
+
+    /// HTTP 基本认证凭据（CURLOPT_USERPWD）
+    /// 格式: "username:password"
+    auth: Option<String>,
+
+    /// Bearer Token（CURLOPT_XOAUTH2_BEARER）
+    /// 自动设置 Authorization: Bearer {token}
+    bearer_token: Option<String>,
+
+    /// 自定义 CA 证书路径（CURLOPT_CAINFO）
+    ca_info: Option<String>,
+
+    /// 客户端证书路径（CURLOPT_SSLCERT）
+    ssl_cert: Option<String>,
+
+    /// 客户端证书密钥路径（CURLOPT_SSLKEY）
+    ssl_key: Option<String>,
+
+    /// 客户端证书密钥密码（CURLOPT_SSLKEYPASSWD）
+    ssl_key_password: Option<String>,
+
+    /// Accept-Encoding 头部（CURLOPT_ENCODING）
+    /// 如 "gzip, deflate"
+    encoding: Option<String>,
+
+    /// 自定义请求方法（CURLOPT_CUSTOMREQUEST）
+    /// 覆盖标准 HTTP 方法，用于 CONNECT/TRACE 等非标准方法
+    custom_method: Option<String>,
+
+    /// Range 请求范围（CURLOPT_RANGE）
+    /// 格式: "0-1023" 表示请求前 1024 字节
+    range: Option<String>,
+
     /// 请求优先级（0 = 默认，数值越大优先级越高）
     /// 用于线程池模式下的任务调度
     priority: i32,
@@ -218,6 +263,18 @@ impl XhRequest {
             proxy: None,
             id: None,
             user_data: None,
+            cookies: None,
+            cookie_file: None,
+            cookie_jar: None,
+            auth: None,
+            bearer_token: None,
+            ca_info: None,
+            ssl_cert: None,
+            ssl_key: None,
+            ssl_key_password: None,
+            encoding: None,
+            custom_method: None,
+            range: None,
             priority: 0,
             stream_chunk_size: 0,
         }
@@ -318,7 +375,9 @@ impl XhRequest {
     /// 自动设置 Content-Type: application/x-www-form-urlencoded
     pub fn body_form(mut self, form: Vec<(String, String)>) -> Self {
         self.body = BodyType::Form(form);
-        let _ = self.headers.set("Content-Type", "application/x-www-form-urlencoded");
+        let _ = self
+            .headers
+            .set("Content-Type", "application/x-www-form-urlencoded");
         self
     }
 
@@ -385,6 +444,84 @@ impl XhRequest {
         self
     }
 
+    /// 设置请求 Cookie 字符串（CURLOPT_COOKIE）
+    /// 格式: "name1=value1; name2=value2"
+    pub fn cookies(mut self, cookies: impl Into<String>) -> Self {
+        self.cookies = Some(cookies.into());
+        self
+    }
+
+    /// 设置 Cookie 读取文件路径（CURLOPT_COOKIEFILE）
+    pub fn cookie_file(mut self, path: impl Into<String>) -> Self {
+        self.cookie_file = Some(path.into());
+        self
+    }
+
+    /// 设置 Cookie 存储文件路径（CURLOPT_COOKIEJAR）
+    pub fn cookie_jar(mut self, path: impl Into<String>) -> Self {
+        self.cookie_jar = Some(path.into());
+        self
+    }
+
+    /// 设置 HTTP 基本认证凭据（CURLOPT_USERPWD）
+    /// 格式: "username:password"
+    pub fn basic_auth(mut self, credentials: impl Into<String>) -> Self {
+        self.auth = Some(credentials.into());
+        self
+    }
+
+    /// 设置 Bearer Token（CURLOPT_XOAUTH2_BEARER）
+    /// 自动设置 Authorization: Bearer {token}
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// 设置自定义 CA 证书路径（CURLOPT_CAINFO）
+    pub fn ca_info(mut self, path: impl Into<String>) -> Self {
+        self.ca_info = Some(path.into());
+        self
+    }
+
+    /// 设置客户端证书路径（CURLOPT_SSLCERT）
+    pub fn ssl_cert(mut self, path: impl Into<String>) -> Self {
+        self.ssl_cert = Some(path.into());
+        self
+    }
+
+    /// 设置客户端证书密钥路径（CURLOPT_SSLKEY）
+    pub fn ssl_key(mut self, path: impl Into<String>) -> Self {
+        self.ssl_key = Some(path.into());
+        self
+    }
+
+    /// 设置客户端证书密钥密码（CURLOPT_SSLKEYPASSWD）
+    pub fn ssl_key_password(mut self, password: impl Into<String>) -> Self {
+        self.ssl_key_password = Some(password.into());
+        self
+    }
+
+    /// 设置 Accept-Encoding（CURLOPT_ENCODING）
+    /// 如 "gzip, deflate, br"
+    pub fn encoding(mut self, encoding: impl Into<String>) -> Self {
+        self.encoding = Some(encoding.into());
+        self
+    }
+
+    /// 设置自定义请求方法（CURLOPT_CUSTOMREQUEST）
+    /// 用于非标准 HTTP 方法（CONNECT/TRACE 等）
+    pub fn custom_method(mut self, method: impl Into<String>) -> Self {
+        self.custom_method = Some(method.into());
+        self
+    }
+
+    /// 设置 Range 请求范围（CURLOPT_RANGE）
+    /// 格式: "0-1023" 或 "0-" 或 "-1023"
+    pub fn range(mut self, range: impl Into<String>) -> Self {
+        self.range = Some(range.into());
+        self
+    }
+
     /// 设置请求优先级
     pub fn priority(mut self, priority: i32) -> Self {
         self.priority = priority;
@@ -428,6 +565,41 @@ impl XhRequest {
     /// 获取用户自定义数据
     pub fn get_user_data(&self) -> Option<&str> {
         self.user_data.as_deref()
+    }
+
+    /// 获取 Cookie 字符串
+    pub fn get_cookies(&self) -> Option<&str> {
+        self.cookies.as_deref()
+    }
+
+    /// 获取 HTTP 基本认证凭据
+    pub fn get_auth(&self) -> Option<&str> {
+        self.auth.as_deref()
+    }
+
+    /// 获取 Bearer Token
+    pub fn get_bearer_token(&self) -> Option<&str> {
+        self.bearer_token.as_deref()
+    }
+
+    /// 获取自定义请求方法
+    pub fn get_custom_method(&self) -> Option<&str> {
+        self.custom_method.as_deref()
+    }
+
+    /// 获取 Range 请求范围
+    pub fn get_range(&self) -> Option<&str> {
+        self.range.as_deref()
+    }
+
+    /// 获取自定义 CA 证书路径
+    pub fn get_ca_info(&self) -> Option<&str> {
+        self.ca_info.as_deref()
+    }
+
+    /// 获取 Accept-Encoding
+    pub fn get_encoding(&self) -> Option<&str> {
+        self.encoding.as_deref()
     }
 
     /// 获取请求优先级
@@ -475,18 +647,42 @@ impl XhRequest {
     /// 配置好的 reqwest::RequestBuilder
     pub fn to_reqwest(&self, client: &reqwest::Client) -> XhCurlResult<reqwest::RequestBuilder> {
         // 根据方法创建请求构建器
-        let mut builder = match self.method {
-            HttpMethod::Get => client.get(&self.url),
-            HttpMethod::Post => client.post(&self.url),
-            HttpMethod::Put => client.put(&self.url),
-            HttpMethod::Delete => client.delete(&self.url),
-            HttpMethod::Patch => client.patch(&self.url),
-            HttpMethod::Head => client.head(&self.url),
-            HttpMethod::Options => client.request(reqwest::Method::OPTIONS, &self.url),
+        // 自定义方法优先（CURLOPT_CUSTOMREQUEST）
+        let mut builder = if let Some(custom) = &self.custom_method {
+            client.request(
+                reqwest::Method::from_bytes(custom.as_bytes())
+                    .map_err(|e| XhCurlError::Generic(format!("无效的 HTTP 方法: {}", e)))?,
+                &self.url,
+            )
+        } else {
+            match self.method {
+                HttpMethod::Get => client.get(&self.url),
+                HttpMethod::Post => client.post(&self.url),
+                HttpMethod::Put => client.put(&self.url),
+                HttpMethod::Delete => client.delete(&self.url),
+                HttpMethod::Patch => client.patch(&self.url),
+                HttpMethod::Head => client.head(&self.url),
+                HttpMethod::Options => client.request(reqwest::Method::OPTIONS, &self.url),
+            }
         };
 
         // 设置请求头
-        let header_map = self.headers.to_header_map();
+        let mut header_map = self.headers.to_header_map();
+
+        // Accept-Encoding（CURLOPT_ENCODING）
+        if let Some(encoding) = &self.encoding {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(encoding) {
+                header_map.insert(reqwest::header::ACCEPT_ENCODING, v);
+            }
+        }
+
+        // Range（CURLOPT_RANGE）
+        if let Some(range) = &self.range {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(range) {
+                header_map.insert(reqwest::header::RANGE, v);
+            }
+        }
+
         builder = builder.headers(header_map);
 
         // 设置请求体
@@ -506,14 +702,40 @@ impl XhRequest {
                         part = part.file_name(filename.clone());
                     }
                     if let Some(ct) = &field.content_type {
-                        part = part.mime_str(ct)
+                        part = part
+                            .mime_str(ct)
                             .map_err(|e| XhCurlError::Generic(format!("MIME 类型错误: {}", e)))?;
                     }
-                    form = form.text(field.name.clone(), String::new()).part(field.name.clone(), part);
+                    form = form
+                        .text(field.name.clone(), String::new())
+                        .part(field.name.clone(), part);
                 }
                 builder.multipart(form)
             }
         };
+
+        // HTTP 基本认证（CURLOPT_USERPWD）
+        if let Some(auth) = &self.auth {
+            if let Some(idx) = auth.find(':') {
+                let (user, pass) = auth.split_at(idx);
+                builder = builder.basic_auth(user, Some(&pass[1..]));
+            } else {
+                // 只有用户名，无密码
+                builder = builder.basic_auth(auth.as_str(), Some(""));
+            }
+        }
+
+        // Bearer Token（CURLOPT_XOAUTH2_BEARER）
+        if let Some(token) = &self.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+
+        // Cookie（CURLOPT_COOKIE）
+        if let Some(cookies) = &self.cookies {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(cookies) {
+                builder = builder.header(reqwest::header::COOKIE, v);
+            }
+        }
 
         // 设置超时（覆盖客户端默认值）
         if let Some(timeout) = self.request_timeout {
@@ -544,7 +766,8 @@ mod tests {
             .post()
             .header("Authorization", "Bearer token")
             .header("Accept", "application/json")
-            .body_json_str(r#"{"name": "test", "age": 18}"#).unwrap()
+            .body_json_str(r#"{"name": "test", "age": 18}"#)
+            .unwrap()
             .request_timeout(30)
             .verify_ssl(true);
 
@@ -579,12 +802,7 @@ mod tests {
             .post()
             .body_multipart(vec![
                 MultipartField::text("description", "test file"),
-                MultipartField::file(
-                    "file",
-                    "test.txt",
-                    b"hello world".to_vec(),
-                    "text/plain",
-                ),
+                MultipartField::file("file", "test.txt", b"hello world".to_vec(), "text/plain"),
             ]);
 
         if let BodyType::Multipart(fields) = req.get_body() {

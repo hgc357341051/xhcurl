@@ -46,10 +46,7 @@ impl ResponseBuffer {
         // Vec::with_capacity 不会初始化元素，仅分配内存
         let data = Vec::with_capacity(initial_capacity);
 
-        Self {
-            data,
-            max_size,
-        }
+        Self { data, max_size }
     }
 
     /// 向缓冲区追加写入数据
@@ -73,7 +70,10 @@ impl ResponseBuffer {
         // 检查写入后是否超过最大限制
         if self.max_size > 0 {
             // 计算写入后的总大小（使用 checked_add 防止整数溢出）
-            let new_size = self.data.len().checked_add(chunk.len())
+            let new_size = self
+                .data
+                .len()
+                .checked_add(chunk.len())
                 .ok_or_else(|| XhCurlError::Memory("缓冲区大小溢出".to_string()))?;
 
             if new_size > self.max_size {
@@ -85,7 +85,8 @@ impl ResponseBuffer {
                 }
                 // 返回错误通知调用方（对应 C 版本的 return -1）
                 return Err(XhCurlError::Memory(format!(
-                    "响应体超过最大限制 {} 字节", self.max_size
+                    "响应体超过最大限制 {} 字节",
+                    self.max_size
                 )));
             }
         }

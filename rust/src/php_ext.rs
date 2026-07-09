@@ -246,7 +246,9 @@ impl PhpXhCurl {
     /// public static XHCurl::await(XHRequest $request): array
     #[php_method]
     #[rename("await")]
-    pub fn coroutine_await(request: &ZendClassObject<PhpXhRequest>) -> Result<ZBox<ZendHashTable>, String> {
+    pub fn coroutine_await(
+        request: &ZendClassObject<PhpXhRequest>,
+    ) -> Result<ZBox<ZendHashTable>, String> {
         crate::fiber::fiber_await(&request.request).map_err(|e| e.to_string())
     }
 
@@ -578,6 +580,277 @@ impl PhpXhRequest {
     ) -> &mut ZendClassObject<Self> {
         this.request = this.request.clone().priority(priority as i32);
         this
+    }
+
+    /// 设置 Cookie 字符串
+    ///
+    /// 对应 curl 的 CURLOPT_COOKIE。
+    /// 格式: "name1=value1; name2=value2"
+    ///
+    /// # PHP 签名
+    /// public XHRequest::cookies(string $cookies): $this
+    #[php_method]
+    pub fn cookies(
+        #[this] this: &mut ZendClassObject<Self>,
+        cookies: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().cookies(cookies);
+        this
+    }
+
+    /// 设置 Cookie 读取文件路径
+    ///
+    /// 对应 curl 的 CURLOPT_COOKIEFILE。
+    /// 启动时从该文件读取 cookie。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::cookieFile(string $path): $this
+    #[php_method]
+    pub fn cookie_file(
+        #[this] this: &mut ZendClassObject<Self>,
+        path: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().cookie_file(path);
+        this
+    }
+
+    /// 设置 Cookie 存储文件路径
+    ///
+    /// 对应 curl 的 CURLOPT_COOKIEJAR。
+    /// 请求结束后将 cookie 保存到该文件。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::cookieJar(string $path): $this
+    #[php_method]
+    pub fn cookie_jar(
+        #[this] this: &mut ZendClassObject<Self>,
+        path: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().cookie_jar(path);
+        this
+    }
+
+    /// 设置 HTTP 基本认证
+    ///
+    /// 对应 curl 的 CURLOPT_USERPWD。
+    /// 格式: "username:password"
+    ///
+    /// # PHP 签名
+    /// public XHRequest::basicAuth(string $credentials): $this
+    #[php_method]
+    pub fn basic_auth(
+        #[this] this: &mut ZendClassObject<Self>,
+        credentials: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().basic_auth(credentials);
+        this
+    }
+
+    /// 设置 Bearer Token 认证
+    ///
+    /// 对应 curl 的 CURLOPT_XOAUTH2_BEARER。
+    /// 自动设置 Authorization: Bearer {token}
+    ///
+    /// # PHP 签名
+    /// public XHRequest::bearerToken(string $token): $this
+    #[php_method]
+    pub fn bearer_token(
+        #[this] this: &mut ZendClassObject<Self>,
+        token: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().bearer_token(token);
+        this
+    }
+
+    /// 设置自定义 CA 证书路径
+    ///
+    /// 对应 curl 的 CURLOPT_CAINFO。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::caInfo(string $path): $this
+    #[php_method]
+    pub fn ca_info(
+        #[this] this: &mut ZendClassObject<Self>,
+        path: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().ca_info(path);
+        this
+    }
+
+    /// 设置客户端证书路径
+    ///
+    /// 对应 curl 的 CURLOPT_SSLCERT。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::sslCert(string $path): $this
+    #[php_method]
+    pub fn ssl_cert(
+        #[this] this: &mut ZendClassObject<Self>,
+        path: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().ssl_cert(path);
+        this
+    }
+
+    /// 设置客户端证书密钥路径
+    ///
+    /// 对应 curl 的 CURLOPT_SSLKEY。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::sslKey(string $path): $this
+    #[php_method]
+    pub fn ssl_key(
+        #[this] this: &mut ZendClassObject<Self>,
+        path: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().ssl_key(path);
+        this
+    }
+
+    /// 设置客户端证书密钥密码
+    ///
+    /// 对应 curl 的 CURLOPT_SSLKEYPASSWD。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::sslKeyPassword(string $password): $this
+    #[php_method]
+    pub fn ssl_key_password(
+        #[this] this: &mut ZendClassObject<Self>,
+        password: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().ssl_key_password(password);
+        this
+    }
+
+    /// 设置 Accept-Encoding
+    ///
+    /// 对应 curl 的 CURLOPT_ENCODING。
+    /// 如 "gzip, deflate, br"
+    ///
+    /// # PHP 签名
+    /// public XHRequest::encoding(string $encoding): $this
+    #[php_method]
+    pub fn encoding(
+        #[this] this: &mut ZendClassObject<Self>,
+        encoding: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().encoding(encoding);
+        this
+    }
+
+    /// 设置自定义请求方法
+    ///
+    /// 对应 curl 的 CURLOPT_CUSTOMREQUEST。
+    /// 用于非标准 HTTP 方法（CONNECT/TRACE/PROPFIND 等）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::customMethod(string $method): $this
+    #[php_method]
+    pub fn custom_method(
+        #[this] this: &mut ZendClassObject<Self>,
+        method: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().custom_method(method);
+        this
+    }
+
+    /// 设置 Range 请求范围
+    ///
+    /// 对应 curl 的 CURLOPT_RANGE。
+    /// 格式: "0-1023" 或 "0-" 或 "-1023"
+    ///
+    /// # PHP 签名
+    /// public XHRequest::range(string $range): $this
+    #[php_method]
+    pub fn range(
+        #[this] this: &mut ZendClassObject<Self>,
+        range: String,
+    ) -> &mut ZendClassObject<Self> {
+        this.request = this.request.clone().range(range);
+        this
+    }
+
+    /// 设置多部分表单数据（支持文件上传）
+    ///
+    /// 对应 curl 的 CURLOPT_HTTPPOST。
+    /// 参数格式：
+    ///   [
+    ///     ['name' => 'field1', 'value' => 'text value'],
+    ///     ['name' => 'file1', 'value' => 'file content', 'filename' => 'test.txt', 'content_type' => 'text/plain'],
+    ///   ]
+    ///
+    /// # PHP 签名
+    /// public XHRequest::multipart(array $fields): $this
+    #[php_method]
+    pub fn multipart<'a>(
+        #[this] this: &'a mut ZendClassObject<Self>,
+        fields: &ZendHashTable,
+    ) -> Result<&'a mut ZendClassObject<Self>, String> {
+        use crate::request::MultipartField;
+
+        let mut mp_fields = Vec::new();
+        let len = fields.len();
+        let mut iter = fields.iter();
+        for _ in 0..len {
+            match iter.next() {
+                Some((_key, val)) => {
+                    let field_ht = val.array().ok_or("multipart 字段必须是数组")?;
+                    let mut name = String::new();
+                    let mut value: Vec<u8> = Vec::new();
+                    let mut filename: Option<String> = None;
+                    let mut content_type: Option<String> = None;
+
+                    let f_len = field_ht.len();
+                    let mut f_iter = field_ht.iter();
+                    for _ in 0..f_len {
+                        if let Some((fkey, fval)) = f_iter.next() {
+                            let key_str = fkey.to_string();
+                            match key_str.as_str() {
+                                "name" => {
+                                    if let Some(s) = fval.string() {
+                                        name = s;
+                                    }
+                                }
+                                "value" => {
+                                    if let Some(s) = fval.string() {
+                                        value = s.into_bytes();
+                                    }
+                                }
+                                "filename" => {
+                                    if let Some(s) = fval.string() {
+                                        filename = Some(s);
+                                    }
+                                }
+                                "content_type" => {
+                                    if let Some(s) = fval.string() {
+                                        content_type = Some(s);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if filename.is_some() {
+                        mp_fields.push(MultipartField::file(
+                            name,
+                            filename.unwrap(),
+                            value,
+                            content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                        ));
+                    } else {
+                        mp_fields.push(MultipartField::text(
+                            name,
+                            String::from_utf8_lossy(&value).to_string(),
+                        ));
+                    }
+                }
+                None => break,
+            }
+        }
+
+        this.request = this.request.clone().body_multipart(mp_fields);
+        Ok(this)
     }
 
     /// 获取请求 URL
@@ -938,7 +1211,9 @@ where
 /// 因为 `insert` 内部调用 `zend_hash_str_update`，对 "0"/"1" 等数字字符串
 /// 不会规范化为整数键，导致 PHP 端 `$res["0"]` 与 `$res[0]` 均无法命中。
 /// 使用 `insert_at_index` 直接以整数键写入，PHP 端可用 `$res[0]` 访问。
-fn results_to_php_array(results: &[crate::multi::RequestResult]) -> Result<ZBox<ZendHashTable>, String> {
+fn results_to_php_array(
+    results: &[crate::multi::RequestResult],
+) -> Result<ZBox<ZendHashTable>, String> {
     let mut ht = ZendHashTable::new();
     for (i, result) in results.iter().enumerate() {
         let mut response_ht = ZendHashTable::new();

@@ -47,7 +47,9 @@ impl HeaderManager {
     pub fn set(&self, name: &str, value: &str) -> Result<(), String> {
         // 获取写锁（独占访问）
         // unwrap 安全：只有当 RwLock 被 poison（持有者 panic）时才会失败
-        let mut headers = self.headers.write()
+        let mut headers = self
+            .headers
+            .write()
             .map_err(|e| format!("获取写锁失败: {}", e))?;
 
         // 将键转为小写（HTTP/2 要求头部名称小写）
@@ -229,7 +231,9 @@ mod tests {
         for i in 0..10 {
             let hm_clone = Arc::clone(&hm);
             let handle = thread::spawn(move || {
-                hm_clone.set(&format!("X-Thread-{}", i), &format!("value-{}", i)).unwrap();
+                hm_clone
+                    .set(&format!("X-Thread-{}", i), &format!("value-{}", i))
+                    .unwrap();
             });
             handles.push(handle);
         }
@@ -242,7 +246,10 @@ mod tests {
         // 验证所有头部都已写入
         assert_eq!(hm.len(), 10);
         for i in 0..10 {
-            assert_eq!(hm.get(&format!("x-thread-{}", i)), Some(format!("value-{}", i)));
+            assert_eq!(
+                hm.get(&format!("x-thread-{}", i)),
+                Some(format!("value-{}", i))
+            );
         }
     }
 }
