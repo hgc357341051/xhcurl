@@ -114,8 +114,17 @@ pub struct PhpXhCurl;
 fn extract_requests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> {
     use ext_php_rs::convert::FromZval;
 
-    let mut req_list: Vec<XhRequest> = Vec::new();
+    // 批量上限检查：在克隆前检查，避免先克隆全部元素再拒绝导致内存浪费/OOM。
+    // 与 XhMulti::add / XHThreadPool::add 的"检查先于操作"模式一致。
     let len = requests.len();
+    if len > MAX_REQUESTS_PER_BATCH {
+        return Err(format!(
+            "请求数量 {} 超过单批上限 {}（请分组执行）",
+            len, MAX_REQUESTS_PER_BATCH
+        ));
+    }
+
+    let mut req_list: Vec<XhRequest> = Vec::new();
     let mut iter = requests.iter();
     for _ in 0..len {
         match iter.next() {
@@ -130,14 +139,6 @@ fn extract_requests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> 
             }
             None => break,
         }
-    }
-    // 批量上限检查：与 XHMulti::add / XHThreadPool::add 的保护一致，防止超大数组导致 OOM
-    if req_list.len() > MAX_REQUESTS_PER_BATCH {
-        return Err(format!(
-            "请求数量 {} 超过单批上限 {}（请分组执行）",
-            req_list.len(),
-            MAX_REQUESTS_PER_BATCH
-        ));
     }
     Ok(req_list)
 }
@@ -288,6 +289,10 @@ impl PhpXhCurl {
         let _ = ht.insert("http2_enabled", config.http2_enabled);
         let _ = ht.insert("user_agent", config.user_agent.as_str());
         let _ = ht.insert("tcp_keepalive", config.tcp_keepalive);
+        let _ = ht.insert(
+            "tcp_keepalive_interval",
+            config.tcp_keepalive_interval as i64,
+        );
         let _ = ht.insert("max_connections", config.max_connections as i64);
 
         // 代理地址（可选）
@@ -2400,9 +2405,9 @@ fn spawn_output_reader<R: std::io::Read + Send + 'static>(
                 match out.read(&mut tmp) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if buf.len() + n <= limit {
-                            buf.extend_from_slice(&tmp[..n]);
-                        } else {
+                        // 用 checked_add 防止 limit=usize::MAX 时 buf.len()+n 整数回绕
+                        if buf.len().checked_add(n).is_none_or(|s| s > limit) {
+                            // 超限或溢出：写入剩余可用部分，标记 exceeded 并停止
                             let remaining = limit.saturating_sub(buf.len());
                             if remaining > 0 {
                                 buf.extend_from_slice(&tmp[..remaining]);
@@ -2410,6 +2415,7 @@ fn spawn_output_reader<R: std::io::Read + Send + 'static>(
                             exceeded = true;
                             break;
                         }
+                        buf.extend_from_slice(&tmp[..n]);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),

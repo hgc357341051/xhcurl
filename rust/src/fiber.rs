@@ -161,7 +161,18 @@ impl Drop for SchedulerGuard {
 pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
     let task_id = next_task_id();
 
-    // 1. 获取 tokio 运行时 handle，spawn HTTP 任务到工作线程
+    // 1. 先校验当前是否在 Fiber 上下文中（在 spawn 前校验，
+    //    避免校验失败时已 spawn 的 tokio task 变成无对应 pending 表项的孤立任务）
+    let get_current =
+        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
+    let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
+
+    // current_fiber 为 null 表示不在 Fiber 上下文中
+    if current_fiber.is_null() || !current_fiber.is_object() {
+        return Err("XHCurl::await 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
+    }
+
+    // 2. 获取 tokio 运行时 handle，spawn HTTP 任务到工作线程
     //    HTTP 请求完全在 tokio 工作线程上执行，不触碰 PHP API
     let runtime = crate::php_ext::global_runtime();
     let client = crate::php_ext::global_client().clone();
@@ -185,16 +196,6 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
             scheduler.task_handles.push(handle);
         }
     });
-
-    // 2. 获取当前 PHP Fiber 对象
-    let get_current =
-        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
-    let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
-
-    // current_fiber 为 null 表示不在 Fiber 上下文中
-    if current_fiber.is_null() || !current_fiber.is_object() {
-        return Err("XHCurl::await 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
-    }
 
     // 3. 存入 pending 表
     SCHEDULER.with(|s| {

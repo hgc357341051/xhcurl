@@ -370,5 +370,41 @@ check("XHMulti 负数 maxResponseSize 被 clamp", test_multi_negative_response_s
 check("XHThreadPool 负数 workers 被 clamp", test_threadpool_negative_workers_clamped());
 check("setConfig 负值被跳过", test_set_config_negative_skipped());
 
+// =========== 配置一致性与提前检查测试 ===========
+
+function test_get_config_has_tcp_keepalive_interval(): bool
+{
+    XHCurl::setConfig(['tcp_keepalive_interval' => 120]);
+    $cfg = XHCurl::getConfig();
+    $has = array_key_exists('tcp_keepalive_interval', $cfg) && $cfg['tcp_keepalive_interval'] === 120;
+    // 恢复默认值
+    XHCurl::setConfig(['tcp_keepalive_interval' => 60]);
+    return $has;
+}
+
+function test_oversized_array_rejected_before_clone(): bool
+{
+    // 构造一个超过上限(10000)的请求数组，gather 应直接返回错误
+    // 而非先克隆全部元素再拒绝
+    $tooMany = array();
+    for ($i = 0; $i < 10001; $i++) {
+        $tooMany[] = XHCurl::createRequest('http://127.0.0.1:18399/get?id=' . $i)->get()->timeout(15);
+    }
+    $err = null;
+    try {
+        XHCurl::run(function() use ($tooMany) {
+            return XHCurl::gather($tooMany);
+        });
+    } catch (Throwable $e) {
+        $err = $e->getMessage();
+    }
+    // 应返回错误信息含上限说明
+    return $err !== null && strpos($err, (string)10000) !== false;
+}
+
+echo "\n=== 配置一致性与提前检查测试 ===\n";
+check('get_config 含 tcp_keepalive_interval 字段', test_get_config_has_tcp_keepalive_interval());
+check('超大数组 gather 提前拒绝（不克隆）', test_oversized_array_rejected_before_clone());
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);
