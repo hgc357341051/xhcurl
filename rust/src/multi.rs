@@ -320,7 +320,12 @@ impl XhMulti {
     /// 4. 通过 channel 收集结果
     ///
     /// # 返回
-    /// 所有请求的结果列表（顺序可能与添加顺序不同）
+    /// 所有请求的结果列表
+    ///
+    /// # 结果顺序
+    /// 结果按**完成顺序**排列（非提交顺序）。并发执行时，先完成的请求先入列。
+    /// 如需按提交顺序获取结果，请使用每个结果的 `id` 字段（请求 ID 或 URL）
+    /// 进行关联匹配，而非依赖数组索引。
     pub async fn execute(&mut self) -> XhCurlResult<Vec<RequestResult>> {
         // 如果没有请求，直接返回空结果
         if self.requests.is_empty() {

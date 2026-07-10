@@ -213,9 +213,13 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
         return Err("XHCurl::gather 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
     }
 
-    // 2. 一次性 spawn 所有 HTTP 请求到 tokio（并行执行）
+    // 2. spawn 所有 HTTP 请求到 tokio（并行执行）
+    //    使用 Semaphore 限制并发数，防止过多请求同时执行耗尽连接池/内存。
+    //    并发上限 = 请求数 与 64 的较小值（避免 10000 个请求同时 spawn）
     let runtime = crate::php_ext::global_runtime();
     let client = crate::php_ext::global_client().clone();
+    let max_concurrency = total.min(64);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
 
     for request in requests {
         let task_id = next_task_id();
@@ -228,7 +232,10 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
 
         let client_clone = client.clone();
         let request_clone = request;
+        let sem_clone = std::sync::Arc::clone(&semaphore);
         runtime.spawn(async move {
+            // 获取并发许可（_permit 在作用域结束时自动释放）
+            let _permit = sem_clone.acquire().await.ok();
             let result = execute_http_task(client_clone, request_clone, task_id).await;
             let _ = result_tx.send(TaskMessage { task_id, result });
         });
@@ -318,7 +325,9 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                 .map_err(|e| e.to_string());
         }
 
-        // 从 channel 获取完成的任务结果（带超时，避免永久阻塞）
+        // 从 channel 获取完成的任务结果（带超时，避免永久阻塞 PHP 线程）
+        // 超时设为 30 秒（而非原 300 秒），缩短无响应时的阻塞时间。
+        // 超时后检查 pending 状态：有 pending 则继续等，无 pending 则报错。
         let result_rx = SCHEDULER.with(|s| {
             s.borrow()
                 .as_ref()
@@ -327,7 +336,7 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                 .clone()
         });
 
-        match result_rx.recv_timeout(Duration::from_secs(300)) {
+        match result_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(msg) => {
                 // 查 pending 表找到挂起的 Fiber
                 let pending_fiber = SCHEDULER.with(|s| {
@@ -356,11 +365,12 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                     SCHEDULER.with(|s| s.borrow().as_ref().map(|sc| sc.pending.len()).unwrap_or(0));
                 if pending_count == 0 {
                     // 无 pending 任务但主 Fiber 仍挂起，可能是死锁
+                    // （用户在 Fiber 内调用了非 await 的阻塞代码）
                     return Err(
                         "事件泵空闲但主 Fiber 未终止（可能未在 Fiber 内调用 await）".to_string()
                     );
                 }
-                // 有 pending 任务但超时，继续等待
+                // 有 pending 任务但超时，继续等待（HTTP 请求仍在进行中）
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 return Err("结果 channel 已关闭".to_string());

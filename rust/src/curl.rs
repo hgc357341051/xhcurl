@@ -271,47 +271,8 @@ impl XhCurlManager {
             .map_err(XhCurlError::from)
     }
 
-    /// 检查是否在 CLI 模式下运行
-    ///
-    /// # 注意
-    /// 核心库无法直接访问 PHP SAPI（不依赖 ext-php-rs）。
-    /// PHP 绑定层（php_ext.rs）通过 `ext_php_rs::zend::php_sapi_name()`
-    /// 实现了真实的 SAPI 检测（见 `sapi_is_cli()`）。
-    /// 此方法仅供核心库内部/测试使用，PHP 扩展不应调用。
-    ///
-    /// # 返回
-    /// 始终返回 true（核心库无 SAPI 上下文）
-    pub fn is_cli_mode() -> bool {
-        true
-    }
-
-    /// 创建建议的 tokio 运行时
-    ///
-    /// # 注意
-    /// PHP 绑定层已改用全局复用的运行时（见 php_ext.rs 的 `global_runtime()`），
-    /// 不再调用此方法。保留供核心库测试使用。
-    ///
-    /// # 返回
-    /// - CLI 模式: 多线程运行时（利用所有 CPU 核心）
-    /// - FPM 模式: 单线程运行时（避免线程安全问题）
-    pub fn create_runtime() -> XhCurlResult<tokio::runtime::Runtime> {
-        if Self::is_cli_mode() {
-            // CLI 模式：多线程运行时
-            // tokio 的工作线程数默认等于 CPU 核心数
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all() // 启用 IO、时间、信号等
-                .thread_name("xhcurl-worker") // 线程名称，便于调试
-                .build()
-                .map_err(|e| XhCurlError::Generic(format!("创建多线程运行时失败: {}", e)))
-        } else {
-            // FPM 模式：单线程运行时
-            // 避免多线程与 PHP 内存管理器冲突
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| XhCurlError::Generic(format!("创建单线程运行时失败: {}", e)))
-        }
-    }
+    // SAPI 检测由 PHP 绑定层（php_ext.rs）的 `sapi_is_cli()` 实现，
+    // 核心库无 SAPI 上下文，不再提供 is_cli_mode / create_runtime 方法。
 }
 
 impl std::fmt::Debug for XhCurlManager {
