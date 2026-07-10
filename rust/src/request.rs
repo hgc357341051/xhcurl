@@ -556,6 +556,12 @@ impl XhRequest {
     /// # 返回
     /// 配置好的 reqwest::RequestBuilder
     pub fn to_reqwest(&self, client: &reqwest::Client) -> XhCurlResult<reqwest::RequestBuilder> {
+        // 早期 URL 校验：reqwest::Client::get 等方法将 URL 解析错误延迟到
+        // send() 才暴露。此处提前用 Url::parse 校验，给出更清晰的错误信息，
+        // 并在异步执行前即可发现空/非法 URL（fail-fast，PHP 边界输入校验）。
+        reqwest::Url::parse(&self.url)
+            .map_err(|e| XhCurlError::Generic(format!("无效的请求 URL {:?}: {}", self.url, e)))?;
+
         // 请求级 Client 配置覆盖：reqwest 的部分配置（重定向策略、SSL 验证、
         // 代理、连接超时）只能在 ClientBuilder 上设置，无法通过 RequestBuilder
         // 单独覆盖。当请求显式设置了这些参数中的任意一个时，构建新 Client
@@ -828,5 +834,61 @@ mod tests {
 
         let builder = req.to_reqwest(&client);
         assert!(builder.is_ok());
+    }
+
+    /// to_reqwest 处理空 URL 应返回错误
+    #[test]
+    fn test_to_reqwest_empty_url_returns_error() {
+        let client = reqwest::Client::new();
+        let req = XhRequest::new("").get();
+        let result = req.to_reqwest(&client);
+        assert!(result.is_err());
+    }
+
+    /// to_reqwest 处理无效 URL 格式应返回错误
+    #[test]
+    fn test_to_reqwest_invalid_url_returns_error() {
+        let client = reqwest::Client::new();
+        let req = XhRequest::new("not a url with spaces").get();
+        let result = req.to_reqwest(&client);
+        assert!(result.is_err());
+    }
+
+    /// body_json_str 处理无效 JSON 应返回错误
+    #[test]
+    fn test_body_json_str_invalid_json_returns_error() {
+        let result = XhRequest::new("https://x.com").body_json_str("{ invalid json }");
+        assert!(result.is_err());
+    }
+
+    /// body_json_str 处理空字符串应返回错误
+    #[test]
+    fn test_body_json_str_empty_returns_error() {
+        let result = XhRequest::new("https://x.com").body_json_str("");
+        assert!(result.is_err());
+    }
+
+    /// build_request_client 处理无效代理应返回错误
+    /// 请求级代理（self.proxy）在 build_request_client 中被解析；
+    /// 无效格式应明确报错而非静默忽略，避免请求实际不走代理。
+    /// 注：reqwest::Proxy::all 仅在 URL 语法非法时报错（如 "://" 缺 scheme）。
+    #[test]
+    fn test_build_request_client_invalid_proxy_returns_error() {
+        let req = XhRequest::new("https://x.com").get().proxy("://");
+        // build_request_client 内部使用 XhCurlManager::global() 获取全局配置，
+        // 全局默认无代理 → create_client_builder 成功；
+        // 然后应用请求级 proxy("://") → reqwest::Proxy::all 失败 → 返回错误。
+        let client = reqwest::Client::new();
+        let result = req.build_request_client(&client);
+        assert!(result.is_err());
+    }
+
+    /// build_request_client 处理空代理字符串应返回错误
+    #[test]
+    fn test_build_request_client_empty_proxy_returns_error() {
+        let req = XhRequest::new("https://x.com").get().proxy("");
+        let client = reqwest::Client::new();
+        let result = req.build_request_client(&client);
+        assert!(result.is_err());
     }
 }

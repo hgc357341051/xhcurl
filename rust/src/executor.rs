@@ -246,3 +246,48 @@ pub fn http_version_string(version: reqwest::Version) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_version_string_http_09() {
+        assert_eq!(
+            http_version_string(reqwest::Version::HTTP_09),
+            Some("HTTP/0.9".to_string())
+        );
+    }
+
+    #[test]
+    fn test_http_version_string_http_10() {
+        assert_eq!(
+            http_version_string(reqwest::Version::HTTP_10),
+            Some("HTTP/1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_http_version_string_http_11() {
+        assert_eq!(
+            http_version_string(reqwest::Version::HTTP_11),
+            Some("HTTP/1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_http_version_string_http_2() {
+        assert_eq!(
+            http_version_string(reqwest::Version::HTTP_2),
+            Some("HTTP/2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_http_version_string_http_3() {
+        assert_eq!(
+            http_version_string(reqwest::Version::HTTP_3),
+            Some("HTTP/3".to_string())
+        );
+    }
+}

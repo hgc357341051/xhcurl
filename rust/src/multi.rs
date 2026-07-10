@@ -717,4 +717,75 @@ mod tests {
         assert!(error.response.is_none());
         assert!(error.error.is_some());
     }
+
+    /// add 精确边界：填充至 MAX-1 后第 MAX 个成功，第 MAX+1 个失败。
+    /// add 使用 `len() >= MAX` 判定（含等号），故达到 MAX 时下一次 add 必失败。
+    #[test]
+    fn test_add_exact_boundary() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+        // 用 add_many 填充至 MAX-1（9999）
+        let batch: Vec<XhRequest> = (0..MAX_REQUESTS_PER_BATCH - 1)
+            .map(|i| XhRequest::new(format!("https://x.com/{}", i)))
+            .collect();
+        multi.add_many(batch).unwrap();
+        assert_eq!(multi.len(), MAX_REQUESTS_PER_BATCH - 1);
+
+        // 第 MAX 个（第 10000 个）：成功
+        multi.add(XhRequest::new("https://x.com/last")).unwrap();
+        assert_eq!(multi.len(), MAX_REQUESTS_PER_BATCH);
+
+        // 第 MAX+1 个（第 10001 个）：失败
+        let result = multi.add(XhRequest::new("https://x.com/over"));
+        assert!(result.is_err());
+        // 数量不应变化
+        assert_eq!(multi.len(), MAX_REQUESTS_PER_BATCH);
+    }
+
+    /// add_many 精确边界：恰好 MAX 个成功，MAX+1 个失败。
+    /// add_many 使用 `new_count > MAX` 判定（不含等号），故恰好 MAX 允许。
+    #[test]
+    fn test_add_many_exact_boundary() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+        // 恰好 MAX 个：成功
+        let batch: Vec<XhRequest> = (0..MAX_REQUESTS_PER_BATCH)
+            .map(|i| XhRequest::new(format!("https://x.com/{}", i)))
+            .collect();
+        multi.add_many(batch).unwrap();
+        assert_eq!(multi.len(), MAX_REQUESTS_PER_BATCH);
+
+        // 再加 1 个：失败（MAX + 1 > MAX）
+        let result = multi.add_many(vec![XhRequest::new("https://x.com/over")]);
+        assert!(result.is_err());
+    }
+
+    /// max_response_size(0) 应归一化为默认值（10MB），避免 0 导致无限制
+    #[test]
+    fn test_max_response_size_zero_normalizes() {
+        let multi = XhMulti::with_default_client().unwrap().max_response_size(0);
+        assert_eq!(multi.max_response_size, DEFAULT_MAX_RESPONSE_SIZE);
+    }
+
+    /// timeout(0) 应清除超时（设为 None），0 即无超时
+    #[test]
+    fn test_timeout_zero_is_none() {
+        let multi = XhMulti::with_default_client().unwrap().timeout(0);
+        assert!(multi.timeout.is_none());
+    }
+
+    /// timeout(>0) 应设置对应时长
+    #[test]
+    fn test_timeout_positive_is_some() {
+        let multi = XhMulti::with_default_client().unwrap().timeout(30);
+        assert_eq!(multi.timeout, Some(Duration::from_secs(30)));
+    }
+
+    /// execute 空请求列表应直接返回空结果，不创建任何任务/channel
+    #[tokio::test]
+    async fn test_execute_empty_returns_empty() {
+        let mut multi = XhMulti::with_default_client().unwrap();
+        let results = multi.execute().await.unwrap();
+        assert!(results.is_empty());
+        // execute 会 drain requests，空列表执行后仍为空
+        assert!(multi.is_empty());
+    }
 }

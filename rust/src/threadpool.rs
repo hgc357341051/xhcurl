@@ -474,12 +474,14 @@ impl XhThreadPool {
         &mut self,
         requests: Vec<XhRequest>,
     ) -> XhCurlResult<Vec<RequestResult>> {
-        if !self.is_running {
-            self.start()?;
-        }
-
+        // 空列表提前返回：避免无谓地启动 worker（资源浪费）。
+        // 即使池已运行，空列表也无需提交/收集。
         if requests.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if !self.is_running {
+            self.start()?;
         }
 
         // 提交所有请求，记录成功提交的数量
@@ -660,5 +662,41 @@ mod tests {
 
         let shutdown = ResultMessage::WorkerShutdown;
         assert!(matches!(shutdown, ResultMessage::WorkerShutdown));
+    }
+
+    /// start() 时 worker_count=0 应返回错误，且不启动（is_running 保持 false）。
+    /// 错误路径在调用 tokio::spawn 之前返回，故无需运行时。
+    #[test]
+    fn test_start_with_zero_workers_returns_error() {
+        let config = ThreadPoolConfig {
+            worker_count: 0,
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let mut pool = XhThreadPool::new(config, client);
+        let result = pool.start();
+        assert!(result.is_err());
+        assert!(!pool.is_running());
+    }
+
+    /// start() 前 submit 应返回错误（task_tx 为 None）
+    #[test]
+    fn test_submit_before_start_returns_error() {
+        let client = reqwest::Client::new();
+        let pool = XhThreadPool::with_default_config(client);
+        let result = pool.submit(XhRequest::new("https://x.com"));
+        assert!(result.is_err());
+    }
+
+    /// execute_all 空列表应返回空结果，且不应启动线程池（避免无谓 worker 创建）。
+    /// 当前实现先 start() 再判空，会浪费资源；应将空检查提前。
+    #[tokio::test]
+    async fn test_execute_all_empty_does_not_start_pool() {
+        let client = reqwest::Client::new();
+        let mut pool = XhThreadPool::with_default_config(client);
+        let results = pool.execute_all(vec![]).await.unwrap();
+        assert!(results.is_empty());
+        // 空列表时无需启动 worker，避免资源浪费
+        assert!(!pool.is_running());
     }
 }

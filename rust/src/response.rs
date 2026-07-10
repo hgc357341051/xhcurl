@@ -392,4 +392,319 @@ mod tests {
         assert_eq!(map.get("url"), Some(&"https://example.com".to_string()));
         assert_eq!(map.get("error"), Some(&"连接失败".to_string()));
     }
+
+    // ===== TDD 新增测试：from_parts 构造函数 + 状态码边界 =====
+
+    /// from_parts 正常 2xx 响应应标记为成功
+    #[test]
+    fn test_from_parts_success_2xx() {
+        let resp = XhResponse::from_parts(
+            200,
+            "https://example.com".to_string(),
+            HashMap::new(),
+            b"ok".to_vec(),
+            Duration::from_millis(100),
+            None,
+            None,
+        );
+        assert!(resp.is_success());
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.body(), Some(b"ok".as_ref()));
+        assert_eq!(resp.body_size(), 2);
+        assert!(resp.error().is_none());
+    }
+
+    /// 状态码 199 不应是 success（下边界）
+    #[test]
+    fn test_status_boundary_199_not_success() {
+        let resp = XhResponse::from_parts(
+            199,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(!resp.is_success());
+    }
+
+    /// 状态码 200 是 success 下边界
+    #[test]
+    fn test_status_boundary_200_success() {
+        let resp = XhResponse::from_parts(
+            200,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_success());
+    }
+
+    /// 状态码 299 是 success 上边界
+    #[test]
+    fn test_status_boundary_299_success() {
+        let resp = XhResponse::from_parts(
+            299,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_success());
+    }
+
+    /// 状态码 300 不是 success，是 redirect
+    #[test]
+    fn test_status_boundary_300_redirect() {
+        let resp = XhResponse::from_parts(
+            300,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(!resp.is_success());
+        assert!(resp.is_redirect());
+    }
+
+    /// 状态码 399 是 redirect 上边界
+    #[test]
+    fn test_status_boundary_399_redirect() {
+        let resp = XhResponse::from_parts(
+            399,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_redirect());
+    }
+
+    /// 状态码 400 是 client_error 下边界
+    #[test]
+    fn test_status_boundary_400_client_error() {
+        let resp = XhResponse::from_parts(
+            400,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(!resp.is_success());
+        assert!(resp.is_client_error());
+        assert!(!resp.is_server_error());
+    }
+
+    /// 状态码 499 是 client_error 上边界
+    #[test]
+    fn test_status_boundary_499_client_error() {
+        let resp = XhResponse::from_parts(
+            499,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_client_error());
+    }
+
+    /// 状态码 500 是 server_error 下边界
+    #[test]
+    fn test_status_boundary_500_server_error() {
+        let resp = XhResponse::from_parts(
+            500,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_server_error());
+        assert!(!resp.is_client_error());
+    }
+
+    /// 状态码 599 是 server_error 上边界
+    #[test]
+    fn test_status_boundary_599_server_error() {
+        let resp = XhResponse::from_parts(
+            599,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(resp.is_server_error());
+    }
+
+    /// 状态码 600 不是 server_error
+    #[test]
+    fn test_status_boundary_600_not_server_error() {
+        let resp = XhResponse::from_parts(
+            600,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert!(!resp.is_server_error());
+        assert!(!resp.is_redirect());
+        assert!(!resp.is_client_error());
+        assert!(!resp.is_success());
+    }
+
+    /// from_parts 应正确设置 headers
+    #[test]
+    fn test_from_parts_with_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("content-length".to_string(), "42".to_string());
+
+        let resp = XhResponse::from_parts(
+            200,
+            "https://x".to_string(),
+            headers,
+            b"{}".to_vec(),
+            Duration::from_secs(0),
+            Some("1.2.3.4:443".to_string()),
+            Some("HTTP/2".to_string()),
+        );
+
+        assert_eq!(
+            resp.header("content-type"),
+            Some("application/json".to_string())
+        );
+        assert_eq!(resp.content_length(), Some(42));
+        assert_eq!(resp.content_type(), Some("application/json".to_string()));
+        assert_eq!(resp.remote_addr(), Some("1.2.3.4:443"));
+        assert_eq!(resp.version(), Some("HTTP/2"));
+    }
+
+    // ===== TDD 新增测试：body_text / body_json 错误路径 =====
+
+    /// body_text 当 body 为 None 时应返回错误
+    #[test]
+    fn test_body_text_none_returns_error() {
+        let resp = XhResponse::from_error(
+            "err".to_string(),
+            "https://x".to_string(),
+            Duration::from_secs(0),
+        );
+        let result = resp.body_text();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("响应体尚未读取"));
+    }
+
+    /// body_text 当 body 包含无效 UTF-8 字节时应返回错误
+    #[test]
+    fn test_body_text_invalid_utf8_returns_error() {
+        let mut resp = XhResponse::from_error(
+            "err".to_string(),
+            "https://x".to_string(),
+            Duration::from_secs(0),
+        );
+        resp.set_body(vec![0xFF, 0xFE, 0xFD]);
+        let result = resp.body_text();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("UTF-8"));
+    }
+
+    /// body_json 当 body 为 None 时应返回错误
+    #[test]
+    fn test_body_json_none_returns_error() {
+        let resp = XhResponse::from_error(
+            "err".to_string(),
+            "https://x".to_string(),
+            Duration::from_secs(0),
+        );
+        let result = resp.body_json();
+        assert!(result.is_err());
+    }
+
+    /// body_json 当 body 为无效 JSON 时应返回错误
+    #[test]
+    fn test_body_json_invalid_json_returns_error() {
+        let mut resp = XhResponse::from_error(
+            "err".to_string(),
+            "https://x".to_string(),
+            Duration::from_secs(0),
+        );
+        resp.set_body(b"not json {".to_vec());
+        let result = resp.body_json();
+        assert!(result.is_err());
+    }
+
+    /// XhResponse Clone 应完整复制所有字段
+    #[test]
+    fn test_response_clone_preserves_fields() {
+        let mut headers = HashMap::new();
+        headers.insert("x-custom".to_string(), "val".to_string());
+        let resp = XhResponse::from_parts(
+            201,
+            "https://x".to_string(),
+            headers,
+            b"body".to_vec(),
+            Duration::from_millis(42),
+            Some("1.2.3.4".to_string()),
+            Some("HTTP/1.1".to_string()),
+        );
+        let cloned = resp.clone();
+        assert_eq!(cloned.status(), 201);
+        assert_eq!(cloned.body(), Some(b"body".as_ref()));
+        assert_eq!(cloned.body_size(), 4);
+        assert_eq!(cloned.header("x-custom"), Some("val".to_string()));
+        assert_eq!(cloned.remote_addr(), Some("1.2.3.4"));
+        assert_eq!(cloned.version(), Some("HTTP/1.1"));
+        assert_eq!(cloned.elapsed(), Duration::from_millis(42));
+    }
+
+    /// content_length 当头不存在时应返回 None
+    #[test]
+    fn test_content_length_missing_returns_none() {
+        let resp = XhResponse::from_parts(
+            200,
+            "https://x".to_string(),
+            HashMap::new(),
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert_eq!(resp.content_length(), None);
+    }
+
+    /// content_length 当头为非数字时应返回 None
+    #[test]
+    fn test_content_length_non_numeric_returns_none() {
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "abc".to_string());
+        let resp = XhResponse::from_parts(
+            200,
+            "https://x".to_string(),
+            headers,
+            Vec::new(),
+            Duration::from_secs(0),
+            None,
+            None,
+        );
+        assert_eq!(resp.content_length(), None);
+    }
 }

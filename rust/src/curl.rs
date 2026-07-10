@@ -351,4 +351,51 @@ mod tests {
         // 重新初始化
         assert!(manager.initialize().is_ok());
     }
+
+    /// create_client_builder 处理无效全局代理应返回错误
+    /// 注：reqwest::Proxy::all 对 "!!!" 这类字符串会解析为相对 URL 而"接受"，
+    /// 不会报错；必须使用 reqwest 真正拒绝的格式（如 "://" 缺 scheme、
+    /// "http://[" 未闭合括号）才能验证错误路径。
+    #[test]
+    fn test_create_client_builder_invalid_proxy_returns_error() {
+        let config = GlobalConfig {
+            proxy: Some("://".to_string()),
+            ..Default::default()
+        };
+        let manager = XhCurlManager::new(config);
+        let result = manager.create_client_builder();
+        assert!(result.is_err());
+    }
+
+    /// create_client_builder 处理空代理字符串应返回错误
+    #[test]
+    fn test_create_client_builder_empty_proxy_returns_error() {
+        let config = GlobalConfig {
+            proxy: Some(String::new()),
+            ..Default::default()
+        };
+        let manager = XhCurlManager::new(config);
+        let result = manager.create_client_builder();
+        assert!(result.is_err());
+    }
+
+    /// create_client_builder 无代理时应成功
+    #[test]
+    fn test_create_client_builder_no_proxy_succeeds() {
+        let manager = XhCurlManager::new(GlobalConfig::default());
+        let result = manager.create_client_builder();
+        assert!(result.is_ok());
+    }
+
+    /// create_client 处理无效代理应返回错误
+    #[test]
+    fn test_create_client_invalid_proxy_returns_error() {
+        let config = GlobalConfig {
+            proxy: Some("://".to_string()),
+            ..Default::default()
+        };
+        let manager = XhCurlManager::new(config);
+        let result = manager.create_client();
+        assert!(result.is_err());
+    }
 }
