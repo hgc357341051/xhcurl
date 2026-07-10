@@ -149,8 +149,8 @@ impl HeaderManager {
 
         for (name, value) in headers.iter() {
             // 解析头部名称，非法名称立即报错（避免静默丢弃鉴权头等关键头部）
-            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|e| {
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
                     XhCurlError::InvalidArgument(format!("无效的请求头名 {:?}: {}", name, e))
                 })?;
             // 解析头部值，非法值立即报错
@@ -262,14 +262,8 @@ mod tests {
 
         let map = hm.to_header_map().expect("合法头部应转换成功");
         assert_eq!(map.len(), 3);
-        assert_eq!(
-            map.get("content-type").unwrap(),
-            "application/json"
-        );
-        assert_eq!(
-            map.get("authorization").unwrap(),
-            "Bearer token123"
-        );
+        assert_eq!(map.get("content-type").unwrap(), "application/json");
+        assert_eq!(map.get("authorization").unwrap(), "Bearer token123");
     }
 
     /// 测试非法头部名（含空格）应返回错误
@@ -283,8 +277,16 @@ mod tests {
         let result = hm.to_header_map();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("无效的请求头名"), "错误信息应包含无效请求头名: {}", err);
-        assert!(err.contains("x test"), "错误信息应包含小写化后的非法头部名: {}", err);
+        assert!(
+            err.contains("无效的请求头名"),
+            "错误信息应包含无效请求头名: {}",
+            err
+        );
+        assert!(
+            err.contains("x test"),
+            "错误信息应包含小写化后的非法头部名: {}",
+            err
+        );
     }
 
     /// 测试非法头部值（含控制字符）应返回错误
@@ -297,8 +299,16 @@ mod tests {
         let result = hm.to_header_map();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("无效的请求头值"), "错误信息应包含无效请求头值: {}", err);
+        assert!(
+            err.contains("无效的请求头值"),
+            "错误信息应包含无效请求头值: {}",
+            err
+        );
         // 错误信息格式化为值的 debug 形式，包含 "invalid" 前缀
-        assert!(err.contains("invalid"), "错误信息应包含非法头部值内容: {}", err);
+        assert!(
+            err.contains("invalid"),
+            "错误信息应包含非法头部值内容: {}",
+            err
+        );
     }
 }

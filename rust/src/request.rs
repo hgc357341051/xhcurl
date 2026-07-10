@@ -750,9 +750,7 @@ impl XhRequest {
             }
         }
 
-        builder
-            .build()
-            .map_err(XhCurlError::from)
+        builder.build().map_err(XhCurlError::from)
     }
 }
 
