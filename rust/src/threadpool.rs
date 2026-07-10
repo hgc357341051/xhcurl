@@ -583,6 +583,7 @@ impl XhThreadPool {
     /// 不再通过 `execute_all()` 累积全部结果（内存恒定）。
     ///
     /// 与 `execute_all` 内部 `self.result_rx.as_mut()` 等价，仅暴露给同 crate 的流式路径。
+    #[cfg(feature = "php")]
     pub(crate) fn result_rx_mut(&mut self) -> Option<&mut mpsc::Receiver<ResultMessage>> {
         self.result_rx.as_mut()
     }
