@@ -58,11 +58,14 @@ pub async fn execute_request(
     let status = response.status().as_u16();
 
     // 收集响应头
+    // 注意：HeaderValue::to_str() 仅在值为可见 ASCII 时成功，遇到含非 ASCII
+    // 字节的响应头（如带 UTF-8 文件名的 Content-Disposition）会整条丢弃。
+    // 改用 from_utf8_lossy 保留这类响应头（仅替换真正无效的字节），
+    // 对下载文件名解析等场景更友好。
     let mut headers_map = HashMap::new();
     for (name, value) in response.headers().iter() {
-        if let Ok(value_str) = value.to_str() {
-            headers_map.insert(name.as_str().to_string(), value_str.to_string());
-        }
+        let value_str = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        headers_map.insert(name.as_str().to_string(), value_str);
     }
 
     // 如果启用了流式回调，发送 Headers 事件

@@ -556,12 +556,12 @@ impl XhRequest {
     /// # 返回
     /// 配置好的 reqwest::RequestBuilder
     pub fn to_reqwest(&self, client: &reqwest::Client) -> XhCurlResult<reqwest::RequestBuilder> {
-        // 请求级重定向策略：reqwest 的重定向策略在 Client 级别设置，
-        // 无法通过 RequestBuilder 单独覆盖。当请求显式设置了 follow_redirects
-        // 或 max_redirects 时，基于现有 Client 的配置克隆一个新 Client 应用策略。
-        // 注意：这会牺牲连接池复用，仅在用户显式设置时才走此分支。
-        let client = if self.follow_redirects.is_some() || self.max_redirects.is_some() {
-            self.build_client_with_redirect_policy(client)?
+        // 请求级 Client 配置覆盖：reqwest 的部分配置（重定向策略、SSL 验证、
+        // 代理、连接超时）只能在 ClientBuilder 上设置，无法通过 RequestBuilder
+        // 单独覆盖。当请求显式设置了这些参数中的任意一个时，构建新 Client
+        // 应用覆盖。注意：这会牺牲连接池复用，仅在用户显式设置时才走此分支。
+        let client = if self.needs_request_client() {
+            self.build_request_client(client)?
         } else {
             client.clone()
         };
@@ -672,18 +672,59 @@ impl XhRequest {
         Ok(builder)
     }
 
-    /// 基于现有 Client 构建带请求级重定向策略的新 Client。
+    /// 判断是否需要构建请求级 Client。
     ///
-    /// reqwest 的重定向策略只能在 ClientBuilder 上设置，无法通过 RequestBuilder
-    /// 单独覆盖。当请求显式设置了 follow_redirects 或 max_redirects 时，
-    /// 用 reqwest::ClientBuilder::from() 克隆现有 Client 配置，再覆盖重定向策略。
-    fn build_client_with_redirect_policy(
-        &self,
-        _client: &reqwest::Client,
-    ) -> XhCurlResult<reqwest::Client> {
-        let mut builder = reqwest::ClientBuilder::new();
+    /// 当请求显式设置了任一 Client 级配置（重定向策略、SSL 验证、代理、连接超时）
+    /// 时返回 true。这些配置无法通过 RequestBuilder 单独覆盖，必须构建新 Client。
+    fn needs_request_client(&self) -> bool {
+        self.follow_redirects.is_some()
+            || self.max_redirects.is_some()
+            || self.verify_ssl.is_some()
+            || self.proxy.is_some()
+            || self.connect_timeout.is_some()
+    }
 
-        // 应用重定向策略
+    /// 构建请求级客户端（应用请求级 Client 配置覆盖）。
+    ///
+    /// reqwest 的部分配置（重定向策略、SSL 验证、代理、连接超时）只能在
+    /// ClientBuilder 上设置，无法通过 RequestBuilder 单独覆盖。当请求显式设置了
+    /// 这些参数中的任意一个时，从全局 `create_client_builder()` 起步（继承
+    /// UA/keepalive/连接池/TLS 等全部配置），再逐项应用请求级覆盖后构建新 Client。
+    ///
+    /// 注意：这会牺牲连接池复用（新 Client 有独立连接池），仅在用户显式设置
+    /// 上述任一参数时才走此分支。
+    fn build_request_client(&self, _client: &reqwest::Client) -> XhCurlResult<reqwest::Client> {
+        // 从全局管理器获取完整配置的 ClientBuilder，确保 UA/keepalive/连接池/TLS
+        // 等全部继承，再逐项覆盖请求级配置。
+        let mut builder = crate::curl::XhCurlManager::global().create_client_builder();
+
+        // 请求级连接超时（覆盖全局默认，0 = 使用全局默认，故仅 > 0 时覆盖）
+        if let Some(secs) = self.connect_timeout {
+            if secs > 0 {
+                builder = builder.connect_timeout(Duration::from_secs(secs));
+            }
+        }
+
+        // 请求级 SSL 证书验证（覆盖全局默认）
+        if let Some(verify) = self.verify_ssl {
+            builder = builder.danger_accept_invalid_certs(!verify);
+        }
+
+        // 请求级代理（覆盖全局默认）
+        // 用户显式设置的代理若无效应明确报错，而非静默忽略
+        if let Some(proxy_url) = &self.proxy {
+            match reqwest::Proxy::all(proxy_url) {
+                Ok(proxy) => builder = builder.proxy(proxy),
+                Err(e) => {
+                    return Err(XhCurlError::Generic(format!(
+                        "无效的代理地址 {}: {}",
+                        proxy_url, e
+                    )));
+                }
+            }
+        }
+
+        // 请求级重定向策略（覆盖全局默认）
         match self.follow_redirects {
             Some(false) => {
                 builder = builder.redirect(reqwest::redirect::Policy::none());
@@ -702,10 +743,6 @@ impl XhRequest {
                 }
             }
         }
-
-        // 复用原 Client 的 TLS 配置
-        let config = crate::curl::XhCurlManager::global().config();
-        builder = builder.danger_accept_invalid_certs(!config.verify_ssl);
 
         builder
             .build()
