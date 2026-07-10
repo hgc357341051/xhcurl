@@ -64,10 +64,6 @@ pub struct GlobalConfig {
     /// 0 = 不限制（所有请求同时执行）；默认 64。
     /// 可通过 `XHCurl::setConfig(['fiber_max_concurrency' => N])` 调整。
     pub fiber_max_concurrency: usize,
-
-    /// 是否在 CLI 模式下使用多线程运行时
-    /// FPM 模式始终使用单线程运行时
-    pub use_multi_thread: bool,
 }
 
 impl Default for GlobalConfig {
@@ -101,8 +97,6 @@ impl Default for GlobalConfig {
             max_connections: 100,
             // 协程 gather/each 默认并发上限 64（兼顾吞吐与资源占用）
             fiber_max_concurrency: 64,
-            // CLI 模式默认使用多线程运行时
-            use_multi_thread: true,
         }
     }
 }
@@ -240,7 +234,6 @@ impl XhCurlManager {
             })
             // SSL 证书验证
             .danger_accept_invalid_certs(!config.verify_ssl)
-            // HTTP/2 支持：reqwest 默认协商升级 HTTP/2，无需显式配置
             // TCP Keep-Alive
             .tcp_keepalive(if config.tcp_keepalive {
                 Some(Duration::from_secs(config.tcp_keepalive_interval))
@@ -251,6 +244,13 @@ impl XhCurlManager {
             .pool_max_idle_per_host(config.max_connections)
             // 默认 User-Agent
             .user_agent(&config.user_agent);
+
+        // HTTP/2 控制
+        // - http2_enabled=false：强制 HTTP/1.1（调用 http1_only() 禁用 HTTP/2 协商）
+        // - http2_enabled=true：保持 reqwest 默认行为（自动协商升级 HTTP/2）
+        if !config.http2_enabled {
+            builder = builder.http1_only();
+        }
 
         // 设置代理
         // 与 request.rs::build_request_client 行为一致：代理无效时明确报错，

@@ -216,6 +216,8 @@ echo "完成 " . count($results) . " 个请求\n";
 
 ## 协程模式（PHP Fiber）
 
+> **CLI-only 限制**：XHCurl::run() / await() / gather() / each() 仅在 CLI 模式下可用。FPM 模式下调用 run() 会返回错误"XHCurl::run 仅在 CLI 模式下可用（FPM 请用 XHMulti）"。FPM 请使用 XHMulti 或 XHRequest::execute()。
+
 XHCurl 基于 PHP 8.1 的 [Fiber](https://www.php.net/manual/zh/language.fibers.php) 实现了真正的协程式异步 HTTP 请求。HTTP 请求在 Rust 的 tokio 异步运行时上执行，PHP 侧通过 Fiber 挂起/恢复实现非阻塞等待。
 
 ### `await()` - 协程式等待单个请求
@@ -269,6 +271,56 @@ foreach ($results as $idx => $result) {
 ```
 
 > **性能数据**：100 个请求并发，总耗时 ~150ms（串行需 ~10s，加速约 65 倍）。
+
+### `each()` - 流式回调并发
+
+`each()` 与 `gather()` 行为对比：
+
+| 模式 | 返回值 | 处理方式 |
+|------|--------|----------|
+| `gather(array $requests)` | `array` —— 全部结果数组 | 累积所有结果后一次性返回 |
+| `each(array $requests, callable $callback)` | `int` —— 处理结果总数 | 每个请求完成后立即调用回调（流式处理） |
+
+适用场景：结果数量巨大且无需在内存中保留全部结果时，用 `each()` 边收边处理，避免峰值内存。
+
+```php
+<?php
+// 构建 100 个请求
+$requests = [];
+for ($i = 0; $i < 100; $i++) {
+    $requests[] = XHCurl::createRequest("https://httpbin.org/get?id={$i}")
+        ->get()
+        ->timeout(10)
+        ->setUserData(['task_index' => $i]);
+}
+
+// gather：累积所有结果后返回（内存中持有 100 个响应体）
+$results = XHCurl::run(function() use ($requests) {
+    return XHCurl::gather($requests);  // 返回 array
+});
+// 处理 $results...
+foreach ($results as $r) { /* ... */ }
+
+// each：流式回调，每完成一个请求就调用一次（不累积结果数组）
+$count = XHCurl::run(function() use ($requests) {
+    return XHCurl::each($requests, function(array $result): void {
+        // 回调签名：function(array $result): void
+        // $result 字段与 gather/await 返回值一致（见「结果数组字段」）
+        $userData = json_decode($result['user_data'] ?? '', true);
+        if ($result['success']) {
+            echo "完成 #{$userData['task_index']}: status={$result['status']}\n";
+        } else {
+            echo "失败 #{$userData['task_index']}: error={$result['error']}\n";
+        }
+    });
+    // $count = 已回调处理的结果总数（int）
+});
+
+echo "已处理 {$count} 个结果\n";
+```
+
+> **回调签名**：`function(array $result): void`。回调内不要做长时间阻塞操作（会
+> 阻塞 Fiber 调度）。需要写入外部状态时用 `use (&$buffer)` 引用捕获。
 
 ### 协程模式串行 vs 并行对比
 
@@ -336,6 +388,7 @@ echo "回调: " . $custom['callback'] . "\n";
 | `run()` | `(callable $main): mixed` | 启动协程事件泵，执行主回调 |
 | `await()` | `(XHRequest $req): array` | 协程式等待单个请求（须在 `run()` 内） |
 | `gather()` | `(array $requests): array` | 并发批量请求，按完成顺序返回（须在 `run()` 内） |
+| `each()` | `(array $requests, callable $callback): int` | 流式回调并发执行，回调签名 `function(array $result): void`，返回处理结果总数（须在 `run()` 内） |
 
 > 单请求同步执行请用 `XHRequest::execute()` 实例方法（见下文）。
 
@@ -452,7 +505,7 @@ XHCurl::setConfig([
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | string | 请求 ID（未设置 `setId()` 时为 URL） |
+| `id` | string | 请求 ID（未设置 `setId()` 时默认为请求 URL，所有执行路径统一） |
 | `success` | bool | 是否成功 |
 | `status` | int | HTTP 状态码 |
 | `body` | string | 响应体（**二进制安全**，保留原始字节） |
@@ -468,6 +521,29 @@ XHCurl::setConfig([
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
 > 超出会在执行前拒绝（避免先克隆再拒绝导致 OOM）。
 
+#### 失败路径字段说明（`success === false`）
+
+请求失败时（连接超时、DNS 失败、TLS 错误、被服务端拒绝等），`success` 为 `false`，其余字段语义与成功路径略有差异：
+
+| 字段 | 失败路径取值 | 说明 |
+|------|-------------|------|
+| `id` | 始终存在 | 与成功路径一致（未设 `setId()` 时为请求 URL） |
+| `success` | `false` | 固定 |
+| `status` | `0` | **哨兵值**，不是真实 HTTP 状态码（无响应到达时无状态码可言） |
+| `body` | `""`（空字符串） | 无响应体 |
+| `body_size` | `0` | 无响应体 |
+| `headers` | `[]`（空数组） | 无响应头 |
+| `url` | 可能为空或缺失 | 无最终 URL 时为空字符串或不出现 |
+| `remote_addr` | 可能为空或缺失 | 未建立连接时无远程地址 |
+| `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
+| `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
+| `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
+| `user_data` | 设置了 `setUserData()` 时存在 | 与成功路径一致 |
+
+> **判断成败只看 `success`**：不要用 `status === 0` 判断失败——某些边缘场景下成功路径的
+> 状态码也可能为 0（如 HTTP 0xx），且失败路径 `status` 恒为 0 是约定哨兵值，并非 HTTP 规范。
+> 失败时优先读取 `error` 字段获取原因。
+
 ### XHMulti - 批量异步执行器
 
 基于 tokio 的 M:N 异步并发（CLI 多线程并行，FPM 协作式并发）。
@@ -478,7 +554,9 @@ XHCurl::setConfig([
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
 | `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制） |
 | `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
+| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
+| `executeEach(callable $callback): int` | 流式回调执行，回调签名 `function(array $result): void`，返回处理结果总数 |
 
 ```php
 $multi = new XHMulti();
@@ -501,6 +579,7 @@ $results = $multi->execute(); // 返回结果数组
 | `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
+| `executeEach(callable $callback): int` | 流式回调执行，回调签名 `function(array $result): void`，返回处理结果总数（仅 CLI 可用） |
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
@@ -659,15 +738,18 @@ XHCurl 根据 PHP SAPI 自动选择运行时：
 
 | 模式 | 运行时类型 | 并发模型 | 可用功能 |
 |------|-----------|----------|---------|
-| **CLI** | 多线程 tokio 运行时 | M:N 并行（工作线程 = CPU 核心数） | 全部功能，含 `XHThreadPool` |
-| **FPM** | 单线程 tokio 运行时 | 协作式并发（类似 Node.js） | 除 `XHThreadPool` 外全部功能 |
+| **CLI** | 多线程 tokio 运行时 | M:N 并行（工作线程 = CPU 核心数） | 全部功能：协程 `run/await/gather/each`、`XHMulti`、`XHRequest::execute()`、`XHThreadPool` |
+| **FPM** | 单线程 tokio 运行时 | 协作式并发（类似 Node.js） | `XHMulti`、`XHRequest::execute()`；协程 `run/await/gather/each` 与 `XHThreadPool` **不可用** |
+
+> **协程仅 CLI 可用**：`XHCurl::run()` 在 FPM 模式下会被显式拒绝。FPM 模式请用
+> `XHMulti` 或 `XHRequest::execute()` 实现并发与同步请求。
 
 ```php
 if (XHCurl::isCli()) {
-    // CLI 模式：可用线程池
+    // CLI 模式：可用线程池与协程
     $pool = new XHThreadPool(8);
 } else {
-    // FPM 模式：用 XHMulti 或协程
+    // FPM 模式：仅可用 XHMulti 或 XHRequest::execute()（协程/线程池不可用）
     $multi = new XHMulti();
 }
 ```
@@ -703,6 +785,29 @@ XHCurl::run(function() {
     XHCurl::await($request);
 });
 ```
+
+### FPM 下调用 XHCurl::run() 报错
+
+报错信息：`XHCurl::run 仅在 CLI 模式下可用（FPM 请用 XHMulti）`。
+
+协程模式（`run()`/`await()`/`gather()`/`each()`）依赖多线程 tokio 运行时，仅在 CLI 模式下可用。FPM 模式下 `XHCurl::run()` 会被显式拒绝。
+
+```php
+// ❌ 错误：在 FPM 下调用 run()
+XHCurl::run(function() {
+    XHCurl::await($request);  // run() 已返回错误，此处不会执行
+});
+
+// ✅ 正确：FPM 下用 XHMulti（批量并发）或 XHRequest::execute()（单次同步）
+$multi = new XHMulti();
+$multi->add($request);
+$results = $multi->execute();  // 协作式并发，可在 FPM 下运行
+
+// 或单次同步
+$result = $request->execute();
+```
+
+> 用 `XHCurl::isCli()` 在运行时检测 SAPI，并据此选择可用 API。
 
 ### Windows DLL 加载失败
 

@@ -455,13 +455,17 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::method(string $method): $self_
+    ///
+    /// 无效方法名时跳过设置（保留原值），链式调用不中断。
     pub fn method(
         self_: &mut ZendClassObject<PhpXhRequest>,
         method: String,
-    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
-        let m = HttpMethod::from_str(&method).map_err(|e| e.to_string())?;
-        self_.request = self_.request.clone().method(m);
-        Ok(self_)
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        // 无效方法名时跳过设置，保持链式调用不中断
+        if let Ok(m) = HttpMethod::from_str(&method) {
+            self_.request = self_.request.clone().method(m);
+        }
+        self_
     }
 
     /// 设置为 GET 方法
@@ -520,17 +524,19 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::json(array $data): $self_
+    ///
+    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
     pub fn json<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
-        let json_str = php_array_to_json(data)?;
-        self_.request = self_
-            .request
-            .clone()
-            .body_json_str(&json_str)
-            .map_err(|e| e.to_string())?;
-        Ok(self_)
+    ) -> &'a mut ZendClassObject<PhpXhRequest> {
+        // 序列化或设置失败时跳过，保持链式调用不中断
+        if let Ok(json_str) = php_array_to_json(data) {
+            if let Ok(req) = self_.request.clone().body_json_str(&json_str) {
+                self_.request = req;
+            }
+        }
+        self_
     }
 
     /// 设置表单数据
@@ -540,10 +546,10 @@ impl PhpXhRequest {
     pub fn form<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+    ) -> &'a mut ZendClassObject<PhpXhRequest> {
         let form = php_array_to_form(data);
         self_.request = self_.request.clone().body_form(form);
-        Ok(self_)
+        self_
     }
 
     /// 设置原始请求体（二进制安全）
@@ -574,13 +580,16 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::timeout(int $seconds): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn timeout(
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值 clamp 到 0（表示禁用超时），避免 i64→u64 转换产生巨大数值
-        let seconds = seconds.max(0) as u64;
-        self_.request = self_.request.clone().request_timeout(seconds);
+        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
+        if seconds >= 0 {
+            self_.request = self_.request.clone().request_timeout(seconds as u64);
+        }
         self_
     }
 
@@ -589,13 +598,16 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::connectTimeout(int $seconds): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn connect_timeout(
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值 clamp 到 0（表示禁用连接超时）
-        let seconds = seconds.max(0) as u64;
-        self_.request = self_.request.clone().connect_timeout(seconds);
+        // 负值跳过（保留原值）
+        if seconds >= 0 {
+            self_.request = self_.request.clone().connect_timeout(seconds as u64);
+        }
         self_
     }
 
@@ -656,13 +668,16 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::maxRedirects(int $max): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn max_redirects(
         self_: &mut ZendClassObject<PhpXhRequest>,
         max: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值 clamp 到 0（表示不跟随重定向）
-        let max = max.max(0) as u32;
-        self_.request = self_.request.clone().max_redirects(max);
+        // 负值跳过（保留原值）
+        if max >= 0 {
+            self_.request = self_.request.clone().max_redirects(max as u32);
+        }
         self_
     }
 
@@ -676,14 +691,37 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::setUserData(mixed $data): $self_
+    ///
+    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
     pub fn set_user_data<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
-        // 将 PHP 数组序列化为 JSON 字符串存储
-        let json_str = php_array_to_json(data)?;
-        self_.request = self_.request.clone().user_data(json_str);
-        Ok(self_)
+    ) -> &'a mut ZendClassObject<PhpXhRequest> {
+        // 序列化失败时跳过，保持链式调用不中断
+        if let Ok(json_str) = php_array_to_json(data) {
+            self_.request = self_.request.clone().user_data(json_str);
+        }
+        self_
+    }
+
+    /// 设置用户自定义数据（`set_user_data` 的无前缀别名，向后兼容）
+    ///
+    /// 与 `setUserData()` 等价。ext-php-rs 自动将 Rust snake_case `user_data`
+    /// 映射为 PHP `userData()`。
+    ///
+    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::userData(array $data): $self_
+    pub fn user_data<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        data: &ZendHashTable,
+    ) -> &'a mut ZendClassObject<PhpXhRequest> {
+        // 序列化失败时跳过，保持链式调用不中断
+        if let Ok(json_str) = php_array_to_json(data) {
+            self_.request = self_.request.clone().user_data(json_str);
+        }
+        self_
     }
 
     /// 设置请求 ID（用于批量请求时标识结果）
@@ -694,6 +732,21 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::setId(string $id): $self_
     pub fn set_id(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        id: String,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().id(id);
+        self_
+    }
+
+    /// 设置请求 ID（`set_id` 的无前缀别名，向后兼容）
+    ///
+    /// 与 `setId()` 等价，结果中通过 `id` 字段返回此值。
+    /// ext-php-rs 自动将 Rust snake_case `id` 映射为 PHP `id()`。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::id(string $id): $self_
+    pub fn id(
         self_: &mut ZendClassObject<PhpXhRequest>,
         id: String,
     ) -> &mut ZendClassObject<PhpXhRequest> {
@@ -802,10 +855,12 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::multipart(array $fields): $self_
+    ///
+    /// 解析失败时跳过设置（保留原值），链式调用不中断。
     pub fn multipart<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         fields: &ZendHashTable,
-    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+    ) -> &'a mut ZendClassObject<PhpXhRequest> {
         use crate::request::MultipartField;
 
         let mut mp_fields = Vec::new();
@@ -814,7 +869,11 @@ impl PhpXhRequest {
         for _ in 0..len {
             match iter.next() {
                 Some((_key, val)) => {
-                    let field_ht = val.array().ok_or("multipart 字段必须是数组")?;
+                    // 字段非数组时跳过整个设置，保持链式调用不中断
+                    let field_ht = match val.array() {
+                        Some(ht) => ht,
+                        None => return self_,
+                    };
                     let mut name = String::new();
                     let mut value: Vec<u8> = Vec::new();
                     let mut filename: Option<String> = None;
@@ -876,7 +935,7 @@ impl PhpXhRequest {
         }
 
         self_.request = self_.request.clone().body_multipart(mp_fields);
-        Ok(self_)
+        self_
     }
 
     /// 获取请求 URL
@@ -1005,13 +1064,16 @@ impl PhpXhMulti {
     ///
     /// # PHP 签名
     /// public XHMulti::maxConcurrency(int $max): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn max_concurrency(
         self_: &mut ZendClassObject<PhpXhMulti>,
         max: i64,
     ) -> &mut ZendClassObject<PhpXhMulti> {
-        // 负值 clamp 到 0（表示无并发限制），避免 i64→usize 转换产生巨大数值
-        let max = max.max(0) as usize;
-        self_.max_concurrency = max;
+        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
+        if max >= 0 {
+            self_.max_concurrency = max as usize;
+        }
         self_
     }
 
@@ -1021,13 +1083,16 @@ impl PhpXhMulti {
     ///
     /// # PHP 签名
     /// public XHMulti::maxResponseSize(int $size): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn max_response_size(
         self_: &mut ZendClassObject<PhpXhMulti>,
         size: i64,
     ) -> &mut ZendClassObject<PhpXhMulti> {
-        // 负值 clamp 到 0（表示使用全局默认值），避免 i64→usize 转换产生巨大数值
-        let size = size.max(0) as usize;
-        self_.max_response_size = size;
+        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
+        if size >= 0 {
+            self_.max_response_size = size as usize;
+        }
         self_
     }
 
@@ -1039,11 +1104,16 @@ impl PhpXhMulti {
     ///
     /// # PHP 签名
     /// public XHMulti::timeout(int $secs): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
     pub fn timeout(
         self_: &mut ZendClassObject<PhpXhMulti>,
         secs: i64,
     ) -> &mut ZendClassObject<PhpXhMulti> {
-        self_.timeout = if secs > 0 { secs as u64 } else { 0 };
+        // 负值跳过（保留原值）
+        if secs >= 0 {
+            self_.timeout = secs as u64;
+        }
         self_
     }
 
@@ -1234,12 +1304,17 @@ impl PhpXhThreadPool {
     ///
     /// # PHP 签名
     /// public XHThreadPool::__construct(int $workers = 0)
+    ///
+    /// 负值跳过（使用默认值 0），与 `setConfig` 的"负值跳过"行为一致。
     pub fn __construct(workers: Option<i64>) -> Self {
         Self {
             pool: None,
             requests: Vec::new(),
-            // 负值 clamp 到 0，避免 i64→usize 转换产生巨大数值
-            max_concurrency: workers.unwrap_or(0).max(0) as usize,
+            // 负值或 None：使用默认值 0（避免 i64→usize 转换产生巨大数值）
+            max_concurrency: match workers {
+                Some(n) if n >= 0 => n as usize,
+                _ => 0,
+            },
         }
     }
 
@@ -1494,8 +1569,10 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         // 有响应时，elapsed_ms/error 由 fill_response_fields 统一写入，避免双重插入
         fill_response_fields(&mut response_ht, resp);
     } else {
-        // 无响应（请求失败）时，补充 elapsed_ms/error/body，确保失败路径字段完整
-        // body 插入空字符串，与 fill_response_fields 的成功路径保持字段一致
+        // 无响应（请求失败）时，补充 status/elapsed_ms/error/body，确保失败路径字段完整
+        // status 为 0（哨兵值，表示无 HTTP 响应），body 插入空字符串，
+        // 与 fill_response_fields 的成功路径保持字段集一致
+        let _ = response_ht.insert("status", 0_i64);
         let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
         let _ = response_ht.insert("body", String::new());
         if let Some(err) = &result.error {
