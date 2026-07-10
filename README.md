@@ -18,7 +18,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 - [API 文档](#api-文档)
   - [XHCurl - 全局管理器](#xhcurl---全局管理器)
   - [XHRequest - 请求构建器](#xhrequest---请求构建器)
-  - [XHResponse - 响应对象](#xhresponse---响应对象)
+  - [结果数组字段](#结果数组字段)
   - [XHMulti - 批量异步执行器](#xhmulti---批量异步执行器)
   - [XHThreadPool - 线程池](#xhthreadpool---线程池)
 - [curl 兼容性对照](#curl-兼容性对照)
@@ -37,8 +37,10 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 | **PHP Fiber 协程** | `XHCurl::run()` + `await()` 实现协程式异步 HTTP，类似 ReactPHP/AMPHP |
 | **并行 gather** | `XHCurl::gather()` 一次性并发 N 个请求，100 请求实测 ~65 倍加速 |
 | **链式调用** | 所有 setter 方法返回 `$this`，支持流畅的链式 API |
-| **curl 兼容** | 对标 PHP curl 的 `CURLOPT_*`，支持 cookie/auth/TLS 证书/multipart 等 |
+| **curl 兼容** | 对标 PHP curl 的 `CURLOPT_*`，支持 cookie/auth/TLS/multipart 等 |
+| **二进制安全** | `body()`/`multipart()` 字段值、响应体均为二进制安全，可传任意字节 |
 | **全局连接复用** | reqwest Client 全局单例，TCP keep-alive + TLS 会话缓存 |
+| **请求级配置覆盖** | `verifySsl`/`proxy`/`connectTimeout`/重定向可按请求覆盖全局配置 |
 | **自适应运行时** | CLI 模式多线程运行时（M:N 并行），FPM 模式单线程运行时（协作式并发） |
 | **用户自定义数据** | `setUserData()` 携带任意结构化数据，随结果原样回传 |
 | **响应体大小限制** | 流式读取 + `max_response_size` 防止内存溢出 |
@@ -137,8 +139,8 @@ $request = XHCurl::createRequest('https://httpbin.org/get')
     ->header('X-Custom-Header', 'hello')
     ->timeout(30);
 
-// 同步执行
-$result = XHCurl::execute($request);
+// 同步执行（execute() 是 XHRequest 的实例方法）
+$result = $request->execute();
 
 if ($result['success']) {
     echo "状态码: " . $result['status'] . "\n";
@@ -150,13 +152,13 @@ if ($result['success']) {
 
 ```php
 <?php
-$request = XHCurl::createRequest('https://httpbin.org/post')
+$result = XHCurl::createRequest('https://httpbin.org/post')
     ->post()
     ->json(['name' => 'XHCurl', 'version' => '1.0'])
     ->header('Authorization', 'Bearer my-token')
-    ->timeout(30);
+    ->timeout(30)
+    ->execute();  // 链式末尾直接 execute()
 
-$result = XHCurl::execute($request);
 echo $result['body'];
 ```
 
@@ -329,10 +331,11 @@ echo "回调: " . $custom['callback'] . "\n";
 | `getConfig()` | `(): array` | 获取全局配置 |
 | `isCli()` | `(): bool` | 检测是否 CLI 模式 |
 | `createRequest()` | `(string $url): XHRequest` | 创建请求构建器 |
-| `execute()` | `(XHRequest $req): array` | 同步执行单个请求 |
 | `run()` | `(callable $main): mixed` | 启动协程事件泵，执行主回调 |
 | `await()` | `(XHRequest $req): array` | 协程式等待单个请求（须在 `run()` 内） |
 | `gather()` | `(array $requests): array` | 并发批量请求，按完成顺序返回（须在 `run()` 内） |
+
+> 单请求同步执行请用 `XHRequest::execute()` 实例方法（见下文）。
 
 **全局配置项：**
 
@@ -351,7 +354,13 @@ XHCurl::setConfig([
 
 ### XHRequest - 请求构建器
 
-所有 setter 方法返回 `$this`，支持链式调用。
+所有 setter 方法返回 `$this`，支持链式调用。`execute()` 为实例方法，同步执行并返回结果数组。
+
+#### 同步执行
+
+| 方法 | 说明 |
+|------|------|
+| `execute()` | 同步执行当前请求，返回结果数组（字段见下文「结果数组字段」） |
 
 #### HTTP 方法
 
@@ -365,10 +374,14 @@ XHCurl::setConfig([
 
 | 方法 | 说明 |
 |------|------|
-| `json(array $data)` | JSON 请求体（自动设置 Content-Type） |
+| `json(array $data)` | JSON 请求体（自动设置 Content-Type: application/json） |
 | `form(array $data)` | 表单请求体（application/x-www-form-urlencoded） |
-| `body(string $data)` | 原始请求体 |
-| `multipart(array $fields)` | 文件上传（multipart/form-data） |
+| `body(string $data)` | 原始请求体（**二进制安全**，可传任意字节） |
+| `multipart(array $fields)` | 文件上传（multipart/form-data，**字段值二进制安全**） |
+
+> **二进制安全说明**：`body()` 与 `multipart()` 的字段值通过二进制安全接口读取
+> PHP 字符串（PHP 字符串本质是字节序列），不会因含非 UTF-8 字节而丢失或损坏，
+> 适合上传图片、压缩数据等任意二进制内容。
 
 **multipart 字段格式：**
 
@@ -385,8 +398,6 @@ XHCurl::setConfig([
 |------|-----------|------|
 | `header(string $name, string $value)` | - | 设置请求头 |
 | `cookies(string $cookies)` | CURLOPT_COOKIE | Cookie 字符串 |
-| `cookieFile(string $path)` | CURLOPT_COOKIEFILE | Cookie 读取文件 |
-| `cookieJar(string $path)` | CURLOPT_COOKIEJAR | Cookie 存储文件 |
 | `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
 | `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
 | `encoding(string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`） |
@@ -396,10 +407,9 @@ XHCurl::setConfig([
 | 方法 | 对应 curl | 说明 |
 |------|-----------|------|
 | `verifySsl(bool $verify)` | CURLOPT_SSL_VERIFYPEER | 验证 SSL 证书 |
-| `caInfo(string $path)` | CURLOPT_CAINFO | 自定义 CA 证书路径 |
-| `sslCert(string $path)` | CURLOPT_SSLCERT | 客户端证书路径 |
-| `sslKey(string $path)` | CURLOPT_SSLKEY | 客户端密钥路径 |
-| `sslKeyPassword(string $password)` | CURLOPT_SSLKEYPASSWD | 密钥密码 |
+
+> 客户端证书（CURLOPT_SSLCERT/SSLKEY）、CA 证书（CURLOPT_CAINFO）、
+> Cookie 文件（CURLOPT_COOKIEFILE/COOKIEJAR）暂未实现。
 
 #### 其他选项
 
@@ -408,33 +418,52 @@ XHCurl::setConfig([
 | `timeout(int $seconds)` | 请求超时（秒） |
 | `connectTimeout(int $seconds)` | 连接超时（秒） |
 | `userAgent(string $ua)` | User-Agent |
-| `proxy(string $proxy)` | 代理地址 |
+| `proxy(string $proxy)` | 代理地址（支持 http/https/socks5） |
 | `followRedirects(bool $follow)` | 跟随重定向 |
 | `maxRedirects(int $max)` | 最大重定向次数 |
 | `range(string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`） |
-| `setUserData(array $data)` | 用户自定义数据（随结果回传） |
-| `setPriority(int $priority)` | 请求优先级（线程池模式） |
+| `setId(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
+| `setUserData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
 | `getUrl()` / `getMethod()` | 获取 URL / 方法 |
 
-### XHResponse - 响应对象
+> **请求级配置覆盖**：`verifySsl()`/`proxy()`/`connectTimeout()`/`followRedirects()`/
+> `maxRedirects()` 都是请求级覆盖，会基于全局配置构建新 Client 应用这些参数。
+> 注意这会牺牲连接池复用（新 Client 有独立连接池），仅在显式设置时才触发。
+> 无效代理地址会明确报错，而非静默忽略。
 
-> 注意：在 `execute()` / `await()` / `gather()` 模式下，结果以**数组**形式返回。`XHResponse` 对象用于 `XHMulti` / `XHThreadPool` 的回调场景。
+### 结果数组字段
 
-**结果数组字段：**
+`execute()`（XHRequest）/ `XHMulti::execute()` / `XHThreadPool::execute()` /
+`XHCurl::await()` / `XHCurl::gather()` **全部以关联数组形式返回结果**，字段完全一致：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | string | 请求 ID |
+| `id` | string | 请求 ID（未设置 `setId()` 时为 URL） |
 | `success` | bool | 是否成功 |
 | `status` | int | HTTP 状态码 |
-| `body` | string | 响应体 |
+| `body` | string | 响应体（**二进制安全**，保留原始字节） |
 | `body_size` | int | 响应体大小（字节） |
+| `headers` | array | 所有响应头（键名小写；含非 ASCII 字节时用替换字符保留） |
 | `url` | string | 最终 URL（重定向后） |
 | `elapsed_ms` | int | 请求耗时（毫秒） |
-| `error` | string | 错误信息（失败时） |
-| `user_data` | string | 用户自定义数据（JSON 字符串） |
+| `remote_addr` | string | 远程服务器地址（可选） |
+| `version` | string | HTTP 协议版本（可选，如 `HTTP/1.1`） |
+| `error` | string | 错误信息（失败时，可选） |
+| `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()` 时） |
+
+> `XHResponse` 类为内部类型，当前未提供公开构造路径，所有 API 均直接返回上述数组。
 
 ### XHMulti - 批量异步执行器
+
+基于 tokio 的 M:N 异步并发（CLI 多线程并行，FPM 协作式并发）。
+
+| 方法 | 说明 |
+|------|------|
+| `__construct()` | 创建批量执行器 |
+| `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
+| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制） |
+| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
+| `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 
 ```php
 $multi = new XHMulti();
@@ -444,9 +473,19 @@ $multi->maxConcurrency(10);  // 最大并发数
 $results = $multi->execute(); // 返回结果数组
 ```
 
+> 结果按**完成顺序**排列（非提交顺序）。用结果的 `id` 字段关联业务上下文，
+> 而非依赖数组索引。
+
 ### XHThreadPool - 线程池
 
-仅 CLI 模式可用。创建独立工作线程池处理请求。
+仅 CLI 模式可用（FPM 多线程会与 PHP 内存管理器冲突）。创建独立工作线程池处理请求，
+同对象多次 `execute()` 复用工作线程。
+
+| 方法 | 说明 |
+|------|------|
+| `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
+| `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
+| `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
@@ -467,16 +506,11 @@ $results = $pool->execute();
 | CURLOPT_HTTPHEADER | `header()` | ✅ |
 | CURLOPT_POSTFIELDS (JSON) | `json()` | ✅ |
 | CURLOPT_POSTFIELDS (form) | `form()` | ✅ |
-| CURLOPT_HTTPPOST (multipart) | `multipart()` | ✅ |
+| CURLOPT_POSTFIELDS (raw, 二进制安全) | `body()` | ✅ |
+| CURLOPT_HTTPPOST (multipart) | `multipart()`（字段值二进制安全） | ✅ |
 | CURLOPT_COOKIE | `cookies()` | ✅ |
-| CURLOPT_COOKIEFILE | `cookieFile()` | ✅ |
-| CURLOPT_COOKIEJAR | `cookieJar()` | ✅ |
 | CURLOPT_USERPWD | `basicAuth()` | ✅ |
 | CURLOPT_XOAUTH2_BEARER | `bearerToken()` | ✅ |
-| CURLOPT_CAINFO | `caInfo()` | ✅ |
-| CURLOPT_SSLCERT | `sslCert()` | ✅ |
-| CURLOPT_SSLKEY | `sslKey()` | ✅ |
-| CURLOPT_SSLKEYPASSWD | `sslKeyPassword()` | ✅ |
 | CURLOPT_SSL_VERIFYPEER | `verifySsl()` | ✅ |
 | CURLOPT_ENCODING | `encoding()` | ✅ |
 | CURLOPT_RANGE | `range()` | ✅ |
@@ -486,6 +520,11 @@ $results = $pool->execute();
 | CURLOPT_PROXY | `proxy()` | ✅ |
 | CURLOPT_FOLLOWLOCATION | `followRedirects()` | ✅ |
 | CURLOPT_MAXREDIRS | `maxRedirects()` | ✅ |
+| CURLOPT_CAINFO | - | ❌ 暂未实现 |
+| CURLOPT_SSLCERT | - | ❌ 暂未实现 |
+| CURLOPT_SSLKEY | - | ❌ 暂未实现 |
+| CURLOPT_COOKIEFILE | - | ❌ 暂未实现 |
+| CURLOPT_COOKIEJAR | - | ❌ 暂未实现 |
 
 ---
 
@@ -561,15 +600,14 @@ xhcurl/
 │   │   ├── fiber.rs        # PHP Fiber 协程桥接
 │   │   ├── request.rs      # 请求构建器
 │   │   ├── response.rs     # 响应对象
-│   │   ├── multi.rs        # 批量异步执行器
-│   │   ├── threadpool.rs   # 线程池
-│   │   ├── curl.rs         # 客户端管理器
+│   │   ├── executor.rs     # 公共请求执行器（multi/threadpool/fiber 共用）
+│   │   ├── multi.rs        # 批量异步执行器（tokio spawn + Semaphore）
+│   │   ├── threadpool.rs   # 线程池（worker + channel）
+│   │   ├── curl.rs         # 全局配置与客户端管理器
 │   │   ├── header.rs       # 请求头管理
-│   │   ├── cookie.rs       # Cookie 管理
-│   │   ├── buffer.rs       # 缓冲区
-│   │   └── error.rs        # 错误类型
+│   │   └── error.rs        # 错误类型与常量
 │   ├── Cargo.toml
-│   └── tests/              # PHP 测试脚本
+│   └── tests/              # 集成测试
 ├── .github/workflows/
 │   └── build-rust.yml      # CI/CD 流水线
 └── README.md
@@ -580,7 +618,7 @@ xhcurl/
 ```bash
 cd rust
 
-# 编译（debug 模式）
+# 编译（debug 模式，含 PHP 扩展）
 cargo build --features php
 
 # 运行单元测试
@@ -589,12 +627,18 @@ cargo test --lib
 # 代码格式检查
 cargo fmt -- --check
 
-# 静态分析
-cargo clippy -- -D warnings
+# 静态分析（必须加 --features php，否则 #[php_impl] 块内的代码不会被检查）
+cargo clippy --all-targets --features php -- -D warnings
+
+# 编译 release 扩展
+cargo build --release --features php
 
 # 加载扩展测试
-php -d extension=target/debug/libxhcurl.so -r "echo XHCurl::version();"
+php -d extension=target/release/libxhcurl.so -r "echo XHCurl::version();"
 ```
+
+> **PHP 扩展编译环境要求**：需要 libclang（ext-php-rs bindgen）和 PHP 8.1+ 开发头文件。
+> Linux 还需 OpenSSL 开发库。详见「安装」一节。
 
 ### CI/CD 流水线
 
