@@ -1447,7 +1447,7 @@ fn json_insert_value<K: Into<ext_php_rs::types::ArrayKey<'static>>>(
 /// 防止命令无限期挂起；调用方可通过 `timeout` 选项覆盖。
 const XHRUN_DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-/// `xhrun` 允许的最大输出字节数（stdout + stderr 合计）。
+/// `xhrun` 每个流（stdout/stderr）允许的最大输出字节数。
 /// 防止恶意/失控命令耗尽内存；调用方可通过 `max_output` 选项覆盖。
 const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 
@@ -1706,11 +1706,20 @@ pub fn xhrun(
                 // 仍在运行，检查超时
                 if let Some(dur) = timeout_dur {
                     if start.elapsed() >= dur {
-                        // 超时：强制终止
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        timed_out = true;
-                        exit_code = -1;
+                        // 超时前二次确认：子进程可能在 10ms 休眠窗口内已退出，
+                        // 此时不应误报为超时，应使用真实退出码。
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                exit_code = status.code().unwrap_or(-1) as i64;
+                            }
+                            _ => {
+                                // 子进程仍在运行，强制终止并回收
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                timed_out = true;
+                                exit_code = -1;
+                            }
+                        }
                         break;
                     }
                 }
@@ -1718,6 +1727,9 @@ pub fn xhrun(
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(_) => {
+                // try_wait 出错（如 EINTR）：确保子进程被终止和回收，避免僵尸进程
+                let _ = child.kill();
+                let _ = child.wait();
                 exit_code = -1;
                 break;
             }
@@ -1763,7 +1775,7 @@ pub fn xhrun(
 
     // ===== 8. 构建返回数组 =====
     let mut result = ZendHashTable::new();
-    let success = exit_code == 0 && !timed_out;
+    let success = exit_code == 0 && !timed_out && !truncated;
     let _ = result.insert("success", success);
     let _ = result.insert("exit_code", exit_code);
 

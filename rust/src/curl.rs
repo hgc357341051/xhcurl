@@ -193,8 +193,8 @@ impl XhCurlManager {
             return Ok(());
         }
 
-        // TODO: 在此初始化 tokio 运行时
-        // 运行时在首次请求时按需创建
+        // tokio 运行时在首次请求时按需创建（global_runtime 的 OnceLock 延迟初始化），
+        // 避免在 MINIT 阶段过早创建多线程运行时。
 
         *initialized = true;
         Ok(())
