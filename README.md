@@ -530,7 +530,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | 键 | 类型 | 默认 | 说明 |
 |----|------|------|------|
 | `timeout` | int | 60 | 超时秒数，0 = 无超时 |
-| `max_output` | int | 64MB | 最大输出字节数（stdout+stderr 合计） |
+| `max_output` | int | 64MB | 每个流（stdout/stderr）的最大输出字节数 |
 | `cwd` | string | 继承 | 工作目录 |
 | `env` | array | 继承 | 环境变量键值对 |
 | `shell` | bool | false | 是否通过系统 shell 执行（启用管道/通配符，但有注入风险） |

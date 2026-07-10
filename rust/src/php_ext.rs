@@ -1419,7 +1419,7 @@ const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 ///   不经过 shell 解析。仅在 `shell => true` 时，`args` 会拼接进命令行。
 /// - `options`: 选项数组，支持以下键：
 ///   - `timeout` (int): 超时秒数，0 = 无超时。默认 60。
-///   - `max_output` (int): 最大输出字节数（stdout+stderr 合计）。默认 64MB。
+///   - `max_output` (int): 每个流（stdout/stderr）的最大输出字节数。默认 64MB。
 ///   - `cwd` (string): 工作目录。默认继承当前进程。
 ///   - `env` (array): 环境变量键值对。默认继承当前进程。
 ///   - `shell` (bool): 是否通过系统 shell 执行（启用管道/通配符/重定向支持，
@@ -1622,7 +1622,7 @@ pub fn xhrun(
     let mut child_stdout = child.stdout.take();
     let mut child_stderr = child.stderr.take();
 
-    // 读线程：将 stdout+stderr 合并到各自缓冲区，同时累加总大小
+    // 读线程：独立限制 stdout/stderr 各自的大小为 max_output
     let total_limit = max_output;
     let stdout_handle = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
         let mut buf = Vec::new();

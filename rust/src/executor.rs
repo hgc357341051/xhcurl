@@ -26,7 +26,7 @@ use crate::response::XhResponse;
 
 /// 执行单个 HTTP 请求（核心公共逻辑）。
 ///
-/// 供 `XhMulti::execute_single`、`XhThreadPool::execute_request`、
+/// 供 `XhMulti::execute_single`、`XHThreadPool::execute_request`、
 /// `fiber::execute_http_task` 共用，确保三处行为完全一致。
 ///
 /// # 参数
@@ -39,6 +39,13 @@ use crate::response::XhResponse;
 /// # 返回
 /// - `Ok(XhResponse)`: 请求成功，包含完整响应
 /// - `Err(XhCurlError)`: 请求失败（网络错误、响应体超限等）
+///
+/// # 流式事件完整性
+/// 无论成功还是失败，只要 `stream_tx` 存在，都会发送一个终结事件：
+/// - 成功 → `StreamEvent::Complete`
+/// - 失败 → `StreamEvent::Error`
+///
+/// 这确保流式消费端不会因请求失败而永久等待终结信号。
 pub async fn execute_request(
     client: reqwest::Client,
     request: XhRequest,
@@ -48,6 +55,49 @@ pub async fn execute_request(
 ) -> XhCurlResult<XhResponse> {
     let start = Instant::now();
 
+    // 将实际执行委托给 inner 函数，外层统一处理错误路径的流式事件。
+    // 这样无论 inner 内部在哪一步失败（请求构建/发送/流式读取/超限），
+    // 都能保证发送 StreamEvent::Error，避免消费端永久等待。
+    let result = execute_request_inner(
+        client,
+        request,
+        request_id.clone(),
+        stream_tx.clone(),
+        max_response_size,
+        start,
+    )
+    .await;
+
+    match result {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            // 错误路径：发送 Error 事件，确保流式消费端收到终结信号
+            if let Some(tx) = &stream_tx {
+                let _ = tx
+                    .send((
+                        request_id,
+                        StreamEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ))
+                    .await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 实际执行单个 HTTP 请求的内部逻辑。
+///
+/// 由 `execute_request` 调用，错误时由外层负责发送 `StreamEvent::Error`。
+async fn execute_request_inner(
+    client: reqwest::Client,
+    request: XhRequest,
+    request_id: String,
+    stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
+    max_response_size: usize,
+    start: Instant,
+) -> XhCurlResult<XhResponse> {
     // 将 XhRequest 转换为 reqwest 请求
     let req_builder = request.to_reqwest(&client)?;
 

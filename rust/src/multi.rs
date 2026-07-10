@@ -413,17 +413,31 @@ impl XhMulti {
         // 丢弃发送端（所有任务完成后 channel 自动关闭）
         drop(result_tx);
 
+        // 预期结果数量（用于后续完整性检查）
+        let expected = self.tasks.len();
+
         // 收集所有结果
-        let mut results = Vec::with_capacity(self.tasks.len());
+        let mut results = Vec::with_capacity(expected);
         while let Some(result) = result_rx.recv().await {
             results.push(result);
         }
 
         // 等待所有任务完成（确保没有任务泄漏）
+        // 检测 task panic（JoinError），避免静默丢失结果
         for handle in self.tasks.drain(..) {
-            // abort 已经完成的任务不会有副作用
-            // 这里等待确保所有 task 都已结束
-            let _ = handle.await;
+            if let Err(join_err) = handle.await {
+                eprintln!("[XHMulti] 任务异常退出: {}", join_err);
+            }
+        }
+
+        // 完整性检查：task panic 会导致结果数量少于预期
+        // 此时返回错误而非静默返回不完整结果
+        if results.len() != expected {
+            return Err(XhCurlError::Generic(format!(
+                "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
+                expected,
+                results.len()
+            )));
         }
 
         Ok(results)

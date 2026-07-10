@@ -472,6 +472,16 @@ impl XhThreadPool {
             }
         }
 
+        // 完整性检查：worker panic 或提前退出可能导致结果数量不足
+        // 此时返回错误而非静默返回不完整结果
+        if results.len() != submitted_count {
+            return Err(XhCurlError::ThreadPool(format!(
+                "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
+                submitted_count,
+                results.len()
+            )));
+        }
+
         Ok(results)
     }
 
