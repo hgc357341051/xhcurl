@@ -164,7 +164,9 @@ async fn execute_request_inner(
             .checked_add(chunk_len)
             .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
 
-        if new_size > max_response_size {
+        // max_response_size == 0 表示无限制（与 GlobalConfig.max_response_size 注释一致）
+        // 仅当 max_response_size > 0 时执行大小限制检查
+        if max_response_size > 0 && new_size > max_response_size {
             // 超过限制：写入不超过 max_response_size 的部分后停止读取
             let remaining = max_response_size - body_size;
             if remaining > 0 {

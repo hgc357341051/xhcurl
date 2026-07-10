@@ -131,6 +131,14 @@ fn extract_requests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> 
             None => break,
         }
     }
+    // 批量上限检查：与 XHMulti::add / XHThreadPool::add 的保护一致，防止超大数组导致 OOM
+    if req_list.len() > MAX_REQUESTS_PER_BATCH {
+        return Err(format!(
+            "请求数量 {} 超过单批上限 {}（请分组执行）",
+            req_list.len(),
+            MAX_REQUESTS_PER_BATCH
+        ));
+    }
     Ok(req_list)
 }
 

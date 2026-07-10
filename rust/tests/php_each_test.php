@@ -238,5 +238,55 @@ try {
 check("run() 失败后再次 run() 不报'不支持嵌套调用'", !$secondRunNestedError);
 check("run() 失败后再次 run() 正常执行 gather", $secondRunSuccess);
 
+echo "\n=== gather/each 批量上限检查（P0）===\n";
+
+// 10. P0 修复验证：gather 传入超过 MAX_REQUESTS_PER_BATCH(10000) 个请求返回错误
+$tooManyRequests = array();
+for ($i = 0; $i < 10001; $i++) {
+    $tooManyRequests[] = XHCurl::createRequest($BASE . '/get?id=' . $i)->get()->timeout(15);
+}
+$limitErrorReturned = false;
+$limitErrorMessage = '';
+try {
+    XHCurl::run(function() use ($tooManyRequests) {
+        return XHCurl::gather($tooManyRequests);
+    });
+} catch (Throwable $e) {
+    $limitErrorReturned = true;
+    $limitErrorMessage = $e->getMessage();
+}
+check("gather 超过上限(10001)返回错误", $limitErrorReturned);
+check("gather 错误信息含上限说明", strpos($limitErrorMessage, '10000') !== false && strpos($limitErrorMessage, '分组') !== false);
+
+// each 同样应受保护
+$eachLimitErrorReturned = false;
+try {
+    XHCurl::run(function() use ($tooManyRequests) {
+        return XHCurl::each($tooManyRequests, function($result) {});
+    });
+} catch (Throwable $e) {
+    $eachLimitErrorReturned = true;
+}
+check("each 超过上限(10001)返回错误", $eachLimitErrorReturned);
+
+echo "\n=== max_response_size=0 表示无限制（P1）===\n";
+
+// 11. P1 修复验证：setConfig max_response_size=0 后大响应不报错
+XHCurl::setConfig(array('max_response_size' => 0));
+$noLimitSuccess = false;
+try {
+    $result = XHCurl::run(function() use ($BASE) {
+        return XHCurl::gather(array(
+            XHCurl::createRequest($BASE . '/get')->get()->timeout(15)->setId('nolimit'),
+        ));
+    });
+    $noLimitSuccess = is_array($result) && count($result) === 1 && $result[0]['success'] === true;
+} catch (Throwable $e) {
+    $noLimitSuccess = false;
+}
+check("max_response_size=0 时请求成功（不报大小超限）", $noLimitSuccess);
+// 恢复默认配置避免影响后续测试
+XHCurl::setConfig(array('max_response_size' => 10485760));
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);
