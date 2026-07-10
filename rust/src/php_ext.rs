@@ -27,7 +27,7 @@ use ext_php_rs::zend::php_sapi_name;
 use crate::curl::XhCurlManager;
 use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::XhMulti;
-use crate::request::{HttpMethod, XhRequest};
+use crate::request::{clear_request_client_cache, HttpMethod, XhRequest};
 use crate::response::XhResponse;
 use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool};
 
@@ -284,7 +284,25 @@ impl PhpXhCurl {
                     type_mismatches.push("max_connections");
                 }
             }
+
+            // 协程 gather/each 并发上限，负值跳过
+            // 0 = 不限制；默认 64
+            if let Some(v) = config.get("fiber_max_concurrency") {
+                if let Some(l) = v.long() {
+                    if l >= 0 {
+                        c.fiber_max_concurrency = l as usize;
+                    }
+                } else {
+                    type_mismatches.push("fiber_max_concurrency");
+                }
+            }
         });
+
+        // 全局配置变更后，请求级 Client 缓存（按 OverrideKey 缓存）中已有的 Client
+        // 是基于旧全局配置构建的（UA/keepalive/连接池/TLS 等），需清空以使后续构建
+        // 的 Client 反映新配置。global_client（无覆盖时的全局单例）走 OnceLock 不会
+        // 重建，但请求级 Client 缓存必须主动失效。
+        clear_request_client_cache();
 
         if !type_mismatches.is_empty() {
             return Err(format!(
@@ -322,6 +340,7 @@ impl PhpXhCurl {
             config.tcp_keepalive_interval as i64,
         );
         let _ = ht.insert("max_connections", config.max_connections as i64);
+        let _ = ht.insert("fiber_max_concurrency", config.fiber_max_concurrency as i64);
 
         // 代理地址（可选）
         if let Some(proxy) = &config.proxy {
@@ -1101,105 +1120,21 @@ impl PhpXhMulti {
             XhCurlManager::global().config().max_response_size
         };
 
-        let total = requests.len();
-
-        // 复用 execute 的「XhMulti 创建 + 配置 + spawn」模式，
-        // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
+        // 复用 execute 的「XhMulti 创建 + 配置 + spawn_all」模式，
+        // 仅收集循环不同：recv 一个 result → result_to_php_array → 调回调 → 不累积
+        // spawn 逻辑统一委托给 XhMulti::spawn_all，消除重复代码
         global_runtime().block_on(async move {
-            // 创建结果 channel（有界，缓冲区 = 请求数 * 倍数，最小 16）
-            let channel_capacity = total.saturating_mul(2).max(16);
-            let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(channel_capacity);
-
-            // 并发控制 Semaphore（与 XhMulti::execute 一致）
-            let semaphore = if max_concurrency > 0 {
-                Some(std::sync::Arc::new(tokio::sync::Semaphore::new(
-                    max_concurrency,
-                )))
-            } else {
-                None
-            };
-
-            // 为每个请求创建异步任务（spawn 逻辑与 XhMulti::execute 内一致）
-            let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total);
-            for request in requests {
-                // 获取请求 ID（如果没有则使用 URL 作为 ID）
-                let request_id = request
-                    .get_id()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| request.get_url().to_string());
-                // 提取用户自定义数据（随结果原样带回）
-                let user_data = request.get_user_data().map(|s| s.to_string());
-
-                // 克隆共享资源
-                let client_clone = client.clone();
-                let result_tx_clone = result_tx.clone();
-                let semaphore_clone = semaphore.clone();
-
-                // 生成异步任务（类似 go func() { ... }()）
-                let handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-                    // 如果有并发限制，获取 Semaphore 许可
-                    // Semaphore 关闭时 acquire 返回 Err，
-                    // 此时不执行请求，直接发送错误结果，避免结果数量不匹配
-                    let _permit = if let Some(sem) = &semaphore_clone {
-                        match sem.acquire().await {
-                            Ok(permit) => Some(permit),
-                            Err(_) => {
-                                // Semaphore 已关闭，发送错误结果并退出
-                                let elapsed = std::time::Duration::from_secs(0);
-                                let result = crate::multi::RequestResult::error(
-                                    request_id,
-                                    user_data,
-                                    "并发信号量已关闭".to_string(),
-                                    elapsed,
-                                );
-                                let _ = result_tx_clone.send(result).await;
-                                return;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    // 记录开始时间
-                    let start = std::time::Instant::now();
-
-                    // 执行单个请求（带响应体大小限制），stream_tx=None 不启用流式事件
-                    let result = XhMulti::execute_single(
-                        client_clone,
-                        request,
-                        request_id.clone(),
-                        None,
-                        max_resp_size,
-                    )
-                    .await;
-
-                    // 计算耗时
-                    let elapsed = start.elapsed();
-
-                    // 构建结果
-                    let result = match result {
-                        Ok(response) => crate::multi::RequestResult::success(
-                            request_id, user_data, response, elapsed,
-                        ),
-                        Err(e) => crate::multi::RequestResult::error(
-                            request_id,
-                            user_data,
-                            e.to_string(),
-                            elapsed,
-                        ),
-                    };
-
-                    // 通过 channel 发送结果
-                    let _ = result_tx_clone.send(result).await;
-                });
-                tasks.push(handle);
+            let mut multi = XhMulti::new(client);
+            if max_concurrency > 0 {
+                multi = multi.max_concurrency(max_concurrency);
             }
+            multi = multi.max_response_size(max_resp_size);
+            if timeout > 0 {
+                multi = multi.timeout(timeout);
+            }
+            multi.add_many(requests).map_err(|e| e.to_string())?;
 
-            // 丢弃发送端（所有任务完成后 channel 自动关闭）
-            drop(result_tx);
-
-            // 预期结果数量（用于完整性检查）
-            let expected = tasks.len();
+            let (mut result_rx, expected) = multi.spawn_all().await;
 
             // 流式收集：每收到一个结果就调用回调处理，不累积（内存恒定）
             let mut count: i64 = 0;
@@ -1210,9 +1145,7 @@ impl PhpXhMulti {
                     let now = std::time::Instant::now();
                     if now >= deadline {
                         // 超时：abort 剩余任务，避免任务泄漏
-                        for handle in tasks.drain(..) {
-                            handle.abort();
-                        }
+                        multi.abort_tasks();
                         return Err(format!(
                             "批量请求超时（{} 秒），已完成 {}/{} 个",
                             timeout, count, expected
@@ -1227,9 +1160,7 @@ impl PhpXhMulti {
                             if let Err(e) =
                                 invoke_streaming_callback(&callback_callable, &result_array)
                             {
-                                for handle in tasks.drain(..) {
-                                    handle.abort();
-                                }
+                                multi.abort_tasks();
                                 return Err(e);
                             }
                             count += 1;
@@ -1240,9 +1171,7 @@ impl PhpXhMulti {
                         Ok(None) => break, // channel 关闭
                         Err(_) => {
                             // 批量超时：abort 剩余任务，避免任务泄漏
-                            for handle in tasks.drain(..) {
-                                handle.abort();
-                            }
+                            multi.abort_tasks();
                             return Err(format!(
                                 "批量请求超时（{} 秒），已完成 {}/{} 个",
                                 timeout, count, expected
@@ -1256,9 +1185,7 @@ impl PhpXhMulti {
                     let result_array = result_to_php_array(&result);
                     // 调用用户回调，异常时 abort 剩余任务再向上传播
                     if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
-                        for handle in tasks.drain(..) {
-                            handle.abort();
-                        }
+                        multi.abort_tasks();
                         return Err(e);
                     }
                     count += 1;
@@ -1267,11 +1194,7 @@ impl PhpXhMulti {
 
             // 等待所有任务完成（确保没有任务泄漏）
             // 检测 task panic（JoinError），避免静默丢失结果
-            for handle in tasks.drain(..) {
-                if let Err(join_err) = handle.await {
-                    eprintln!("[XHMulti] 任务异常退出: {}", join_err);
-                }
-            }
+            multi.join_tasks().await;
 
             // 完整性检查：task panic 会导致结果数量少于预期
             if (count as usize) != expected {
@@ -1800,6 +1723,56 @@ const XHRUN_DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// 防止恶意/失控命令耗尽内存；调用方可通过 `max_output` 选项覆盖。
 const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 
+/// Unix shell 参数转义：用单引号包裹，内部单引号用 `'\''` 转义。
+///
+/// `sh -c` 接受单个字符串，若直接拼接参数会被 shell 重新解析，
+/// 攻击者可借含 `;` / `$(...)` / 反引号的参数注入命令。
+/// 本函数确保每个参数作为字面量传入，不被 shell 解释。
+///
+/// 例：`a'b` → `'a'\''b'`
+fn shell_quote_unix(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            // 关闭单引号 → 转义单引号 → 重开单引号
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Windows `cmd /C` 参数转义：用双引号包裹，转义内部双引号与 cmd 元字符。
+///
+/// `cmd` 的引用规则远比 POSIX 复杂且存在历史包袱（如 `%VAR%` 展开
+/// 无法通过转义完全消除），此函数采用业界常见的 best-effort 策略：
+/// 双引号包裹 + 内部 `"` 转义为 `\"` + 危险元字符用 `^` 抑制。
+/// 生产环境若处理不可信输入，仍建议避免 `shell => true`，改用默认非 shell 路径。
+///
+/// 需抑制的 cmd 元字符（在双引号外才有特殊含义，此处仍抑制以兜底）：
+/// `& | < > ^ ( ) %`
+fn shell_quote_windows(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            // 在双引号内这些本就大多无特殊含义，但 `^` 与 `%` 在 cmd 中仍有行为，
+            // 用 `^` 前缀抑制（best-effort）
+            '&' | '|' | '<' | '>' | '^' | '(' | ')' | '%' => {
+                out.push('^');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// 安全的跨平台 shell 命令执行函数。
 ///
 /// 用于替代 PHP 内置的 `shell_exec` / `exec` / `system` / `passthru` /
@@ -1824,14 +1797,16 @@ const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 ///
 /// - `command`: 要执行的命令（如 `"ls"`、`"ping"`、`"cmd"`）。
 /// - `args`: 命令参数数组（如 `["-la", "/tmp"]`）。每个元素作为一个独立参数，
-///   不经过 shell 解析。仅在 `shell => true` 时，`args` 会拼接进命令行。
+///   不经过 shell 解析。`shell => true` 时，`args` 会做 shell 转义后拼接进命令行，
+///   防止参数中的元字符（`;`/`$()`/反引号等）注入命令。
 /// - `options`: 选项数组，支持以下键：
 ///   - `timeout` (int): 超时秒数，0 = 无超时。默认 60。
 ///   - `max_output` (int): 每个流（stdout/stderr）的最大输出字节数，0 = 无限制。默认 64MB。
 ///   - `cwd` (string): 工作目录。默认继承当前进程。
 ///   - `env` (array): 环境变量键值对。默认继承当前进程。
-///   - `shell` (bool): 是否通过系统 shell 执行（启用管道/通配符/重定向支持，
-///     但会引入 shell 注入风险，需谨慎）。默认 false。
+///   - `shell` (bool): 是否通过系统 shell 执行（启用管道/通配符/重定向支持；
+///     `args` 会被 shell 转义，但 `command` 本身仍按字面传给 shell，
+///     处理不可信输入时仍建议优先用默认非 shell 路径）。默认 false。
 ///   - `allow` (array): 命令白名单（如 `["ls", "cat"]`）。设置后仅允许这些命令。
 ///   - `deny` (array): 命令黑名单（如 `["rm", "shutdown"]`）。
 ///   - `input` (string): 传给命令 stdin 的数据（二进制安全）。
@@ -1859,8 +1834,11 @@ const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 /// // 带超时和环境变量
 /// $r = xhrun('ping', ['-c', '4', 'example.com'], ['timeout' => 10, 'env' => ['PATH' => '/usr/bin']]);
 ///
-/// // 需要管道时显式启用 shell（注意：此时 $args 不会转义，需自行确保安全）
+/// // 需要管道时显式启用 shell（args 会被 shell 转义，防注入）
 /// $r = xhrun('ls -la /tmp | grep foo', [], ['shell' => true]);
+///
+/// // shell 模式下含特殊字符的参数会被安全转义（不会执行 rm）
+/// $r = xhrun('echo', ['foo; rm -rf /'], ['shell' => true]);
 ///
 /// // 白名单限制
 /// $r = xhrun('ls', ['-la'], ['allow' => ['ls', 'cat']]);
@@ -1945,11 +1923,18 @@ pub fn xhrun(
     // ===== 4. 构建命令 =====
     let mut cmd = if use_shell {
         // shell 模式：通过系统 shell 执行，支持管道/通配符/重定向
-        // 注意：此模式有 shell 注入风险，需调用方自行确保输入安全
+        // 安全修复：对每个 arg 做 shell 转义，防止参数中的 `;`/`$(...)`/反引号
+        // 被当 shell 元字符解析而注入命令。command 本身仍按字面传给 shell
+        // （用户显式启用 shell 模式即为使用其管道/通配符等特性）。
         let mut full = String::from(command);
+        let quote_fn = if cfg!(target_os = "windows") {
+            shell_quote_windows
+        } else {
+            shell_quote_unix
+        };
         for a in &arg_vec {
             full.push(' ');
-            full.push_str(a);
+            full.push_str(&quote_fn(a));
         }
         let c = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
@@ -2267,6 +2252,52 @@ fn spawn_output_reader<R: std::io::Read + Send + 'static>(
         }
         Ok((buf, exceeded))
     })
+}
+
+// +----------------------------------------------------------------------+
+// | 单元测试：xhrun shell 参数转义                                        |
+// +----------------------------------------------------------------------+
+
+#[cfg(all(test, feature = "php"))]
+mod tests {
+    use super::{shell_quote_unix, shell_quote_windows};
+
+    #[test]
+    fn test_shell_quote_unix_simple() {
+        assert_eq!(shell_quote_unix("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_quote_unix_with_metachars() {
+        // 元字符应被单引号原样包裹，不被 shell 解释
+        let q = shell_quote_unix("foo; rm -rf /");
+        assert_eq!(q, "'foo; rm -rf /'");
+    }
+
+    #[test]
+    fn test_shell_quote_unix_with_single_quote() {
+        // 内部单引号需用 '\'' 转义
+        assert_eq!(shell_quote_unix("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn test_shell_quote_unix_empty() {
+        assert_eq!(shell_quote_unix(""), "''");
+    }
+
+    #[test]
+    fn test_shell_quote_windows_escapes_double_quote() {
+        let q = shell_quote_windows("a\"b");
+        assert_eq!(q, "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn test_shell_quote_windows_escapes_metachars() {
+        let q = shell_quote_windows("foo&bar|baz");
+        // & 和 | 应被 ^ 前缀抑制
+        assert!(q.contains("^&"));
+        assert!(q.contains("^|"));
+    }
 }
 
 // +----------------------------------------------------------------------+

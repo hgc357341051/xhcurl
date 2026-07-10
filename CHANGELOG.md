@@ -5,22 +5,41 @@
 
 ## [Unreleased]
 
-正在进行/规划中的优化（在 1.0.4 之后）：
+
+## [1.0.5] - 2026-07-10
+
+本版本完成代码审计剩余 4 项优化（P2.4 / P2.5 / P3.11 / P3.16），无破坏性变更。
 
 ### 重构
-- **execute_each 代码去重**（P2.4）：`PhpXhMulti::execute_each` 与 `PhpXhThreadPool::execute_each`
-  各自手写 spawn/collect 逻辑，与 `multi.rs::XhMulti::execute` 高度重复（约 327 行），计划统一委托。
+- **execute_each 代码去重**（P2.4）：抽取 `XhMulti::spawn_all()` / `abort_tasks()` /
+  `join_tasks()` 公共方法，`PhpXhMulti::execute_each` 改为委托调用，消除约 130 行与
+  `XhMulti::execute` 重复的 spawn/collect 逻辑。`PhpXhThreadPool::execute_each` 因采用
+  worker+ResultMessage 模型（不共享 spawn 逻辑）保持不变。
+- **请求级 Client 连接复用**（P3.16）：`request.rs::build_request_client` 新增按
+  `OverrideKey`（follow_redirects/max_redirects/verify_ssl/proxy/connect_timeout 组合）缓存
+  Client 的机制，同类请求复用同一 Client（含连接池），避免每次新建 Client 丢失连接复用。
+  `reqwest::Client` 内部为 Arc，clone 廉价。`setConfig()` 变更后通过
+  `clear_request_client_cache()` 主动失效缓存。
 
 ### 安全
-- **xhrun shell 模式参数转义**（P2.5）：`shell => true` 时 `args` 拼接进 `sh -c` 不做转义，
-  有命令注入风险，计划增加 shell 转义。
+- **xhrun shell 模式参数转义**（P2.5）：`shell => true` 时对每个 arg 按平台转义后再拼接：
+  Unix 用单引号包裹 + `'\''` 转义内嵌单引号；Windows 用双引号包裹 + `^` 抑制
+  `& | < > ^ ( ) %` 元字符，杜绝命令注入。新增 6 个单元测试覆盖转义逻辑。
 
 ### 增强
-- **fiber gather/each 并发上限可配置**（P3.11）：`gather()`/`each()` 的 Semaphore 容量硬编码为
-  `total.min(64)`，用户无法配置，计划读取全局 `max_concurrency`，与 `XhMulti` 一致。
-- **请求级 Client 连接复用**（P3.16）：`request.rs::to_reqwest` 在设置了 follow_redirects/
-  verify_ssl/proxy 等任一配置时为每个请求新建 `reqwest::Client`（独立连接池），丧失连接复用，
-  计划对可复用场景缓存/复用 Client。
+- **fiber gather/each 并发上限可配置**（P3.11）：`GlobalConfig` 新增
+  `fiber_max_concurrency`（默认 64，0 = 不限制），`gather()`/`each()` 读取该配置决定
+  Semaphore 容量，与 `XhMulti` 行为一致。可通过
+  `XHCurl::setConfig(['fiber_max_concurrency' => N])` 调整，`getConfig()` 同步返回。
+
+### 测试
+- 新增 3 个请求级 Client 缓存单元测试（命中/未命中/清空）。
+- 新增 6 个 xhrun shell 转义单元测试（Unix/Windows 双平台）。
+- PHP 运行时冒烟验证：扩展加载、`fiber_max_concurrency` 配置读写、xhrun shell 转义、
+  Client 缓存端到端均通过。
+
+### 文档
+- README 补充 `fiber_max_concurrency` 配置项说明。
 
 
 ## [1.0.4] - 2026-07-10

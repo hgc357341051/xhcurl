@@ -331,13 +331,91 @@ impl XhMulti {
             return Ok(Vec::new());
         }
 
+        // 启动所有请求任务（spawn 逻辑抽取到 spawn_all，供 execute / execute_each 共用）
+        let (mut result_rx, expected) = self.spawn_all().await;
+
+        // 收集所有结果
+        let mut results = Vec::with_capacity(expected);
+
+        match self.timeout {
+            // 带批量级超时的结果收集
+            Some(timeout_dur) => {
+                let deadline = Instant::now() + timeout_dur;
+                loop {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        // 批量超时：abort 剩余任务并返回错误，避免后续 handle.await 无限等待
+                        self.abort_tasks();
+                        return Err(XhCurlError::Generic(format!(
+                            "批量请求超时（{} 秒），已完成 {}/{} 个",
+                            timeout_dur.as_secs(),
+                            results.len(),
+                            expected
+                        )));
+                    }
+                    let remaining = deadline - now;
+                    match tokio::time::timeout(remaining, result_rx.recv()).await {
+                        Ok(Some(result)) => results.push(result),
+                        Ok(None) => break, // channel 关闭
+                        Err(_) => {
+                            // 批量超时：abort 剩余任务，避免任务泄漏
+                            self.abort_tasks();
+                            return Err(XhCurlError::Generic(format!(
+                                "批量请求超时（{} 秒），已完成 {}/{} 个",
+                                timeout_dur.as_secs(),
+                                results.len(),
+                                expected
+                            )));
+                        }
+                    }
+                }
+            }
+            // 无超时的结果收集
+            None => {
+                while let Some(result) = result_rx.recv().await {
+                    results.push(result);
+                }
+            }
+        }
+
+        // 等待所有任务完成（确保没有任务泄漏）
+        // 检测 task panic（JoinError），避免静默丢失结果
+        self.join_tasks().await;
+
+        // 完整性检查：task panic 会导致结果数量少于预期
+        // 此时返回错误而非静默返回不完整结果
+        if results.len() != expected {
+            return Err(XhCurlError::Generic(format!(
+                "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
+                expected,
+                results.len()
+            )));
+        }
+
+        Ok(results)
+    }
+
+    /// 启动所有待执行请求的异步任务。
+    ///
+    /// 抽取自原 `execute()` 的内联 spawn 逻辑，供 `execute()`（累积返回）与
+    /// `PhpXhMulti::execute_each`（流式回调）共用，消除 spawn 重复代码。
+    ///
+    /// - 排空 `self.requests`，为每个请求 spawn 一个 tokio task
+    /// - 任务句柄存入 `self.tasks`（供调用方 abort / await）
+    /// - 返回结果接收端与预期结果数（== 已 spawn 任务数）
+    ///
+    /// # 调用方职责
+    /// 1. 消费返回的 `Receiver` 收集结果
+    /// 2. 结束时调用 `abort_tasks()` / `join_tasks()` 处理残留任务，避免泄漏
+    /// 3. 做完整性检查（结果数 == expected）
+    pub async fn spawn_all(&mut self) -> (mpsc::Receiver<RequestResult>, usize) {
         // 创建结果 channel（有界，缓冲区 = 请求数 * 倍数）
         let channel_capacity = self
             .requests
             .len()
             .saturating_mul(RESULT_CHANNEL_MULTIPLIER)
             .max(16); // 最小 16 个缓冲位
-        let (result_tx, mut result_rx) = mpsc::channel(channel_capacity);
+        let (result_tx, result_rx) = mpsc::channel(channel_capacity);
 
         // 创建并发控制 Semaphore（如果设置了最大并发数）
         let semaphore = if self.max_concurrency > 0 {
@@ -430,74 +508,25 @@ impl XhMulti {
 
         // 预期结果数量（用于后续完整性检查）
         let expected = self.tasks.len();
+        (result_rx, expected)
+    }
 
-        // 收集所有结果
-        let mut results = Vec::with_capacity(expected);
-
-        match self.timeout {
-            // 带批量级超时的结果收集
-            Some(timeout_dur) => {
-                let deadline = Instant::now() + timeout_dur;
-                loop {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        // 批量超时：abort 剩余任务并返回错误，避免后续 handle.await 无限等待
-                        for handle in self.tasks.drain(..) {
-                            handle.abort();
-                        }
-                        return Err(XhCurlError::Generic(format!(
-                            "批量请求超时（{} 秒），已完成 {}/{} 个",
-                            timeout_dur.as_secs(),
-                            results.len(),
-                            expected
-                        )));
-                    }
-                    let remaining = deadline - now;
-                    match tokio::time::timeout(remaining, result_rx.recv()).await {
-                        Ok(Some(result)) => results.push(result),
-                        Ok(None) => break, // channel 关闭
-                        Err(_) => {
-                            // 批量超时：abort 剩余任务，避免任务泄漏
-                            for handle in self.tasks.drain(..) {
-                                handle.abort();
-                            }
-                            return Err(XhCurlError::Generic(format!(
-                                "批量请求超时（{} 秒），已完成 {}/{} 个",
-                                timeout_dur.as_secs(),
-                                results.len(),
-                                expected
-                            )));
-                        }
-                    }
-                }
-            }
-            // 无超时的结果收集
-            None => {
-                while let Some(result) = result_rx.recv().await {
-                    results.push(result);
-                }
-            }
+    /// abort 并清空所有已 spawn 的任务句柄。
+    /// 用于超时/回调异常等需要提前终止的清理路径，避免任务泄漏。
+    pub fn abort_tasks(&mut self) {
+        for handle in self.tasks.drain(..) {
+            handle.abort();
         }
+    }
 
-        // 等待所有任务完成（确保没有任务泄漏）
-        // 检测 task panic（JoinError），避免静默丢失结果
+    /// 等待所有已 spawn 的任务完成。
+    /// 检测 task panic（JoinError），打印日志而非静默丢失。
+    pub async fn join_tasks(&mut self) {
         for handle in self.tasks.drain(..) {
             if let Err(join_err) = handle.await {
                 eprintln!("[XHMulti] 任务异常退出: {}", join_err);
             }
         }
-
-        // 完整性检查：task panic 会导致结果数量少于预期
-        // 此时返回错误而非静默返回不完整结果
-        if results.len() != expected {
-            return Err(XhCurlError::Generic(format!(
-                "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
-                expected,
-                results.len()
-            )));
-        }
-
-        Ok(results)
     }
 
     /// 执行单个请求

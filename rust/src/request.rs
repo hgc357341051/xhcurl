@@ -10,6 +10,59 @@ use std::time::Duration;
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::header::HeaderManager;
 
+// +----------------------------------------------------------------------+
+// | 请求级 Client 缓存                                                    |
+// | 当请求设置了 follow_redirects/verify_ssl/proxy/connect_timeout 等任一 |
+// | Client 级覆盖时，需构建独立 Client（无法通过 RequestBuilder 覆盖）。  |
+// | 为避免每个同类请求都新建 Client（丢失连接池复用），按「覆盖参数组合」  |
+// | 缓存已构建的 Client。reqwest::Client 内部为 Arc，clone 廉价。          |
+// | 全局配置变更时（setConfig）通过 clear_request_client_cache() 失效。   |
+// +----------------------------------------------------------------------+
+
+/// 请求级 Client 覆盖参数的组合键，用作缓存查找。
+///
+/// 仅包含「影响 Client 构建」的覆盖项，不含 URL/header/body 等请求级字段。
+/// 同一组合键的请求共享同一 Client（含连接池），从而保留连接复用。
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct OverrideKey {
+    follow_redirects: Option<bool>,
+    max_redirects: Option<u32>,
+    verify_ssl: Option<bool>,
+    proxy: Option<String>,
+    /// 仅 >0 的连接超时才实际覆盖（0 表示用全局默认），故此处过滤。
+    connect_timeout: Option<u64>,
+}
+
+impl OverrideKey {
+    fn from_request(r: &XhRequest) -> Self {
+        Self {
+            follow_redirects: r.follow_redirects,
+            max_redirects: r.max_redirects,
+            verify_ssl: r.verify_ssl,
+            proxy: r.proxy.clone(),
+            connect_timeout: r.connect_timeout.filter(|&s| s > 0),
+        }
+    }
+}
+
+type ClientCache = std::sync::Mutex<std::collections::HashMap<OverrideKey, reqwest::Client>>;
+
+static REQUEST_CLIENT_CACHE: std::sync::OnceLock<ClientCache> = std::sync::OnceLock::new();
+
+fn request_client_cache() -> &'static ClientCache {
+    REQUEST_CLIENT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 清空请求级 Client 缓存。
+///
+/// 全局配置（setConfig）变更后调用，确保后续构建的请求级 Client 反映最新
+/// 全局配置（UA/keepalive/连接池上限/TLS 等均继承自全局）。
+pub fn clear_request_client_cache() {
+    if let Some(cache) = REQUEST_CLIENT_CACHE.get() {
+        let _ = cache.lock().map(|mut c| c.clear());
+    }
+}
+
 /// HTTP 请求方法枚举
 /// 对应 C 版本的 CURLOPT_CUSTOMREQUEST
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -700,6 +753,18 @@ impl XhRequest {
     /// 注意：这会牺牲连接池复用（新 Client 有独立连接池），仅在用户显式设置
     /// 上述任一参数时才走此分支。
     fn build_request_client(&self, _client: &reqwest::Client) -> XhCurlResult<reqwest::Client> {
+        // 请求级 Client 缓存：按覆盖参数组合（OverrideKey）复用已构建的 Client，
+        // 避免同类请求每次新建 Client 丢失连接池/TLS 会话复用。
+        // reqwest::Client 内部为 Arc，clone 廉价。
+        let key = OverrideKey::from_request(self);
+        let cache = request_client_cache();
+        if let Ok(map) = cache.lock() {
+            if let Some(cached) = map.get(&key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // 缓存未命中：构建新 Client。
         // 从全局管理器获取完整配置的 ClientBuilder，确保 UA/keepalive/连接池/TLS
         // 等全部继承，再逐项覆盖请求级配置。
         let mut builder = crate::curl::XhCurlManager::global().create_client_builder()?;
@@ -750,7 +815,13 @@ impl XhRequest {
             }
         }
 
-        builder.build().map_err(XhCurlError::from)
+        let client = builder.build().map_err(XhCurlError::from)?;
+        // 存入缓存供后续同类请求复用。若已存在同名键（理论不会，因 OverrideKey
+        // 唯一对应一组覆盖参数），用新值覆盖。
+        if let Ok(mut map) = cache.lock() {
+            map.insert(key, client.clone());
+        }
+        Ok(client)
     }
 }
 
@@ -888,5 +959,77 @@ mod tests {
         let client = reqwest::Client::new();
         let result = req.build_request_client(&client);
         assert!(result.is_err());
+    }
+
+    /// 请求级 Client 缓存：同一组覆盖参数的请求应复用同一 Client（命中缓存）。
+    ///
+    /// 验证 OverrideKey 相同时 build_request_client 不会新建条目——
+    /// 两个不同 URL 但覆盖参数相同的请求构建后，缓存中仅有一个条目，
+    /// 说明第二个请求命中了第一个请求写入的缓存。
+    #[test]
+    fn test_request_client_cache_hit() {
+        // 清空缓存确保测试独立
+        clear_request_client_cache();
+
+        // 两个请求仅 URL 不同，覆盖参数组合（verify_ssl/follow_redirects/proxy/
+        // connect_timeout）完全相同 → OverrideKey 相同 → 命中同一缓存项。
+        let req1 = XhRequest::new("https://httpbin.org/get?a=1")
+            .get()
+            .verify_ssl(false)
+            .follow_redirects(true)
+            .connect_timeout(15);
+        let req2 = XhRequest::new("https://httpbin.org/get?b=2")
+            .get()
+            .verify_ssl(false)
+            .follow_redirects(true)
+            .connect_timeout(15);
+
+        let placeholder = reqwest::Client::new();
+        let _ = req1.build_request_client(&placeholder).unwrap();
+        let _ = req2.build_request_client(&placeholder).unwrap();
+
+        let cache = request_client_cache();
+        let map = cache.lock().unwrap();
+        assert_eq!(map.len(), 1, "缓存应恰好包含一个 OverrideKey 条目");
+    }
+
+    /// 请求级 Client 缓存：不同覆盖参数组合应生成不同的缓存条目。
+    #[test]
+    fn test_request_client_cache_miss_different_overrides() {
+        clear_request_client_cache();
+
+        let req1 = XhRequest::new("https://x.com").get().verify_ssl(true);
+        let req2 = XhRequest::new("https://x.com").get().verify_ssl(false);
+
+        let placeholder = reqwest::Client::new();
+        let _ = req1.build_request_client(&placeholder).unwrap();
+        let _ = req2.build_request_client(&placeholder).unwrap();
+
+        let cache = request_client_cache();
+        let map = cache.lock().unwrap();
+        assert_eq!(map.len(), 2, "不同覆盖参数应生成两个缓存条目");
+    }
+
+    /// 请求级 Client 缓存：clear_request_client_cache 清空后缓存条目数为 0，
+    /// 且后续构建会重新填充。
+    #[test]
+    fn test_clear_request_client_cache() {
+        clear_request_client_cache();
+
+        let req = XhRequest::new("https://x.com").get().verify_ssl(false);
+        let placeholder = reqwest::Client::new();
+        let _ = req.build_request_client(&placeholder).unwrap();
+
+        {
+            let cache = request_client_cache();
+            assert_eq!(cache.lock().unwrap().len(), 1);
+        }
+
+        clear_request_client_cache();
+
+        {
+            let cache = request_client_cache();
+            assert_eq!(cache.lock().unwrap().len(), 0, "清空后缓存应为空");
+        }
     }
 }

@@ -251,10 +251,14 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
 
     // 2. spawn 所有 HTTP 请求到 tokio（并行执行）
     //    使用 Semaphore 限制并发数，防止过多请求同时执行耗尽连接池/内存。
-    //    并发上限 = 请求数 与 64 的较小值（避免 10000 个请求同时 spawn）
+    //    并发上限取「请求数」与全局 fiber_max_concurrency 的较小值
+    //    （0 表示不限制；默认 64，可通过 setConfig 调整）
     let runtime = crate::php_ext::global_runtime();
     let client = crate::php_ext::global_client().clone();
-    let max_concurrency = total.min(64);
+    let cap = crate::curl::XhCurlManager::global()
+        .config()
+        .fiber_max_concurrency;
+    let max_concurrency = if cap == 0 { total } else { total.min(cap) };
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
 
     for request in requests {

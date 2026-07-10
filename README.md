@@ -354,12 +354,17 @@ XHCurl::setConfig([
     'tcp_keepalive'          => true,    // TCP keep-alive（连接复用）
     'tcp_keepalive_interval' => 60,      // keep-alive 探测间隔（秒）
     'max_connections'        => 100,     // 连接池上限
+    'fiber_max_concurrency'  => 64,      // gather/each 协程并发上限（0=不限）
 ]);
 ```
 
 > **类型校验**：`setConfig()` 会对每个配置项做类型检查。数值项传入字符串、
 > 布尔项传入数值等不匹配情况会被收集，最终返回包含所有不匹配项名的错误信息，
 > 而非静默忽略。负数会被跳过（保留原值），不会 panic。
+>
+> **配置变更生效**：`setConfig()` 会清空请求级 Client 缓存，确保后续构建的 Client
+> 反映最新全局配置（UA/keepalive/连接池/TLS 等）。`fiber_max_concurrency` 仅影响
+> 下次 `gather()`/`each()` 调用的 Semaphore 容量。
 
 ### XHRequest - 请求构建器
 
@@ -532,7 +537,8 @@ xhrun(string $command, array $args = [], array $options = []): array
 
 - `command`: 要执行的命令（如 `"ls"`、`"ping"`、`"cmd"`）。
 - `args`: 命令参数数组（如 `["-la", "/tmp"]`）。每个元素作为一个独立参数，
-  **不经过 shell 解析**。仅在 `shell => true` 时，`args` 会拼接进命令行。
+  **不经过 shell 解析**。`shell => true` 时，`args` 会做 shell 转义后再拼接进命令行，
+  防止参数中的元字符（`;`/`$()`/反引号）注入命令。
 - `options`: 选项数组，支持以下键：
 
 | 键 | 类型 | 默认 | 说明 |
@@ -541,7 +547,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `max_output` | int | 64MB | 每个流（stdout/stderr）的最大输出字节数，0 = 无限制 |
 | `cwd` | string | 继承 | 工作目录 |
 | `env` | array | 继承 | 环境变量键值对 |
-| `shell` | bool | false | 是否通过系统 shell 执行（启用管道/通配符，但有注入风险） |
+| `shell` | bool | false | 是否通过系统 shell 执行（启用管道/通配符/重定向；`args` 会做 shell 转义防注入，但 `command` 仍按字面传 shell，处理不可信输入时建议用默认非 shell 路径） |
 | `allow` | array | [] | 命令白名单（设置后仅允许这些命令） |
 | `deny` | array | [] | 命令黑名单 |
 | `input` | string | 无 | 传给命令 stdin 的数据（二进制安全） |

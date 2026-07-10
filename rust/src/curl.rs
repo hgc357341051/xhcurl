@@ -59,6 +59,12 @@ pub struct GlobalConfig {
     /// 对应 curl_multi 的 maxconnects
     pub max_connections: usize,
 
+    /// 协程（Fiber）gather/each 的并发上限。
+    /// 防止单次 gather/each 提交过多请求同时执行而耗尽连接池/内存。
+    /// 0 = 不限制（所有请求同时执行）；默认 64。
+    /// 可通过 `XHCurl::setConfig(['fiber_max_concurrency' => N])` 调整。
+    pub fiber_max_concurrency: usize,
+
     /// 是否在 CLI 模式下使用多线程运行时
     /// FPM 模式始终使用单线程运行时
     pub use_multi_thread: bool,
@@ -93,6 +99,8 @@ impl Default for GlobalConfig {
             tcp_keepalive_interval: 60,
             // 默认最大连接数 100
             max_connections: 100,
+            // 协程 gather/each 默认并发上限 64（兼顾吞吐与资源占用）
+            fiber_max_concurrency: 64,
             // CLI 模式默认使用多线程运行时
             use_multi_thread: true,
         }
