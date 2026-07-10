@@ -1419,7 +1419,7 @@ const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
 ///   不经过 shell 解析。仅在 `shell => true` 时，`args` 会拼接进命令行。
 /// - `options`: 选项数组，支持以下键：
 ///   - `timeout` (int): 超时秒数，0 = 无超时。默认 60。
-///   - `max_output` (int): 每个流（stdout/stderr）的最大输出字节数。默认 64MB。
+///   - `max_output` (int): 每个流（stdout/stderr）的最大输出字节数，0 = 无限制。默认 64MB。
 ///   - `cwd` (string): 工作目录。默认继承当前进程。
 ///   - `env` (array): 环境变量键值对。默认继承当前进程。
 ///   - `shell` (bool): 是否通过系统 shell 执行（启用管道/通配符/重定向支持，
@@ -1495,8 +1495,15 @@ pub fn xhrun(
 
     // ===== 2. 解析 options =====
     let timeout_secs: u64 = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64) as u64;
-    let max_output: usize =
-        opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64) as usize;
+    // max_output = 0 表示无限制（与 timeout = 0 语义一致）
+    let max_output: usize = {
+        let v = opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64);
+        if v <= 0 {
+            usize::MAX
+        } else {
+            v as usize
+        }
+    };
     let cwd: Option<String> = opt_string(options, "cwd");
     let env_ht: Option<&ZendHashTable> = options
         .and_then(|ht| ht.get("env"))
@@ -1602,13 +1609,19 @@ pub fn xhrun(
     let pid = child.id() as i64;
 
     // ===== 6. 写入 stdin（如果有）=====
-    if let Some(input_bytes) = &input {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(input_bytes);
-            // stdin drop 时关闭管道
-        }
-    }
+    // 在独立线程写入 stdin，避免主线程阻塞。
+    // 原因：若子进程不读 stdin 但产生大量 stdout，write_all 会因管道缓冲区满
+    // 而阻塞，而主线程的阻塞会延迟进入输出读取阶段，形成死锁。
+    let stdin_handle = input.and_then(|input_bytes| {
+        child.stdin.take().map(|mut stdin| {
+            std::thread::spawn(move || -> std::io::Result<()> {
+                use std::io::Write;
+                let _ = stdin.write_all(&input_bytes);
+                // stdin drop 时关闭管道
+                Ok(())
+            })
+        })
+    });
 
     // ===== 7. 异步读取输出 + 超时控制 =====
     // 用独立线程读取 stdout/stderr，主线程用 wait_with_output 无法做超时，
@@ -1744,6 +1757,12 @@ pub fn xhrun(
             stderr.extend_from_slice(msg.as_bytes());
         }
         Err(_) => {}
+    }
+
+    // 等待 stdin 线程结束（子进程被 kill 后管道关闭，write 线程会退出）
+    // 忽略 stdin 写入错误（子进程可能已提前关闭 stdin）
+    if let Some(handle) = stdin_handle {
+        let _ = handle.join();
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i64;
