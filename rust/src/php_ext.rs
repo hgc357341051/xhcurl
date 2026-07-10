@@ -1165,7 +1165,7 @@ impl PhpXhThreadPool {
 ///
 /// 本函数通过精确迭代 `ht.len()` 次来避免触发有缺陷的终止路径，
 /// 仅在剩余次数内调用 `iter.next()`。
-fn for_each_kv<F>(ht: &ZendHashTable, mut f: F) -> Result<(), String>
+pub(crate) fn for_each_kv<F>(ht: &ZendHashTable, mut f: F) -> Result<(), String>
 where
     F: FnMut(&ArrayKey, &Zval) -> Result<(), String>,
 {
@@ -1365,55 +1365,78 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
     form
 }
 
-/// 将 JSON 值转换为 PHP 数组
-/// 递归处理嵌套对象和数组
+/// 将 JSON 值转换为 PHP 数组（ZendHashTable）。
+///
+/// 递归处理嵌套对象和数组，确保所有 JSON 类型（含 Null、嵌套 Object/Array）
+/// 都被正确转换，而非静默丢弃。
+///
+/// - 顶层为 JSON Object → 返回字符串键的关联数组
+/// - 顶层为 JSON Array → 返回整数键的索引数组
+/// - 其他标量类型 → 返回空数组（调用方应确保传入的是 Object 或 Array）
 fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, String> {
-    let mut ht = ZendHashTable::new();
+    match json {
+        serde_json::Value::Object(obj) => json_object_to_php_array(obj),
+        serde_json::Value::Array(arr) => json_array_to_php_array(arr),
+        _ => Ok(ZendHashTable::new()),
+    }
+}
 
-    if let Some(obj) = json.as_object() {
-        for (key, val) in obj {
-            match val {
-                serde_json::Value::String(s) => {
-                    let _ = ht.insert(key.as_str(), s.as_str());
-                }
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        let _ = ht.insert(key.as_str(), i);
-                    } else if let Some(f) = n.as_f64() {
-                        let _ = ht.insert(key.as_str(), f);
-                    }
-                }
-                serde_json::Value::Bool(b) => {
-                    let _ = ht.insert(key.as_str(), *b);
-                }
-                serde_json::Value::Null => {
-                    let _ = ht.insert(key.as_str(), "");
-                }
-                serde_json::Value::Array(arr) => {
-                    let mut arr_ht = ZendHashTable::new();
-                    for (i, item) in arr.iter().enumerate() {
-                        // 使用整数键（与 PHP 数组索引语义一致）
-                        if let Some(s) = item.as_str() {
-                            let _ = arr_ht.insert_at_index(i as i64, s);
-                        } else if let Some(n) = item.as_i64() {
-                            let _ = arr_ht.insert_at_index(i as i64, n);
-                        } else if let Some(f) = item.as_f64() {
-                            let _ = arr_ht.insert_at_index(i as i64, f);
-                        } else if let Some(b) = item.as_bool() {
-                            let _ = arr_ht.insert_at_index(i as i64, b);
-                        }
-                    }
-                    let _ = ht.insert(key.as_str(), arr_ht);
-                }
-                serde_json::Value::Object(inner) => {
-                    let inner_ht = json_to_php_array(&serde_json::Value::Object(inner.clone()))?;
-                    let _ = ht.insert(key.as_str(), inner_ht);
-                }
+/// 将 JSON Object 转为 PHP 关联数组（字符串键）。
+fn json_object_to_php_array(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ZBox<ZendHashTable>, String> {
+    let mut ht = ZendHashTable::new();
+    for (key, val) in obj {
+        json_insert_value(&mut ht, key.clone(), val)?;
+    }
+    Ok(ht)
+}
+
+/// 将 JSON Array 转为 PHP 索引数组（整数键）。
+fn json_array_to_php_array(arr: &[serde_json::Value]) -> Result<ZBox<ZendHashTable>, String> {
+    let mut ht = ZendHashTable::new();
+    for (i, val) in arr.iter().enumerate() {
+        json_insert_value(&mut ht, i as i64, val)?;
+    }
+    Ok(ht)
+}
+
+/// 将单个 JSON 值插入哈希表的指定键位置（支持字符串键或整数索引）。
+///
+/// 递归处理嵌套类型，确保 Null/Object/Array 不被静默丢弃。
+/// `K` 须满足 `Into<ArrayKey<'static>>`，即 `String` 或 `i64` 等所有权类型。
+fn json_insert_value<K: Into<ext_php_rs::types::ArrayKey<'static>>>(
+    ht: &mut ZendHashTable,
+    key: K,
+    val: &serde_json::Value,
+) -> Result<(), String> {
+    match val {
+        serde_json::Value::String(s) => {
+            let _ = ht.insert(key, s.as_str());
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let _ = ht.insert(key, i);
+            } else if let Some(f) = n.as_f64() {
+                let _ = ht.insert(key, f);
             }
         }
+        serde_json::Value::Bool(b) => {
+            let _ = ht.insert(key, *b);
+        }
+        serde_json::Value::Null => {
+            let _ = ht.insert(key, ());
+        }
+        serde_json::Value::Object(inner) => {
+            let inner_ht = json_object_to_php_array(inner)?;
+            let _ = ht.insert(key, inner_ht);
+        }
+        serde_json::Value::Array(inner) => {
+            let inner_ht = json_array_to_php_array(inner)?;
+            let _ = ht.insert(key, inner_ht);
+        }
     }
-
-    Ok(ht)
+    Ok(())
 }
 
 // +----------------------------------------------------------------------+

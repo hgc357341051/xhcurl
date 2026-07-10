@@ -30,9 +30,10 @@ use std::time::Duration;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::convert::{FromZval, IntoZvalDyn};
-use ext_php_rs::types::{ArrayKey, ZendCallable, ZendHashTable, Zval};
+use ext_php_rs::types::{ZendCallable, ZendHashTable, Zval};
 
 use crate::multi::RequestResult;
+use crate::php_ext::for_each_kv;
 use crate::request::XhRequest;
 
 // +----------------------------------------------------------------------+
@@ -489,24 +490,4 @@ fn result_zval_to_array(zval: &Zval) -> Result<ZBox<ZendHashTable>, String> {
     } else {
         Err("await 恢复值不是数组".to_string())
     }
-}
-
-// +----------------------------------------------------------------------+
-// | 安全迭代辅助（复用 php_ext.rs 的修复方案）                            |
-// +----------------------------------------------------------------------+
-
-/// 安全遍历 PHP 哈希表（手动控制迭代次数，防止 Iter 提前终止）
-fn for_each_kv<F>(ht: &ZendHashTable, mut f: F) -> Result<(), String>
-where
-    F: FnMut(&ArrayKey, &Zval) -> Result<(), String>,
-{
-    let len = ht.len();
-    let mut iter = ht.iter();
-    for _ in 0..len {
-        match iter.next() {
-            Some((key, val)) => f(&key, val)?,
-            None => break,
-        }
-    }
-    Ok(())
 }
