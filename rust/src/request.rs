@@ -188,14 +188,6 @@ pub struct XhRequest {
     /// 格式: "name1=value1; name2=value2"
     cookies: Option<String>,
 
-    /// Cookie 文件路径（CURLOPT_COOKIEFILE）
-    /// 读取该文件中的 cookie 加入请求
-    cookie_file: Option<String>,
-
-    /// Cookie 存储文件路径（CURLOPT_COOKIEJAR）
-    /// 请求结束后将 cookie 保存到该文件
-    cookie_jar: Option<String>,
-
     /// HTTP 基本认证凭据（CURLOPT_USERPWD）
     /// 格式: "username:password"
     auth: Option<String>,
@@ -262,8 +254,6 @@ impl XhRequest {
             id: None,
             user_data: None,
             cookies: None,
-            cookie_file: None,
-            cookie_jar: None,
             auth: None,
             bearer_token: None,
             ca_info: None,
@@ -445,18 +435,6 @@ impl XhRequest {
     /// 格式: "name1=value1; name2=value2"
     pub fn cookies(mut self, cookies: impl Into<String>) -> Self {
         self.cookies = Some(cookies.into());
-        self
-    }
-
-    /// 设置 Cookie 读取文件路径（CURLOPT_COOKIEFILE）
-    pub fn cookie_file(mut self, path: impl Into<String>) -> Self {
-        self.cookie_file = Some(path.into());
-        self
-    }
-
-    /// 设置 Cookie 存储文件路径（CURLOPT_COOKIEJAR）
-    pub fn cookie_jar(mut self, path: impl Into<String>) -> Self {
-        self.cookie_jar = Some(path.into());
         self
     }
 

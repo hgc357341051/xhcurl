@@ -56,47 +56,6 @@ fn test_global_manager_config() {
     manager.set_config(GlobalConfig::default());
 }
 
-/// 测试 Cookie 管理流程
-#[test]
-fn test_cookie_management_flow() {
-    let cm = CookieManager::new();
-
-    // 添加多个域名的 Cookie
-    cm.set(
-        Cookie::new("session_id", "abc123")
-            .with_domain("example.com")
-            .with_secure(true)
-            .with_http_only(true),
-    );
-
-    cm.set(
-        Cookie::new("token", "xyz789")
-            .with_domain("api.example.com")
-            .with_path("/v1"),
-    );
-
-    cm.set(
-        Cookie::new("tracking", "track123")
-            .with_domain("example.com")
-            .with_expires(1000),
-    ); // 已过期
-
-    // 验证
-    assert_eq!(cm.len(), 3);
-
-    // 获取指定域名的 Cookie
-    let cookies = cm.get_by_domain("example.com");
-    assert_eq!(cookies.len(), 2);
-
-    // 清理过期 Cookie
-    cm.clean_expired(2000);
-    assert_eq!(cm.len(), 2);
-
-    // 生成请求头
-    let header = cm.to_header_string("example.com");
-    assert!(header.contains("session_id=abc123"));
-}
-
 /// 测试头部管理
 #[test]
 fn test_header_management() {
@@ -115,28 +74,6 @@ fn test_header_management() {
     // 转换为 reqwest HeaderMap
     let header_map = hm.to_header_map();
     assert_eq!(header_map.len(), 3);
-}
-
-/// 测试缓冲区操作
-#[test]
-fn test_buffer_operations() {
-    let mut buf = ResponseBuffer::new(4096, 1024); // 最大 1KB
-
-    // 写入数据
-    buf.write(b"Hello").unwrap();
-    buf.write(b" World").unwrap();
-
-    assert_eq!(buf.len(), 11);
-    assert_eq!(buf.as_slice(), b"Hello World");
-
-    // 分段读取
-    assert_eq!(buf.chunk(0, 5), b"Hello");
-    assert_eq!(buf.chunk(6, 5), b"World");
-
-    // 测试大小限制
-    let large_data = vec![b'x'; 2000];
-    let result = buf.write(&large_data);
-    assert!(result.is_err()); // 超过 1KB 限制
 }
 
 /// 测试错误处理

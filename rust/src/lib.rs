@@ -9,14 +9,14 @@
 // | 项目结构：                                                             |
 // |   lib.rs       - 库入口，声明所有模块                                  |
 // |   error.rs     - 错误类型定义                                          |
-// |   buffer.rs    - 响应缓冲区                                            |
 // |   header.rs    - HTTP 头部管理                                         |
-// |   cookie.rs    - Cookie 管理                                           |
 // |   curl.rs      - 全局管理器                                            |
 // |   request.rs   - 请求构建器                                            |
 // |   response.rs  - 响应对象                                              |
 // |   multi.rs     - 异步批量执行器（tokio M:N 调度）                      |
 // |   threadpool.rs - 线程池（channel 通信）                               |
+// |   executor.rs  - 单请求执行器（公共逻辑）                              |
+// |   fiber.rs     - PHP Fiber 协程桥接                                    |
 // |   php_ext.rs   - PHP 扩展入口（ext-php-rs 绑定）                       |
 // |                                                                        |
 // | 架构优势：                                                             |
@@ -35,17 +35,9 @@
 /// 使用 thiserror 派生宏自动实现 Display 和 Error trait
 pub mod error;
 
-/// 响应缓冲区模块
-/// 提供线程安全的响应体存储，支持大小限制和分段读取
-pub mod buffer;
-
 /// HTTP 头部管理模块
 /// 使用 HashMap 存储头部，支持大小写不敏感查找
 pub mod header;
-
-/// Cookie 管理模块
-/// 支持会话级和持久化 Cookie，线程安全
-pub mod cookie;
 
 /// 全局管理器模块
 /// 单例模式管理全局配置和共享状态
@@ -83,8 +75,6 @@ pub mod php_ext;
 
 // 导出常用类型，简化外部使用
 // 使用 pub use 重导出，提供简洁的 API
-pub use buffer::ResponseBuffer;
-pub use cookie::{Cookie, CookieManager};
 pub use curl::{GlobalConfig, XhCurlManager};
 pub use error::{XhCurlError, XhCurlResult};
 pub use header::HeaderManager;
@@ -106,9 +96,7 @@ mod tests {
     fn test_module_exports() {
         // 验证所有主要类型都可以被访问
         let _error: XhCurlError = XhCurlError::Generic("test".to_string());
-        let _buffer: ResponseBuffer = ResponseBuffer::new(1024, 0);
         let _header: HeaderManager = HeaderManager::new();
-        let _cookie: CookieManager = CookieManager::new();
         let _config: GlobalConfig = GlobalConfig::default();
         let _request: XhRequest = XhRequest::new("https://example.com");
         let _method: HttpMethod = HttpMethod::Get;

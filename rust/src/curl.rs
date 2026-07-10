@@ -5,10 +5,9 @@
 // | 使用 Arc<RwLock<>> 共享可变配置                                        |
 // +----------------------------------------------------------------------+
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
-use crate::cookie::CookieManager;
 use crate::error::{XhCurlError, XhCurlResult, DEFAULT_MAX_RESPONSE_SIZE};
 
 /// 全局配置结构体
@@ -111,10 +110,6 @@ pub struct XhCurlManager {
     /// 全局配置（读写锁保护，允许多读单写）
     config: RwLock<GlobalConfig>,
 
-    /// 全局 Cookie 管理器
-    /// 使用 Arc 共享所有权，可在多个请求间共享
-    pub cookie_manager: Arc<CookieManager>,
-
     /// 是否已初始化
     initialized: RwLock<bool>,
 }
@@ -127,7 +122,6 @@ impl XhCurlManager {
     fn new(config: GlobalConfig) -> Self {
         Self {
             config: RwLock::new(config),
-            cookie_manager: Arc::new(CookieManager::new()),
             initialized: RwLock::new(false),
         }
     }
@@ -211,9 +205,6 @@ impl XhCurlManager {
     pub fn shutdown(&self) {
         let mut initialized = self.initialized.write().unwrap();
         *initialized = false;
-
-        // 清理 Cookie
-        self.cookie_manager.clear();
     }
 
     /// 创建配置好的 reqwest 客户端构建器
@@ -282,7 +273,6 @@ impl std::fmt::Debug for XhCurlManager {
         f.debug_struct("XhCurlManager")
             .field("config", &*config)
             .field("initialized", &*initialized)
-            .field("cookie_count", &self.cookie_manager.len())
             .finish()
     }
 }

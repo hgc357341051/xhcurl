@@ -599,38 +599,6 @@ impl PhpXhRequest {
         self_
     }
 
-    /// 设置 Cookie 读取文件路径
-    ///
-    /// 对应 curl 的 CURLOPT_COOKIEFILE。
-    /// 启动时从该文件读取 cookie。
-    ///
-    /// # PHP 签名
-    /// public XHRequest::cookieFile(string $path): $self_
-
-    pub fn cookie_file(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        path: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().cookie_file(path);
-        self_
-    }
-
-    /// 设置 Cookie 存储文件路径
-    ///
-    /// 对应 curl 的 CURLOPT_COOKIEJAR。
-    /// 请求结束后将 cookie 保存到该文件。
-    ///
-    /// # PHP 签名
-    /// public XHRequest::cookieJar(string $path): $self_
-
-    pub fn cookie_jar(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        path: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().cookie_jar(path);
-        self_
-    }
-
     /// 设置 HTTP 基本认证
     ///
     /// 对应 curl 的 CURLOPT_USERPWD。
