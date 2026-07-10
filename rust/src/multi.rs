@@ -176,9 +176,10 @@ pub struct XhMulti {
     /// 最大并发数（0 = 无限制）
     max_concurrency: usize,
 
-    /// 批量级全局超时（预留字段）
-    /// 注意：单请求超时由 XhRequest::request_timeout（reqwest 级别）处理。
-    /// 此字段当前未在 execute() 中应用，预留给未来批量级超时使用。
+    /// 批量级全局超时
+    /// 超时后 abort 未完成的任务并返回错误。
+    /// 注意：单请求超时由 XhRequest::request_timeout（reqwest 级别）处理，
+    /// 此超时是整个批量请求的总时限。
     timeout: Option<Duration>,
 
     /// 最大响应体大小（字节，0 = 使用默认值）
@@ -370,9 +371,23 @@ impl XhMulti {
                 // 如果有并发限制，获取 Semaphore 许可
                 // _permit 在作用域结束时自动释放
                 // Semaphore 关闭时 acquire 返回 Err（AcquireError），
-                // 此处用 .ok() 优雅处理而非 expect panic
+                // 此时不执行请求，直接发送错误结果，避免结果数量不匹配
                 let _permit = if let Some(sem) = &semaphore {
-                    sem.acquire().await.ok()
+                    match sem.acquire().await {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            // Semaphore 已关闭，发送错误结果并退出
+                            let elapsed = Instant::now().elapsed();
+                            let result = RequestResult::error(
+                                request_id,
+                                user_data,
+                                "并发信号量已关闭".to_string(),
+                                elapsed,
+                            );
+                            let _ = result_tx.send(result).await;
+                            return;
+                        }
+                    }
                 } else {
                     None
                 };
@@ -418,8 +433,41 @@ impl XhMulti {
 
         // 收集所有结果
         let mut results = Vec::with_capacity(expected);
-        while let Some(result) = result_rx.recv().await {
-            results.push(result);
+
+        match self.timeout {
+            // 带批量级超时的结果收集
+            Some(timeout_dur) => {
+                let deadline = Instant::now() + timeout_dur;
+                loop {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let remaining = deadline - now;
+                    match tokio::time::timeout(remaining, result_rx.recv()).await {
+                        Ok(Some(result)) => results.push(result),
+                        Ok(None) => break, // channel 关闭
+                        Err(_) => {
+                            // 批量超时：abort 剩余任务，避免任务泄漏
+                            for handle in self.tasks.drain(..) {
+                                handle.abort();
+                            }
+                            return Err(XhCurlError::Generic(format!(
+                                "批量请求超时（{} 秒），已完成 {}/{} 个",
+                                timeout_dur.as_secs(),
+                                results.len(),
+                                expected
+                            )));
+                        }
+                    }
+                }
+            }
+            // 无超时的结果收集
+            None => {
+                while let Some(result) = result_rx.recv().await {
+                    results.push(result);
+                }
+            }
         }
 
         // 等待所有任务完成（确保没有任务泄漏）
@@ -481,9 +529,13 @@ impl XhMulti {
     }
 
     /// 清空所有待执行请求
+    /// 同时 abort 运行中的任务，避免任务泄漏
     pub fn clear(&mut self) {
         self.requests.clear();
-        self.tasks.clear();
+        // abort 运行中的任务（如果在 execute() 期间调用 clear，已 drain 的任务在此 abort）
+        for handle in self.tasks.drain(..) {
+            handle.abort();
+        }
     }
 }
 

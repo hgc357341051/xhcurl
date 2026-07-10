@@ -927,6 +927,9 @@ pub struct PhpXhMulti {
 
     /// 最大响应体大小（字节，0 = 使用全局配置）
     max_response_size: usize,
+
+    /// 批量级超时（秒，0 = 无超时）
+    timeout: u64,
 }
 
 /// PHP XHMulti 类的方法实现
@@ -938,6 +941,7 @@ impl PhpXhMulti {
             requests: Vec::new(),
             max_concurrency: 0,
             max_response_size: 0,
+            timeout: 0,
         }
     }
 
@@ -988,6 +992,22 @@ impl PhpXhMulti {
         self_
     }
 
+    /// 设置批量级超时（秒）
+    /// 超时后 abort 未完成的任务并返回错误。
+    /// 0 = 无超时（默认）。
+    /// 注意：此超时是整个批量请求的总时限，
+    /// 单请求超时由 XHRequest::timeout() 单独控制。
+    ///
+    /// # PHP 签名
+    /// public XHMulti::timeout(int $secs): $self_
+    pub fn timeout(
+        self_: &mut ZendClassObject<PhpXhMulti>,
+        secs: i64,
+    ) -> &mut ZendClassObject<PhpXhMulti> {
+        self_.timeout = if secs > 0 { secs as u64 } else { 0 };
+        self_
+    }
+
     /// 执行所有请求
     ///
     /// # PHP 签名
@@ -997,6 +1017,7 @@ impl PhpXhMulti {
         // 运行时类型由 SAPI 决定：CLI 多线程并行，FPM 单线程并发
         let client = global_client().clone();
         let max_concurrency = self.max_concurrency;
+        let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
         // 0 表示使用全局配置值
         let max_resp_size = if self.max_response_size > 0 {
@@ -1012,6 +1033,9 @@ impl PhpXhMulti {
                     multi = multi.max_concurrency(max_concurrency);
                 }
                 multi = multi.max_response_size(max_resp_size);
+                if timeout > 0 {
+                    multi = multi.timeout(timeout);
+                }
                 multi.add_many(requests).map_err(|e| e.to_string())?;
                 multi.execute().await.map_err(|e| e.to_string())
             })
