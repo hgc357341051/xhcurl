@@ -550,6 +550,12 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                     // 取出 Fiber 内可能抛出的异常（resume 恢复执行后可能抛异常）
                     take_php_exception()?;
                 }
+                // 回收已完成的 tokio 任务句柄，避免长轮询场景下 task_handles 无界增长
+                SCHEDULER.with(|s| {
+                    if let Some(scheduler) = s.borrow_mut().as_mut() {
+                        scheduler.task_handles.retain(|h| !h.is_finished());
+                    }
+                });
                 // 若找不到 pending fiber，可能是已取消的任务，忽略
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {

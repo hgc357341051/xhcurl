@@ -162,6 +162,9 @@ impl PhpXhCurl {
         // 获取全局管理器单例
         let manager = XhCurlManager::global();
 
+        // 收集类型不匹配的配置项名，便于向用户反馈哪些配置未生效
+        let mut type_mismatches: Vec<&str> = Vec::new();
+
         // 使用闭包修改配置，避免手动管理锁
         manager.modify_config(|c| {
             // 从 PHP 数组读取配置项
@@ -173,6 +176,8 @@ impl PhpXhCurl {
                     if v >= 0 {
                         c.connect_timeout = v as u64;
                     }
+                } else {
+                    type_mismatches.push("connect_timeout");
                 }
             }
 
@@ -182,6 +187,8 @@ impl PhpXhCurl {
                     if v >= 0 {
                         c.request_timeout = v as u64;
                     }
+                } else {
+                    type_mismatches.push("request_timeout");
                 }
             }
 
@@ -191,6 +198,8 @@ impl PhpXhCurl {
                     if v >= 0 {
                         c.max_response_size = v as usize;
                     }
+                } else {
+                    type_mismatches.push("max_response_size");
                 }
             }
 
@@ -198,6 +207,8 @@ impl PhpXhCurl {
             if let Some(follow) = config.get("follow_redirects") {
                 if let Some(v) = follow.bool() {
                     c.follow_redirects = v;
+                } else {
+                    type_mismatches.push("follow_redirects");
                 }
             }
 
@@ -207,6 +218,8 @@ impl PhpXhCurl {
                     if v >= 0 {
                         c.max_redirects = v as u32;
                     }
+                } else {
+                    type_mismatches.push("max_redirects");
                 }
             }
 
@@ -214,6 +227,8 @@ impl PhpXhCurl {
             if let Some(verify) = config.get("verify_ssl") {
                 if let Some(v) = verify.bool() {
                     c.verify_ssl = v;
+                } else {
+                    type_mismatches.push("verify_ssl");
                 }
             }
 
@@ -221,6 +236,8 @@ impl PhpXhCurl {
             if let Some(ua) = config.get("user_agent") {
                 if let Some(v) = ua.string() {
                     c.user_agent = v;
+                } else {
+                    type_mismatches.push("user_agent");
                 }
             }
 
@@ -228,6 +245,8 @@ impl PhpXhCurl {
             if let Some(proxy) = config.get("proxy") {
                 if let Some(v) = proxy.string() {
                     c.proxy = Some(v);
+                } else {
+                    type_mismatches.push("proxy");
                 }
             }
 
@@ -235,6 +254,8 @@ impl PhpXhCurl {
             if let Some(v) = config.get("http2_enabled") {
                 if let Some(b) = v.bool() {
                     c.http2_enabled = b;
+                } else {
+                    type_mismatches.push("http2_enabled");
                 }
             }
 
@@ -242,6 +263,8 @@ impl PhpXhCurl {
             if let Some(v) = config.get("tcp_keepalive") {
                 if let Some(b) = v.bool() {
                     c.tcp_keepalive = b;
+                } else {
+                    type_mismatches.push("tcp_keepalive");
                 }
             }
 
@@ -251,6 +274,8 @@ impl PhpXhCurl {
                     if l >= 0 {
                         c.tcp_keepalive_interval = l as u64;
                     }
+                } else {
+                    type_mismatches.push("tcp_keepalive_interval");
                 }
             }
 
@@ -260,10 +285,18 @@ impl PhpXhCurl {
                     if l >= 0 {
                         c.max_connections = l as usize;
                     }
+                } else {
+                    type_mismatches.push("max_connections");
                 }
             }
         });
 
+        if !type_mismatches.is_empty() {
+            return Err(format!(
+                "以下配置项的类型与期望不符，未生效: {}",
+                type_mismatches.join(", ")
+            ));
+        }
         Ok(())
     }
 

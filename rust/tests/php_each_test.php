@@ -406,5 +406,39 @@ echo "\n=== 配置一致性与提前检查测试 ===\n";
 check('get_config 含 tcp_keepalive_interval 字段', test_get_config_has_tcp_keepalive_interval());
 check('超大数组 gather 提前拒绝（不克隆）', test_oversized_array_rejected_before_clone());
 
+// =========== set_config 类型校验测试 ===========
+
+function test_set_config_wrong_type_returns_error(): bool
+{
+    // 字符串传给数值配置项应返回错误
+    $err = null;
+    try {
+        XHCurl::setConfig(['connect_timeout' => '60']);
+    } catch (Throwable $e) {
+        $err = $e->getMessage();
+    }
+    return $err !== null && strpos($err, 'connect_timeout') !== false;
+}
+
+function test_set_config_correct_type_applies(): bool
+{
+    // 正确类型应正常应用
+    $ok = true;
+    try {
+        XHCurl::setConfig(['connect_timeout' => 20, 'verify_ssl' => true]);
+        $cfg = XHCurl::getConfig();
+        $ok = $cfg['connect_timeout'] === 20 && $cfg['verify_ssl'] === true;
+    } catch (Throwable $e) {
+        $ok = false;
+    }
+    // 恢复默认
+    XHCurl::setConfig(['connect_timeout' => 5, 'verify_ssl' => true]);
+    return $ok;
+}
+
+echo "\n=== set_config 类型校验测试 ===\n";
+check('setConfig 字符串给数值项返回错误', test_set_config_wrong_type_returns_error());
+check('setConfig 正确类型正常应用', test_set_config_correct_type_applies());
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);
