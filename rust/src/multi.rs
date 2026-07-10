@@ -441,7 +441,16 @@ impl XhMulti {
                 loop {
                     let now = Instant::now();
                     if now >= deadline {
-                        break;
+                        // 批量超时：abort 剩余任务并返回错误，避免后续 handle.await 无限等待
+                        for handle in self.tasks.drain(..) {
+                            handle.abort();
+                        }
+                        return Err(XhCurlError::Generic(format!(
+                            "批量请求超时（{} 秒），已完成 {}/{} 个",
+                            timeout_dur.as_secs(),
+                            results.len(),
+                            expected
+                        )));
                     }
                     let remaining = deadline - now;
                     match tokio::time::timeout(remaining, result_rx.recv()).await {

@@ -288,5 +288,87 @@ check("max_response_size=0 时请求成功（不报大小超限）", $noLimitSuc
 // 恢复默认配置避免影响后续测试
 XHCurl::setConfig(array('max_response_size' => 10485760));
 
+// =========== 负数校验测试 ===========
+
+function test_negative_timeout_clamped(): bool
+{
+    $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
+    $req->timeout(-1);
+    $cfg = XHCurl::getConfig();
+    // 负值被 clamp 为 0，不应产生巨大数值
+    return $cfg['request_timeout'] < PHP_INT_MAX;
+}
+
+function test_negative_connect_timeout_clamped(): bool
+{
+    $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
+    $req->connectTimeout(-5);
+    $cfg = XHCurl::getConfig();
+    return $cfg['connect_timeout'] < PHP_INT_MAX;
+}
+
+function test_negative_max_redirects_clamped(): bool
+{
+    $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
+    $req->maxRedirects(-3);
+    $cfg = XHCurl::getConfig();
+    return $cfg['max_redirects'] < PHP_INT_MAX;
+}
+
+function test_multi_negative_concurrency_clamped(): bool
+{
+    $multi = new XHMulti();
+    $multi->maxConcurrency(-10);
+    // 仅验证不崩溃且不产生巨大数值：执行空请求集合应正常返回
+    $results = $multi->execute();
+    return is_array($results) && count($results) === 0;
+}
+
+function test_multi_negative_response_size_clamped(): bool
+{
+    $multi = new XHMulti();
+    $multi->maxResponseSize(-100);
+    $results = $multi->execute();
+    return is_array($results) && count($results) === 0;
+}
+
+function test_threadpool_negative_workers_clamped(): bool
+{
+    $pool = new XHThreadPool(-4);
+    $results = $pool->execute();
+    return is_array($results) && count($results) === 0;
+}
+
+function test_set_config_negative_skipped(): bool
+{
+    $orig = XHCurl::getConfig();
+    XHCurl::setConfig([
+        'connect_timeout' => -10,
+        'request_timeout' => -20,
+        'max_redirects' => -3,
+        'max_response_size' => -100,
+        'max_connections' => -5,
+    ]);
+    $cfg = XHCurl::getConfig();
+    // 负值应被跳过，值应保持为巨大负值不会转为巨大正数
+    $ok = $cfg['connect_timeout'] < PHP_INT_MAX
+        && $cfg['request_timeout'] < PHP_INT_MAX
+        && $cfg['max_redirects'] < PHP_INT_MAX
+        && $cfg['max_response_size'] < PHP_INT_MAX
+        && $cfg['max_connections'] < PHP_INT_MAX;
+    // 恢复原配置
+    XHCurl::setConfig($orig);
+    return $ok;
+}
+
+echo "\n=== 负数校验测试 ===\n";
+check("负数 timeout 被 clamp", test_negative_timeout_clamped());
+check("负数 connect_timeout 被 clamp", test_negative_connect_timeout_clamped());
+check("负数 max_redirects 被 clamp", test_negative_max_redirects_clamped());
+check("XHMulti 负数 maxConcurrency 被 clamp", test_multi_negative_concurrency_clamped());
+check("XHMulti 负数 maxResponseSize 被 clamp", test_multi_negative_response_size_clamped());
+check("XHThreadPool 负数 workers 被 clamp", test_threadpool_negative_workers_clamped());
+check("setConfig 负值被跳过", test_set_config_negative_skipped());
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);

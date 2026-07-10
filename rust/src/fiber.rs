@@ -463,6 +463,13 @@ pub fn fiber_run(main: &Zval) -> Result<Zval, String> {
         return Err("不支持嵌套调用 XHCurl::run".to_string());
     }
 
+    // SAPI 检查：FPM 模式下 global_runtime 返回单线程运行时，
+    // recv_timeout 会阻塞 PHP 线程导致 spawn 的 tokio 任务无法被驱动执行，陷入无限循环。
+    // Fiber 协程桥接仅支持 CLI 模式（与 XHThreadPool 一致）。
+    if !crate::php_ext::sapi_is_cli() {
+        return Err("XHCurl::run 仅在 CLI 模式下可用（FPM 请用 XHMulti）".to_string());
+    }
+
     // 1. 初始化调度器
     init_scheduler();
     // RAII 守卫：确保任何返回路径（含 ? 提前返回）都清理调度器，
@@ -621,6 +628,8 @@ fn create_fiber(main: &Zval) -> Result<Zval, String> {
     // 调用 __construct($main) 完成构造
     obj.try_call_method("__construct", vec![main as &dyn IntoZvalDyn])
         .map_err(|e| e.to_string())?;
+    // 检查 __construct 是否抛出 PHP 异常（try_call_method 不检查 EG exception）
+    take_php_exception()?;
 
     // 包装为 Zval 返回
     // refcount 语义：set_object 内部调用 val.inc_count()（ext-php-rs 0.15 zval.rs:1024），

@@ -46,7 +46,7 @@ use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool};
 /// 对应 PHP 的 `php_sapi_name() === 'cli'`。
 /// FPM/fpm-fcgi 等多进程 SAPI 下返回 false，此时禁止使用多线程运行时，
 /// 避免 tokio 工作线程与 PHP 内存管理器（TSRM/内存池）冲突。
-fn sapi_is_cli() -> bool {
+pub(crate) fn sapi_is_cli() -> bool {
     php_sapi_name() == "cli"
 }
 
@@ -166,24 +166,30 @@ impl PhpXhCurl {
             // 从 PHP 数组读取配置项
             // 每个配置项都是可选的，只处理存在的键
 
-            // 连接超时（秒）
+            // 连接超时（秒），负值跳过
             if let Some(timeout) = config.get("connect_timeout") {
                 if let Some(v) = timeout.long() {
-                    c.connect_timeout = v as u64;
+                    if v >= 0 {
+                        c.connect_timeout = v as u64;
+                    }
                 }
             }
 
-            // 请求超时（秒）
+            // 请求超时（秒），负值跳过
             if let Some(timeout) = config.get("request_timeout") {
                 if let Some(v) = timeout.long() {
-                    c.request_timeout = v as u64;
+                    if v >= 0 {
+                        c.request_timeout = v as u64;
+                    }
                 }
             }
 
-            // 最大响应体大小（字节），防止内存溢出
+            // 最大响应体大小（字节），防止内存溢出，负值跳过
             if let Some(max_size) = config.get("max_response_size") {
                 if let Some(v) = max_size.long() {
-                    c.max_response_size = v as usize;
+                    if v >= 0 {
+                        c.max_response_size = v as usize;
+                    }
                 }
             }
 
@@ -194,10 +200,12 @@ impl PhpXhCurl {
                 }
             }
 
-            // 最大重定向次数
+            // 最大重定向次数，负值跳过
             if let Some(max_redirects) = config.get("max_redirects") {
                 if let Some(v) = max_redirects.long() {
-                    c.max_redirects = v as u32;
+                    if v >= 0 {
+                        c.max_redirects = v as u32;
+                    }
                 }
             }
 
@@ -236,17 +244,21 @@ impl PhpXhCurl {
                 }
             }
 
-            // TCP Keep-Alive 间隔（秒）
+            // TCP Keep-Alive 间隔（秒），负值跳过
             if let Some(v) = config.get("tcp_keepalive_interval") {
                 if let Some(l) = v.long() {
-                    c.tcp_keepalive_interval = l as u64;
+                    if l >= 0 {
+                        c.tcp_keepalive_interval = l as u64;
+                    }
                 }
             }
 
-            // 默认并发连接数限制
+            // 默认并发连接数限制，负值跳过
             if let Some(v) = config.get("max_connections") {
                 if let Some(l) = v.long() {
-                    c.max_connections = l as usize;
+                    if l >= 0 {
+                        c.max_connections = l as usize;
+                    }
                 }
             }
         });
@@ -514,7 +526,9 @@ impl PhpXhRequest {
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().request_timeout(seconds as u64);
+        // 负值 clamp 到 0（表示禁用超时），避免 i64→u64 转换产生巨大数值
+        let seconds = seconds.max(0) as u64;
+        self_.request = self_.request.clone().request_timeout(seconds);
         self_
     }
 
@@ -527,7 +541,9 @@ impl PhpXhRequest {
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().connect_timeout(seconds as u64);
+        // 负值 clamp 到 0（表示禁用连接超时）
+        let seconds = seconds.max(0) as u64;
+        self_.request = self_.request.clone().connect_timeout(seconds);
         self_
     }
 
@@ -592,7 +608,9 @@ impl PhpXhRequest {
         self_: &mut ZendClassObject<PhpXhRequest>,
         max: i64,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().max_redirects(max as u32);
+        // 负值 clamp 到 0（表示不跟随重定向）
+        let max = max.max(0) as u32;
+        self_.request = self_.request.clone().max_redirects(max);
         self_
     }
 
@@ -1048,7 +1066,9 @@ impl PhpXhMulti {
         self_: &mut ZendClassObject<PhpXhMulti>,
         max: i64,
     ) -> &mut ZendClassObject<PhpXhMulti> {
-        self_.max_concurrency = max as usize;
+        // 负值 clamp 到 0（表示无并发限制），避免 i64→usize 转换产生巨大数值
+        let max = max.max(0) as usize;
+        self_.max_concurrency = max;
         self_
     }
 
@@ -1062,7 +1082,9 @@ impl PhpXhMulti {
         self_: &mut ZendClassObject<PhpXhMulti>,
         size: i64,
     ) -> &mut ZendClassObject<PhpXhMulti> {
-        self_.max_response_size = size as usize;
+        // 负值 clamp 到 0（表示使用全局默认值），避免 i64→usize 转换产生巨大数值
+        let size = size.max(0) as usize;
+        self_.max_response_size = size;
         self_
     }
 
@@ -1369,7 +1391,8 @@ impl PhpXhThreadPool {
         Self {
             pool: None,
             requests: Vec::new(),
-            max_concurrency: workers.unwrap_or(0) as usize,
+            // 负值 clamp 到 0，避免 i64→usize 转换产生巨大数值
+            max_concurrency: workers.unwrap_or(0).max(0) as usize,
         }
     }
 
