@@ -344,14 +344,8 @@ impl XhThreadPool {
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
         max_response_size: usize,
     ) -> XhCurlResult<XhResponse> {
-        crate::executor::execute_request(
-            client,
-            request,
-            request_id,
-            stream_tx,
-            max_response_size,
-        )
-        .await
+        crate::executor::execute_request(client, request, request_id, stream_tx, max_response_size)
+            .await
     }
 
     /// 提交单个请求到线程池
@@ -564,10 +558,7 @@ mod tests {
         assert!(config.worker_count > 0);
         assert_eq!(config.queue_capacity, 1000);
         assert_eq!(config.idle_timeout, 0); // 默认永不超时
-        assert_eq!(
-            config.max_response_size,
-            DEFAULT_MAX_RESPONSE_SIZE
-        );
+        assert_eq!(config.max_response_size, DEFAULT_MAX_RESPONSE_SIZE);
     }
 
     /// 测试线程池创建

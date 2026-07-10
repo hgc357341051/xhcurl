@@ -799,8 +799,7 @@ impl PhpXhRequest {
                     .get_id()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| request.get_url().to_string());
-                XhMulti::execute_single(client, request, request_id, None, max_response_size)
-                    .await
+                XhMulti::execute_single(client, request, request_id, None, max_response_size).await
             })
             .map_err(|e| e.to_string())?;
 

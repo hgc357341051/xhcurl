@@ -27,9 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::error::{
-    DEFAULT_MAX_RESPONSE_SIZE, MAX_REQUESTS_PER_BATCH, XhCurlError, XhCurlResult,
-};
+use crate::error::{XhCurlError, XhCurlResult, DEFAULT_MAX_RESPONSE_SIZE, MAX_REQUESTS_PER_BATCH};
 use crate::request::XhRequest;
 use crate::response::XhResponse;
 
@@ -454,14 +452,8 @@ impl XhMulti {
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
         max_response_size: usize,
     ) -> XhCurlResult<XhResponse> {
-        crate::executor::execute_request(
-            client,
-            request,
-            request_id,
-            stream_tx,
-            max_response_size,
-        )
-        .await
+        crate::executor::execute_request(client, request, request_id, stream_tx, max_response_size)
+            .await
     }
 
     /// 获取待执行请求数量

@@ -445,7 +445,9 @@ async fn execute_http_task(
 
     // 执行请求（复用 XhMulti::execute_single，不启用流式回调）
     // 从全局配置读取 max_response_size，与 XHMulti/XHThreadPool 保持一致
-    let max_response_size = crate::curl::XhCurlManager::global().config().max_response_size;
+    let max_response_size = crate::curl::XhCurlManager::global()
+        .config()
+        .max_response_size;
     match crate::multi::XhMulti::execute_single(
         client,
         request,
