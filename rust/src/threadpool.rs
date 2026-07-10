@@ -575,6 +575,17 @@ impl XhThreadPool {
     pub fn is_running(&self) -> bool {
         self.is_running
     }
+
+    /// 获取结果接收端的可变引用
+    ///
+    /// 供 php_ext.rs 的 `executeEach` 流式回调使用：调用方先 `submit()` 提交请求，
+    /// 再通过此方法拿到 `result_rx` 自行 `recv()`，每收到一个结果就调用回调，
+    /// 不再通过 `execute_all()` 累积全部结果（内存恒定）。
+    ///
+    /// 与 `execute_all` 内部 `self.result_rx.as_mut()` 等价，仅暴露给同 crate 的流式路径。
+    pub(crate) fn result_rx_mut(&mut self) -> Option<&mut mpsc::Receiver<ResultMessage>> {
+        self.result_rx.as_mut()
+    }
 }
 
 impl Drop for XhThreadPool {

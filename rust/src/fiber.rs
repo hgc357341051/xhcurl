@@ -31,6 +31,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::convert::{FromZval, IntoZvalDyn};
 use ext_php_rs::types::{ZendCallable, ZendHashTable, Zval};
+use ext_php_rs::zend::ExecutorGlobals;
 
 use crate::multi::RequestResult;
 use crate::php_ext::for_each_kv;
@@ -375,9 +376,16 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
     for _ in 0..total {
         let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
         // 调用用户回调处理当前结果，回调签名：function(array $result): void
+        //
+        // try_call 已通过 take_exception 取出异常对象（Error::Exception 持有 ZBox<ZendObject>），
+        // 直接提取 message 传播；不能用 Display（其内部 {e:?} Debug 遍历 trace 属性，
+        // 可能含 NUL 字节导致 CString 转换失败，抛出 InvalidCString 掩盖原始异常）。
         callback_callable
             .try_call(vec![&suspended_value as &dyn IntoZvalDyn])
-            .map_err(|e| format!("回调执行失败: {}", e))?;
+            .map_err(|e| match e {
+                ext_php_rs::error::Error::Exception(obj) => extract_exception_message(&obj),
+                other => format!("回调执行失败: {}", other),
+            })?;
         // suspended_value 在此离开作用域 → 释放（不存任何地方，内存恒定）
     }
 
@@ -421,6 +429,8 @@ pub fn fiber_run(main: &Zval) -> Result<Zval, String> {
     fiber_zval
         .try_call_method("start", vec![])
         .map_err(|e| e.to_string())?;
+    // ext-php-rs 0.15 的 try_call_method 不传播 PHP 异常，主动检查并取出
+    take_php_exception()?;
 
     // 3. 事件泵循环
     let result = run_event_loop(&fiber);
@@ -444,9 +454,12 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
         // 检查主 Fiber 是否已终止
         if fiber_is_terminated(main_fiber)? {
             // 主 Fiber 已完成，获取返回值
-            return main_fiber
+            let ret = main_fiber
                 .try_call_method("getReturn", vec![])
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())?;
+            // 取出 Fiber 内可能抛出的异常（优先于返回值传播）
+            take_php_exception()?;
+            return Ok(ret);
         }
 
         // 从 channel 获取完成的任务结果（带超时，避免永久阻塞 PHP 线程）
@@ -481,6 +494,8 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                     fiber
                         .try_call_method("resume", vec![&result_array as &dyn IntoZvalDyn])
                         .map_err(|e| e.to_string())?;
+                    // 取出 Fiber 内可能抛出的异常（resume 恢复执行后可能抛异常）
+                    take_php_exception()?;
                 }
                 // 若找不到 pending fiber，可能是已取消的任务，忽略
             }
@@ -507,6 +522,38 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
 // +----------------------------------------------------------------------+
 // | Fiber 辅助函数                                                        |
 // +----------------------------------------------------------------------+
+
+/// 从 PHP 异常对象提取 message。
+///
+/// 优先读 "message" 属性（String 未实现 FromZval，用 &str 再转 owned）；
+/// 失败时回退到调用 Throwable::getMessage()；都失败则用占位文案。
+///
+/// 不使用 `Error::Exception` 的 Display（其内部用 `{:?}` Debug 遍历全部属性，
+/// trace 属性可能包含 NUL 字节，导致后续 CString 转换失败抛 InvalidCString）。
+pub(crate) fn extract_exception_message(exc: &ext_php_rs::types::ZendObject) -> String {
+    exc.get_property::<&str>("message")
+        .ok()
+        .map(str::to_owned)
+        .or_else(|| {
+            exc.try_call_method("getMessage", vec![])
+                .ok()
+                .and_then(|z| z.string())
+        })
+        .unwrap_or_else(|| "未知 PHP 异常".to_string())
+}
+
+/// 检查并取出 PHP 全局异常，若存在则返回 `Err(异常 message)`。
+///
+/// ext-php-rs 0.15 的 `try_call_method` 不检查 `ExecutorGlobals::take_exception()`，
+/// 导致 PHP Fiber 内抛出的异常被静默吞掉（事件泵误报"空闲"超时）。
+/// 此函数在每次调用 Fiber 方法（start/resume/getReturn）后主动取出全局异常，
+/// 若存在则提取其 message 并以 `Err` 返回，确保原始异常能向上传播。
+fn take_php_exception() -> Result<(), String> {
+    if let Some(exc) = ExecutorGlobals::take_exception() {
+        return Err(format!("PHP 异常: {}", extract_exception_message(&exc)));
+    }
+    Ok(())
+}
 
 /// 创建 PHP Fiber 对象
 /// 等价于 `new Fiber($main)`

@@ -19,8 +19,9 @@
 use std::sync::OnceLock;
 
 use ext_php_rs::boxed::ZBox;
+use ext_php_rs::convert::IntoZvalDyn;
 use ext_php_rs::prelude::*;
-use ext_php_rs::types::{ArrayKey, ZendClassObject, ZendHashTable, Zval};
+use ext_php_rs::types::{ArrayKey, ZendCallable, ZendClassObject, ZendHashTable, Zval};
 use ext_php_rs::zend::php_sapi_name;
 
 use crate::curl::XhCurlManager;
@@ -28,7 +29,7 @@ use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::XhMulti;
 use crate::request::{HttpMethod, XhRequest};
 use crate::response::XhResponse;
-use crate::threadpool::{ThreadPoolConfig, XhThreadPool};
+use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool};
 
 // +----------------------------------------------------------------------+
 // | 常量定义                                                              |
@@ -1109,6 +1110,227 @@ impl PhpXhMulti {
         // 转换为 PHP 数组
         results_to_php_array(&results)
     }
+
+    /// 流式回调并发执行
+    ///
+    /// 每完成一个请求立即调用回调处理，不累积全部结果（内存恒定）。
+    /// 与 `execute` 的区别：
+    /// - execute：等全部完成，累积到数组一次性返回（内存随请求总数增长）
+    /// - executeEach：每完成一个立即调回调处理，不累积（内存恒定）
+    ///
+    /// # PHP 签名
+    /// public XHMulti::executeEach(callable $callback): int
+    ///
+    /// 回调签名：`function(array $result): void`
+    /// 返回值：处理的结果总数（等于请求数；空请求列表返回 0）
+    #[php(name = "executeEach")]
+    pub fn execute_each(&mut self, callback: &Zval) -> Result<i64, String> {
+        // 空请求列表：不 spawn，提前返回
+        if self.requests.is_empty() {
+            return Ok(0);
+        }
+
+        // 提前校验回调，避免 spawn 后才发现回调无效
+        // ZendCallable::new 借用 callback 的生命周期，在整个函数内可用
+        let callback_callable =
+            ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
+
+        // 复用 execute 的全局运行时与客户端配置
+        let client = global_client().clone();
+        let max_concurrency = self.max_concurrency;
+        let timeout = self.timeout;
+        let requests = std::mem::take(&mut self.requests);
+        // 0 表示使用全局配置值
+        let max_resp_size = if self.max_response_size > 0 {
+            self.max_response_size
+        } else {
+            XhCurlManager::global().config().max_response_size
+        };
+
+        let total = requests.len();
+
+        // 复用 execute 的「XhMulti 创建 + 配置 + spawn」模式，
+        // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
+        global_runtime().block_on(async move {
+            // 创建结果 channel（有界，缓冲区 = 请求数 * 倍数，最小 16）
+            let channel_capacity = total.saturating_mul(2).max(16);
+            let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(channel_capacity);
+
+            // 并发控制 Semaphore（与 XhMulti::execute 一致）
+            let semaphore = if max_concurrency > 0 {
+                Some(std::sync::Arc::new(tokio::sync::Semaphore::new(
+                    max_concurrency,
+                )))
+            } else {
+                None
+            };
+
+            // 为每个请求创建异步任务（spawn 逻辑与 XhMulti::execute 内一致）
+            let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total);
+            for request in requests {
+                // 获取请求 ID（如果没有则使用 URL 作为 ID）
+                let request_id = request
+                    .get_id()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| request.get_url().to_string());
+                // 提取用户自定义数据（随结果原样带回）
+                let user_data = request.get_user_data().map(|s| s.to_string());
+
+                // 克隆共享资源
+                let client_clone = client.clone();
+                let result_tx_clone = result_tx.clone();
+                let semaphore_clone = semaphore.clone();
+
+                // 生成异步任务（类似 go func() { ... }()）
+                let handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+                    // 如果有并发限制，获取 Semaphore 许可
+                    // Semaphore 关闭时 acquire 返回 Err，
+                    // 此时不执行请求，直接发送错误结果，避免结果数量不匹配
+                    let _permit = if let Some(sem) = &semaphore_clone {
+                        match sem.acquire().await {
+                            Ok(permit) => Some(permit),
+                            Err(_) => {
+                                // Semaphore 已关闭，发送错误结果并退出
+                                let elapsed = std::time::Duration::from_secs(0);
+                                let result = crate::multi::RequestResult::error(
+                                    request_id,
+                                    user_data,
+                                    "并发信号量已关闭".to_string(),
+                                    elapsed,
+                                );
+                                let _ = result_tx_clone.send(result).await;
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // 记录开始时间
+                    let start = std::time::Instant::now();
+
+                    // 执行单个请求（带响应体大小限制），stream_tx=None 不启用流式事件
+                    let result = XhMulti::execute_single(
+                        client_clone,
+                        request,
+                        request_id.clone(),
+                        None,
+                        max_resp_size,
+                    )
+                    .await;
+
+                    // 计算耗时
+                    let elapsed = start.elapsed();
+
+                    // 构建结果
+                    let result = match result {
+                        Ok(response) => crate::multi::RequestResult::success(
+                            request_id, user_data, response, elapsed,
+                        ),
+                        Err(e) => crate::multi::RequestResult::error(
+                            request_id,
+                            user_data,
+                            e.to_string(),
+                            elapsed,
+                        ),
+                    };
+
+                    // 通过 channel 发送结果
+                    let _ = result_tx_clone.send(result).await;
+                });
+                tasks.push(handle);
+            }
+
+            // 丢弃发送端（所有任务完成后 channel 自动关闭）
+            drop(result_tx);
+
+            // 预期结果数量（用于完整性检查）
+            let expected = tasks.len();
+
+            // 流式收集：每收到一个结果就调用回调处理，不累积（内存恒定）
+            let mut count: i64 = 0;
+            if timeout > 0 {
+                // 带批量级超时的结果收集
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+                loop {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        // 超时：abort 剩余任务，避免任务泄漏
+                        for handle in tasks.drain(..) {
+                            handle.abort();
+                        }
+                        return Err(format!(
+                            "批量请求超时（{} 秒），已完成 {}/{} 个",
+                            timeout, count, expected
+                        ));
+                    }
+                    let remaining = deadline - now;
+                    match tokio::time::timeout(remaining, result_rx.recv()).await {
+                        Ok(Some(result)) => {
+                            // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                            let result_array = result_to_php_array(&result);
+                            // 调用用户回调，异常用 ? 向上传播（参考 fiber_each）
+                            callback_callable
+                                .try_call(vec![&result_array as &dyn IntoZvalDyn])
+                                .map_err(|e| match e {
+                                    ext_php_rs::error::Error::Exception(obj) => {
+                                        crate::fiber::extract_exception_message(&obj)
+                                    }
+                                    other => format!("回调执行失败: {}", other),
+                                })?;
+                            count += 1;
+                            if (count as usize) >= expected {
+                                break;
+                            }
+                        }
+                        Ok(None) => break, // channel 关闭
+                        Err(_) => {
+                            // 批量超时：abort 剩余任务，避免任务泄漏
+                            for handle in tasks.drain(..) {
+                                handle.abort();
+                            }
+                            return Err(format!(
+                                "批量请求超时（{} 秒），已完成 {}/{} 个",
+                                timeout, count, expected
+                            ));
+                        }
+                    }
+                }
+            } else {
+                // 无超时的结果收集
+                while let Some(result) = result_rx.recv().await {
+                    let result_array = result_to_php_array(&result);
+                    callback_callable
+                        .try_call(vec![&result_array as &dyn IntoZvalDyn])
+                        .map_err(|e| match e {
+                            ext_php_rs::error::Error::Exception(obj) => {
+                                crate::fiber::extract_exception_message(&obj)
+                            }
+                            other => format!("回调执行失败: {}", other),
+                        })?;
+                    count += 1;
+                }
+            }
+
+            // 等待所有任务完成（确保没有任务泄漏）
+            // 检测 task panic（JoinError），避免静默丢失结果
+            for handle in tasks.drain(..) {
+                if let Err(join_err) = handle.await {
+                    eprintln!("[XHMulti] 任务异常退出: {}", join_err);
+                }
+            }
+
+            // 完整性检查：task panic 会导致结果数量少于预期
+            if (count as usize) != expected {
+                return Err(format!(
+                    "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
+                    expected, count
+                ));
+            }
+
+            Ok(count)
+        })
+    }
 }
 
 // +----------------------------------------------------------------------+
@@ -1198,6 +1420,137 @@ impl PhpXhThreadPool {
 
         // 转换为 PHP 数组
         results_to_php_array(&results)
+    }
+
+    /// 流式回调并发执行
+    ///
+    /// 每完成一个请求立即调用回调处理，不累积全部结果（内存恒定）。
+    /// 与 `execute` 的区别：
+    /// - execute：等全部完成，累积到数组一次性返回（内存随请求总数增长）
+    /// - executeEach：每完成一个立即调回调处理，不累积（内存恒定）
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::executeEach(callable $callback): int
+    ///
+    /// 回调签名：`function(array $result): void`
+    /// 返回值：处理的结果总数（等于成功提交的请求数；空请求列表返回 0）
+    #[php(name = "executeEach")]
+    pub fn execute_each(&mut self, callback: &Zval) -> Result<i64, String> {
+        // 安全检查：线程池仅在 CLI 模式下可用（与 execute 一致）
+        // FPM 模式下多线程会与 PHP 内存管理器（TSRM/内存池）冲突
+        if !sapi_is_cli() {
+            return Err("XHThreadPool 仅在 CLI 模式下可用".to_string());
+        }
+
+        let requests = std::mem::take(&mut self.requests);
+        // 空请求列表：不启动线程池，提前返回
+        if requests.is_empty() {
+            return Ok(0);
+        }
+
+        // 提前校验回调，避免 spawn 后才发现回调无效
+        let callback_callable =
+            ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
+
+        let max_concurrency = self.max_concurrency;
+        // 取出现有线程池以便复用（同对象多次调用复用工作线程）
+        let mut pool = self.pool.take();
+
+        // 复用 execute 的「ThreadPool 创建 + submit」模式，
+        // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
+        // 通过 take/存回 模式避免借用 self；回调异常时仍需存回 pool，故用显式错误捕获
+        let (returned_pool, count) = global_runtime().block_on(async move {
+            // 首次调用时创建线程池，后续复用
+            if pool.is_none() {
+                let client = global_client().clone();
+                let mut config = ThreadPoolConfig::default();
+                if max_concurrency > 0 {
+                    config.worker_count = max_concurrency;
+                }
+                pool = Some(XhThreadPool::new(config, client));
+            }
+            let p = pool.as_mut().expect("线程池已初始化");
+
+            // 启动线程池（若未启动）
+            if !p.is_running() {
+                if let Err(e) = p.start() {
+                    return (pool, Err(e.to_string()));
+                }
+            }
+
+            // 提交所有请求，记录成功提交的数量
+            // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
+            let mut submitted = 0usize;
+            for request in requests {
+                match p.submit(request) {
+                    Ok(()) => submitted += 1,
+                    Err(e) => {
+                        // 提交失败，但已提交的请求需要继续收集结果
+                        eprintln!("警告: 提交任务失败: {}", e);
+                    }
+                }
+            }
+            if submitted == 0 {
+                return (pool, Err("所有请求提交失败".to_string()));
+            }
+
+            let worker_count = p.worker_count();
+            // 自己接管 result_rx：每收到一个就调回调，不通过 execute_all 累积
+            let result_rx = match p.result_rx_mut() {
+                Some(rx) => rx,
+                None => return (pool, Err("结果接收端不存在".to_string())),
+            };
+
+            // 流式收集：每收到一个结果就调用回调处理，不累积（内存恒定）
+            let mut count: i64 = 0;
+            let mut shutdown_count = 0usize;
+            // 回调异常需向上传播，但又要存回 pool，故先捕获错误信息，循环结束后统一返回
+            let mut callback_err: Option<String> = None;
+
+            // 只要结果未收齐就继续等待
+            while (count as usize) < submitted {
+                match result_rx.recv().await {
+                    Some(ResultMessage::Completed(result)) => {
+                        // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                        let result_array = result_to_php_array(&result);
+                        // 调用用户回调，异常捕获后中断循环（与 fiber_each 的 ? 传播等价）
+                        if let Err(e) =
+                            callback_callable.try_call(vec![&result_array as &dyn IntoZvalDyn])
+                        {
+                            callback_err = Some(match e {
+                                ext_php_rs::error::Error::Exception(obj) => {
+                                    crate::fiber::extract_exception_message(&obj)
+                                }
+                                other => format!("回调执行失败: {}", other),
+                            });
+                            break;
+                        }
+                        count += 1;
+                    }
+                    Some(ResultMessage::WorkerShutdown) => {
+                        shutdown_count += 1;
+                        // 所有工作线程都已关闭，无法再收到结果
+                        if shutdown_count >= worker_count {
+                            break;
+                        }
+                    }
+                    None => {
+                        // channel 关闭，无法再收到结果
+                        break;
+                    }
+                }
+            }
+
+            if let Some(msg) = callback_err {
+                (pool, Err(msg))
+            } else {
+                (pool, Ok(count))
+            }
+        });
+
+        // 存回线程池以便下次 execute 复用
+        self.pool = returned_pool;
+        count
     }
 }
 

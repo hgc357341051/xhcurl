@@ -100,9 +100,7 @@ check("each 单个请求 id 正确", $singleResult['id'] === 'single');
 echo "\n=== 回调抛异常终止 each ===\n";
 
 // 5. 回调抛异常终止 each
-//    注意：当前事件泵在 Fiber 内抛异常时，异常传播存在已知限制
-//    （resume() 吞异常导致事件泵超时报"空闲"，gather 也有同样问题）
-//    此测试验证：回调抛异常后 run() 最终返回错误（非正常返回），且回调次数 < 总请求数
+//    P0 修复后,事件泵通过 ExecutorGlobals::take_exception 正确传播异常 message
 $manyRequests = array();
 for ($i = 0; $i < 10; $i++) {
     $manyRequests[] = XHCurl::createRequest($BASE . '/get?id=' . $i)
@@ -112,6 +110,7 @@ for ($i = 0; $i < 10; $i++) {
 
 $callbackCount = 0;
 $errorReturned = false;
+$errorMessage = '';
 try {
     XHCurl::run(function() use ($manyRequests, &$callbackCount) {
         return XHCurl::each($manyRequests, function($result) use (&$callbackCount) {
@@ -123,9 +122,31 @@ try {
     });
 } catch (Throwable $e) {
     $errorReturned = true;
+    $errorMessage = $e->getMessage();
 }
 check("each 回调抛异常后 run() 返回错误", $errorReturned);
+check("each 异常 message 正确传播(含原始文本)", strpos($errorMessage, '测试异常终止') !== false);
 check("each 异常终止后回调次数 < 10", $callbackCount < 10 && $callbackCount >= 1);
+
+echo "\n=== gather 后用户代码抛异常 ===\n";
+
+// 6b. P0 修复验证：gather 返回后用户代码抛异常，run() 应立即返回错误(含 message)
+$gatherErrorReturned = false;
+$gatherErrorMessage = '';
+try {
+    XHCurl::run(function() use ($BASE) {
+        $results = XHCurl::gather(array(
+            XHCurl::createRequest($BASE . '/get')->get()->timeout(15),
+        ));
+        // gather 成功返回后抛异常,验证事件泵通过 take_exception 正确传播
+        throw new Exception("gather 后异常测试");
+    });
+} catch (Throwable $e) {
+    $gatherErrorReturned = true;
+    $gatherErrorMessage = $e->getMessage();
+}
+check("gather 后抛异常 run() 返回错误", $gatherErrorReturned);
+check("gather 异常 message 正确传播(含原始文本)", strpos($gatherErrorMessage, 'gather 后异常测试') !== false);
 
 echo "\n=== 失败请求仍触发回调 ===\n";
 
