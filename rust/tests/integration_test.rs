@@ -103,9 +103,9 @@ fn test_header_management() {
     let hm = HeaderManager::new();
 
     // 添加头部
-    hm.set("Content-Type", "application/json").unwrap();
-    hm.set("Authorization", "Bearer token").unwrap();
-    hm.set("X-Request-ID", "req-12345").unwrap();
+    hm.set("Content-Type", "application/json");
+    hm.set("Authorization", "Bearer token");
+    hm.set("X-Request-ID", "req-12345");
 
     // 验证大小写不敏感
     assert!(hm.has("content-type"));
@@ -195,7 +195,6 @@ fn test_threadpool_config() {
         worker_count: 8,
         queue_capacity: 500,
         idle_timeout: 30,
-        enable_priority: true,
         max_response_size: 10 * 1024 * 1024,
     };
 

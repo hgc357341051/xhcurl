@@ -82,7 +82,7 @@ impl XhResponse {
         // 构建 HeaderManager
         let header_mgr = HeaderManager::new();
         for (name, value) in &headers {
-            let _ = header_mgr.set(name, value);
+            header_mgr.set(name, value);
         }
 
         // 判断是否成功（2xx）

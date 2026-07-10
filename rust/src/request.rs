@@ -331,7 +331,7 @@ impl XhRequest {
     /// - `name`: 头部名称
     /// - `value`: 头部值
     pub fn header(self, name: &str, value: &str) -> Self {
-        let _ = self.headers.set(name, value);
+        self.headers.set(name, value);
         self
     }
 
@@ -357,7 +357,7 @@ impl XhRequest {
         let value = serde_json::to_value(json)?;
         self.body = BodyType::Json(value);
         // 自动设置 Content-Type
-        let _ = self.headers.set("Content-Type", "application/json");
+        self.headers.set("Content-Type", "application/json");
         Ok(self)
     }
 
@@ -365,7 +365,7 @@ impl XhRequest {
     pub fn body_json_str(mut self, json_str: &str) -> XhCurlResult<Self> {
         let value: serde_json::Value = serde_json::from_str(json_str)?;
         self.body = BodyType::Json(value);
-        let _ = self.headers.set("Content-Type", "application/json");
+        self.headers.set("Content-Type", "application/json");
         Ok(self)
     }
 
@@ -373,8 +373,7 @@ impl XhRequest {
     /// 自动设置 Content-Type: application/x-www-form-urlencoded
     pub fn body_form(mut self, form: Vec<(String, String)>) -> Self {
         self.body = BodyType::Form(form);
-        let _ = self
-            .headers
+        self.headers
             .set("Content-Type", "application/x-www-form-urlencoded");
         self
     }

@@ -62,34 +62,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # 用于工作线程与主线程间的安全通信（替代回调机制）
 crossbeam-channel = "0.5"
 
-# 并行计算库（work-stealing 线程池）
-# 用于 CPU 密集型任务的并行处理
-rayon = "1.10"
-
-# 异步 trait 支持（用于定义异步接口）
-async-trait = "0.1"
-
 # 序列化/反序列化（JSON 处理）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # 错误处理库（库代码使用 thiserror，应用代码使用 anyhow）
 thiserror = "1"
-
-# 日期时间处理（请求耗时计算）
-chrono = "0.4"
-
-# 字节缓冲区（零拷贝数据传输）
-bytes = "1"
-
-# URL 解析（用于请求 URL 验证）
-url = "2"
-
-# HTTP 协议类型（reqwest 依赖，显式声明用于 from_reqwest 方法）
-http = "1"
-
-# futures 工具（流式处理）
-futures-util = "0.3"
 
 [dev-dependencies]
 # 测试框架

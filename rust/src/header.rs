@@ -40,22 +40,14 @@ impl HeaderManager {
     /// # 参数
     /// - `name`: 头部名称（自动转为小写，符合 HTTP/2 规范）
     /// - `value`: 头部值
-    ///
-    /// # 返回
-    /// - `Ok(())`: 添加成功
-    /// - `Err`: 获取写锁失败（通常不会发生，除非发生 panic）
-    pub fn set(&self, name: &str, value: &str) -> Result<(), String> {
+    pub fn set(&self, name: &str, value: &str) {
         // 获取写锁（独占访问）
         // unwrap 安全：只有当 RwLock 被 poison（持有者 panic）时才会失败
-        let mut headers = self
-            .headers
-            .write()
-            .map_err(|e| format!("获取写锁失败: {}", e))?;
+        let mut headers = self.headers.write().unwrap();
 
         // 将键转为小写（HTTP/2 要求头部名称小写）
         // 值保持原样
         headers.insert(name.to_lowercase(), value.to_string());
-        Ok(())
     }
 
     /// 批量添加头部
@@ -181,8 +173,8 @@ mod tests {
         let hm = HeaderManager::new();
 
         // 添加头部
-        hm.set("Content-Type", "application/json").unwrap();
-        hm.set("Authorization", "Bearer token123").unwrap();
+        hm.set("Content-Type", "application/json");
+        hm.set("Authorization", "Bearer token123");
 
         // 验证存在性
         assert!(hm.has("Content-Type"));
@@ -231,9 +223,7 @@ mod tests {
         for i in 0..10 {
             let hm_clone = Arc::clone(&hm);
             let handle = thread::spawn(move || {
-                hm_clone
-                    .set(&format!("X-Thread-{}", i), &format!("value-{}", i))
-                    .unwrap();
+                hm_clone.set(&format!("X-Thread-{}", i), &format!("value-{}", i));
             });
             handles.push(handle);
         }

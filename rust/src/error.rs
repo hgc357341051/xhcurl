@@ -27,23 +27,10 @@ pub enum XhCurlError {
     #[error("网络请求失败: {0}")]
     Request(#[from] reqwest::Error),
 
-    /// URL 格式错误（非法 URL、缺少 scheme 等）
-    /// 包装 url crate 的解析错误
-    #[error("URL 格式错误: {0}")]
-    UrlParse(#[from] url::ParseError),
-
     /// JSON 序列化/反序列化错误
     /// 包装 serde_json 的错误类型
     #[error("JSON 处理错误: {0}")]
     Json(#[from] serde_json::Error),
-
-    /// HTTP 状态码错误（5xx 服务器错误、4xx 客户端错误）
-    /// 包含状态码和可选的响应体片段
-    #[error("HTTP 错误: 状态码 {status}")]
-    HttpStatus {
-        /// HTTP 状态码（如 404、500）
-        status: u16,
-    },
 
     /// 参数验证错误（超时值为负、线程数超出范围等）
     /// 包含错误描述信息
@@ -59,21 +46,6 @@ pub enum XhCurlError {
     /// 包含错误描述
     #[error("线程池错误: {0}")]
     ThreadPool(String),
-
-    /// 异步任务错误（任务被取消、运行时错误）
-    /// 包装 tokio 的 JoinError
-    #[error("异步任务错误: {0}")]
-    AsyncTask(#[from] tokio::task::JoinError),
-
-    /// 通道通信错误（发送失败、接收超时）
-    /// 包含错误描述
-    #[error("通道通信错误: {0}")]
-    Channel(String),
-
-    /// I/O 错误（文件读写、标准输入输出）
-    /// 包装 std::io::Error
-    #[error("I/O 错误: {0}")]
-    Io(#[from] std::io::Error),
 
     /// 通用错误（不匹配任何特定类别的错误）
     /// 使用 String 类型保留完整错误信息
@@ -117,10 +89,6 @@ mod tests {
         let err = XhCurlError::InvalidArgument("超时不能为负".to_string());
         assert!(err.to_string().contains("参数错误"));
         assert!(err.to_string().contains("超时不能为负"));
-
-        // 测试 HTTP 状态码错误
-        let err = XhCurlError::HttpStatus { status: 404 };
-        assert!(err.to_string().contains("404"));
 
         // 测试通用错误
         let err = XhCurlError::Generic("测试错误".to_string());

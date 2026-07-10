@@ -372,12 +372,9 @@ impl XhMulti {
                 // 如果有并发限制，获取 Semaphore 许可
                 // _permit 在作用域结束时自动释放
                 // Semaphore 关闭时 acquire 返回 Err（AcquireError），
-                // 此处优雅处理而非 expect panic
+                // 此处用 .ok() 优雅处理而非 expect panic
                 let _permit = if let Some(sem) = &semaphore {
-                    match sem.acquire().await {
-                        Ok(p) => Some(p),
-                        Err(_) => None, // Semaphore 已关闭，跳过并发限制
-                    }
+                    sem.acquire().await.ok()
                 } else {
                     None
                 };
