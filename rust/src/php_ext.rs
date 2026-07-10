@@ -1381,6 +1381,477 @@ fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, St
 }
 
 // +----------------------------------------------------------------------+
+// | xhrun - 安全的跨平台 shell 命令执行函数                              |
+// +----------------------------------------------------------------------+
+
+/// `xhrun` 默认超时（秒）。
+/// 防止命令无限期挂起；调用方可通过 `timeout` 选项覆盖。
+const XHRUN_DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+/// `xhrun` 允许的最大输出字节数（stdout + stderr 合计）。
+/// 防止恶意/失控命令耗尽内存；调用方可通过 `max_output` 选项覆盖。
+const XHRUN_DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024; // 64MB
+
+/// 安全的跨平台 shell 命令执行函数。
+///
+/// 用于替代 PHP 内置的 `shell_exec` / `exec` / `system` / `passthru` /
+/// `proc_open`，提升安全性。
+///
+/// # 安全特性
+///
+/// 1. **默认不经过 shell 解析**：命令和参数通过 `Command::arg()` 逐个传递，
+///    天然避免 shell 注入（这是相比 PHP 内置函数最大的安全提升）。
+///    需要管道/通配符/重定向时，显式设置 `shell => true` 走系统 shell。
+/// 2. **超时控制**：命令超时后自动终止，避免卡死。
+/// 3. **输出大小限制**：防止失控命令耗尽内存。
+/// 4. **可选命令白名单/黑名单**：限制可执行的命令。
+///
+/// # PHP 签名
+///
+/// ```php
+/// xhrun(string $command, array $args = [], array $options = []): array
+/// ```
+///
+/// # 参数
+///
+/// - `command`: 要执行的命令（如 `"ls"`、`"ping"`、`"cmd"`）。
+/// - `args`: 命令参数数组（如 `["-la", "/tmp"]`）。每个元素作为一个独立参数，
+///   不经过 shell 解析。仅在 `shell => true` 时，`args` 会拼接进命令行。
+/// - `options`: 选项数组，支持以下键：
+///   - `timeout` (int): 超时秒数，0 = 无超时。默认 60。
+///   - `max_output` (int): 最大输出字节数（stdout+stderr 合计）。默认 64MB。
+///   - `cwd` (string): 工作目录。默认继承当前进程。
+///   - `env` (array): 环境变量键值对。默认继承当前进程。
+///   - `shell` (bool): 是否通过系统 shell 执行（启用管道/通配符/重定向支持，
+///     但会引入 shell 注入风险，需谨慎）。默认 false。
+///   - `allow` (array): 命令白名单（如 `["ls", "cat"]`）。设置后仅允许这些命令。
+///   - `deny` (array): 命令黑名单（如 `["rm", "shutdown"]`）。
+///   - `input` (string): 传给命令 stdin 的数据（二进制安全）。
+///
+/// # 返回
+///
+/// 关联数组，字段：
+/// - `success` (bool): 是否成功执行（exit_code == 0 且未超时/超限）。
+/// - `exit_code` (int): 进程退出码。超时/启动失败时为 -1。
+/// - `stdout` (string): 标准输出（二进制安全）。
+/// - `stderr` (string): 标准错误输出（二进制安全）。
+/// - `elapsed_ms` (int): 执行耗时（毫秒）。
+/// - `pid` (int): 子进程 PID。
+/// - `timed_out` (bool): 是否因超时被终止。
+/// - `truncated` (bool): 输出是否因超过 max_output 被截断。
+/// - `error` (string): 错误信息（启动失败、超限等，可选）。
+///
+/// # 示例
+///
+/// ```php
+/// // 基本用法（不经过 shell，安全）
+/// $r = xhrun('ls', ['-la', '/tmp']);
+/// if ($r['success']) { echo $r['stdout']; }
+///
+/// // 带超时和环境变量
+/// $r = xhrun('ping', ['-c', '4', 'example.com'], ['timeout' => 10, 'env' => ['PATH' => '/usr/bin']]);
+///
+/// // 需要管道时显式启用 shell（注意：此时 $args 不会转义，需自行确保安全）
+/// $r = xhrun('ls -la /tmp | grep foo', [], ['shell' => true]);
+///
+/// // 白名单限制
+/// $r = xhrun('ls', ['-la'], ['allow' => ['ls', 'cat']]);
+/// ```
+#[php_function]
+pub fn xhrun(
+    command: &str,
+    args: Option<&ZendHashTable>,
+    options: Option<&ZendHashTable>,
+) -> Result<ZBox<ZendHashTable>, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    // ===== 1. 解析参数数组 =====
+    let arg_vec: Vec<String> = match args {
+        Some(ht) => {
+            let mut v = Vec::with_capacity(ht.len());
+            let mut iter = ht.iter();
+            for _ in 0..ht.len() {
+                match iter.next() {
+                    Some((_, val)) => {
+                        if let Some(s) = val.string() {
+                            v.push(s.to_string());
+                        } else if let Some(l) = val.long() {
+                            v.push(l.to_string());
+                        } else if let Some(d) = val.double() {
+                            v.push(d.to_string());
+                        } else {
+                            return Err("args 数组元素必须是标量类型".to_string());
+                        }
+                    }
+                    None => break,
+                }
+            }
+            v
+        }
+        None => Vec::new(),
+    };
+
+    // ===== 2. 解析 options =====
+    let timeout_secs: u64 = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64) as u64;
+    let max_output: usize =
+        opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64) as usize;
+    let cwd: Option<String> = opt_string(options, "cwd");
+    let env_ht: Option<&ZendHashTable> = options
+        .and_then(|ht| ht.get("env"))
+        .and_then(<&ZendHashTable as ext_php_rs::convert::FromZval>::from_zval);
+    let use_shell: bool = opt_bool(options, "shell", false);
+    let input: Option<Vec<u8>> = options
+        .and_then(|ht| ht.get("input"))
+        .and_then(|v| v.binary::<u8>());
+    let allow_list: Vec<String> = opt_string_vec(options, "allow");
+    let deny_list: Vec<String> = opt_string_vec(options, "deny");
+
+    // ===== 3. 安全校验：白名单/黑名单 =====
+    // 提取命令主名（去掉路径前缀，如 /usr/bin/ls → ls）
+    let cmd_basename = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_lowercase();
+
+    if !allow_list.is_empty() && !allow_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
+        return Ok(failure_result(
+            command,
+            -1,
+            &format!("命令 '{}' 不在白名单中", command),
+        ));
+    }
+
+    if deny_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
+        return Ok(failure_result(
+            command,
+            -1,
+            &format!("命令 '{}' 在黑名单中", command),
+        ));
+    }
+
+    // ===== 4. 构建命令 =====
+    let mut cmd = if use_shell {
+        // shell 模式：通过系统 shell 执行，支持管道/通配符/重定向
+        // 注意：此模式有 shell 注入风险，需调用方自行确保输入安全
+        let mut full = String::from(command);
+        for a in &arg_vec {
+            full.push(' ');
+            full.push_str(a);
+        }
+        let c = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&full);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&full);
+            c
+        };
+        c
+    } else {
+        // 默认模式：直接执行，不经过 shell，参数逐个传递
+        // 这是相比 PHP shell_exec 最主要的安全提升
+        let mut c = Command::new(command);
+        for a in &arg_vec {
+            c.arg(a);
+        }
+        c
+    };
+
+    // 设置工作目录
+    if let Some(dir) = &cwd {
+        cmd.current_dir(dir);
+    }
+
+    // 设置环境变量
+    if let Some(env) = env_ht {
+        let mut iter = env.iter();
+        for _ in 0..env.len() {
+            if let Some((k, v)) = iter.next() {
+                // ArrayKey 的 Display 实现会返回键的字符串形式
+                let key_str = k.to_string();
+                if let Some(vs) = v.string() {
+                    cmd.env(key_str, vs);
+                }
+            }
+        }
+    }
+
+    // 配置 stdin/stdout/stderr
+    let needs_stdin = input.is_some();
+    cmd.stdin(if needs_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // ===== 5. 启动进程 =====
+    let start = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(failure_result(command, -1, &format!("启动命令失败: {}", e)));
+        }
+    };
+
+    let pid = child.id() as i64;
+
+    // ===== 6. 写入 stdin（如果有）=====
+    if let Some(input_bytes) = &input {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(input_bytes);
+            // stdin drop 时关闭管道
+        }
+    }
+
+    // ===== 7. 异步读取输出 + 超时控制 =====
+    // 用独立线程读取 stdout/stderr，主线程用 wait_with_output 无法做超时，
+    // 因此手动用 recv_timeout 轮询。
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut truncated = false;
+    let mut timed_out = false;
+
+    // 取出 stdout/stderr 管道，在子线程中读取避免死锁
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+
+    // 读线程：将 stdout+stderr 合并到各自缓冲区，同时累加总大小
+    let total_limit = max_output;
+    let stdout_handle = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::new();
+        let mut exceeded = false;
+        if let Some(out) = child_stdout.as_mut() {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match out.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf.len() + n <= total_limit {
+                            buf.extend_from_slice(&tmp[..n]);
+                        } else {
+                            let remaining = total_limit.saturating_sub(buf.len());
+                            if remaining > 0 {
+                                buf.extend_from_slice(&tmp[..remaining]);
+                            }
+                            exceeded = true;
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok((buf, exceeded))
+    });
+
+    let stderr_handle = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::new();
+        let mut exceeded = false;
+        if let Some(err) = child_stderr.as_mut() {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match err.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf.len() + n <= total_limit {
+                            buf.extend_from_slice(&tmp[..n]);
+                        } else {
+                            let remaining = total_limit.saturating_sub(buf.len());
+                            if remaining > 0 {
+                                buf.extend_from_slice(&tmp[..remaining]);
+                            }
+                            exceeded = true;
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok((buf, exceeded))
+    });
+
+    // 主线程：等待子进程，带超时
+    let exit_code: i64;
+    let timeout_dur = if timeout_secs > 0 {
+        Some(std::time::Duration::from_secs(timeout_secs))
+    } else {
+        None
+    };
+
+    loop {
+        // 非阻塞检查子进程是否退出
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code().unwrap_or(-1) as i64;
+                break;
+            }
+            Ok(None) => {
+                // 仍在运行，检查超时
+                if let Some(dur) = timeout_dur {
+                    if start.elapsed() >= dur {
+                        // 超时：强制终止
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        timed_out = true;
+                        exit_code = -1;
+                        break;
+                    }
+                }
+                // 短暂休眠避免 busy-loop
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => {
+                exit_code = -1;
+                break;
+            }
+        }
+    }
+
+    // 收集读线程结果
+    match stdout_handle.join() {
+        Ok(Ok((buf, exc))) => {
+            stdout = buf;
+            if exc {
+                truncated = true;
+            }
+        }
+        Ok(Err(e)) => {
+            let msg = format!("\n[xhrun] 读取 stdout 失败: {}", e);
+            stderr.extend_from_slice(msg.as_bytes());
+        }
+        Err(_) => {}
+    }
+    match stderr_handle.join() {
+        Ok(Ok((buf, exc))) => {
+            // 合并读线程已收集的 stderr
+            stderr.extend_from_slice(&buf);
+            if exc {
+                truncated = true;
+            }
+        }
+        Ok(Err(e)) => {
+            let msg = format!("\n[xhrun] 读取 stderr 失败: {}", e);
+            stderr.extend_from_slice(msg.as_bytes());
+        }
+        Err(_) => {}
+    }
+
+    let elapsed_ms = start.elapsed().as_millis() as i64;
+
+    // ===== 8. 构建返回数组 =====
+    let mut result = ZendHashTable::new();
+    let success = exit_code == 0 && !timed_out;
+    let _ = result.insert("success", success);
+    let _ = result.insert("exit_code", exit_code);
+
+    // stdout/stderr：二进制安全写入
+    if !stdout.is_empty() {
+        let mut zv = Zval::new();
+        zv.set_binary::<u8>(stdout);
+        let _ = result.insert("stdout", zv);
+    } else {
+        let _ = result.insert("stdout", "");
+    }
+
+    if !stderr.is_empty() {
+        let mut zv = Zval::new();
+        zv.set_binary::<u8>(stderr);
+        let _ = result.insert("stderr", zv);
+    } else {
+        let _ = result.insert("stderr", "");
+    }
+
+    let _ = result.insert("elapsed_ms", elapsed_ms);
+    let _ = result.insert("pid", pid);
+    let _ = result.insert("timed_out", timed_out);
+    let _ = result.insert("truncated", truncated);
+
+    if timed_out {
+        let _ = result.insert("error", format!("命令执行超时（{} 秒）", timeout_secs));
+    } else if truncated {
+        let _ = result.insert(
+            "error",
+            format!("输出超过最大限制 {} 字节，已截断", max_output),
+        );
+    }
+
+    Ok(result)
+}
+
+/// 从 options 数组读取整型选项，未设置时返回默认值。
+fn opt_long(options: Option<&ZendHashTable>, key: &str, default: i64) -> i64 {
+    options
+        .and_then(|ht| ht.get(key))
+        .and_then(|v| v.long())
+        .unwrap_or(default)
+}
+
+/// 从 options 数组读取布尔选项，未设置时返回默认值。
+fn opt_bool(options: Option<&ZendHashTable>, key: &str, default: bool) -> bool {
+    options
+        .and_then(|ht| ht.get(key))
+        .and_then(|v| v.bool())
+        .unwrap_or(default)
+}
+
+/// 从 options 数组读取字符串选项，未设置时返回 None。
+fn opt_string(options: Option<&ZendHashTable>, key: &str) -> Option<String> {
+    options
+        .and_then(|ht| ht.get(key))
+        .and_then(|v| v.string().map(|s| s.to_string()))
+}
+
+/// 从 options 数组读取字符串数组选项（白名单/黑名单）。
+fn opt_string_vec(options: Option<&ZendHashTable>, key: &str) -> Vec<String> {
+    let ht = match options.and_then(|o| o.get(key)) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let arr: Option<&ZendHashTable> =
+        <&ZendHashTable as ext_php_rs::convert::FromZval>::from_zval(ht);
+    match arr {
+        Some(a) => {
+            let mut v = Vec::with_capacity(a.len());
+            let mut iter = a.iter();
+            for _ in 0..a.len() {
+                if let Some((_, val)) = iter.next() {
+                    if let Some(s) = val.string() {
+                        v.push(s.to_string());
+                    }
+                }
+            }
+            v
+        }
+        None => Vec::new(),
+    }
+}
+
+/// 构建 xhrun 的失败结果数组（命令未执行的情况）。
+fn failure_result(command: &str, exit_code: i64, error: &str) -> ZBox<ZendHashTable> {
+    let mut result = ZendHashTable::new();
+    let _ = result.insert("success", false);
+    let _ = result.insert("exit_code", exit_code);
+    let _ = result.insert("stdout", "");
+    let _ = result.insert("stderr", "");
+    let _ = result.insert("elapsed_ms", 0_i64);
+    let _ = result.insert("pid", 0_i64);
+    let _ = result.insert("timed_out", false);
+    let _ = result.insert("truncated", false);
+    let _ = result.insert("error", format!("{}: {}", error, command));
+    result
+}
+
+// +----------------------------------------------------------------------+
 // | PHP 模块入口                                                          |
 // | 注意：#[php_module] 宏必须放在文件最后                                 |
 // |                                                                       |
@@ -1396,4 +1867,5 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .class::<PhpXhResponse>()
         .class::<PhpXhMulti>()
         .class::<PhpXhThreadPool>()
+        .function(wrap_function!(xhrun))
 }

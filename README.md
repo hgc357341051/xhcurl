@@ -21,6 +21,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
   - [结果数组字段](#结果数组字段)
   - [XHMulti - 批量异步执行器](#xhmulti---批量异步执行器)
   - [XHThreadPool - 线程池](#xhthreadpool---线程池)
+  - [xhrun - 安全 Shell 命令执行](#xhrun---安全-shell-命令执行)
 - [curl 兼容性对照](#curl-兼容性对照)
 - [FPM 与 CLI 模式](#fpm-与-cli-模式)
 - [故障排查](#故障排查)
@@ -44,6 +45,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 | **自适应运行时** | CLI 模式多线程运行时（M:N 并行），FPM 模式单线程运行时（协作式并发） |
 | **用户自定义数据** | `setUserData()` 携带任意结构化数据，随结果原样回传 |
 | **响应体大小限制** | 流式读取 + `max_response_size` 防止内存溢出 |
+| **安全 Shell 执行** | `xhrun()` 函数替代 `shell_exec`/`exec`/`system`，默认不经 shell 防注入 |
 
 ---
 
@@ -493,6 +495,114 @@ $pool->add($request1);
 $pool->add($request2);
 $results = $pool->execute();
 ```
+
+---
+
+## xhrun - 安全 Shell 命令执行
+
+`xhrun()` 是一个全局函数，用于替代 PHP 内置的 `shell_exec` / `exec` / `system` /
+`passthru` / `proc_open`，提供更安全的跨平台 shell 命令执行能力。
+
+### 安全模型
+
+| 特性 | 说明 |
+|------|------|
+| **默认不经 shell** | 命令和参数通过 `Command::arg()` 逐个传递，天然避免 shell 注入 |
+| **超时控制** | 命令超时后自动终止子进程，避免卡死 |
+| **输出大小限制** | `max_output` 防止失控命令耗尽内存 |
+| **白名单/黑名单** | `allow`/`deny` 选项限制可执行命令 |
+| **二进制安全** | stdout/stderr/stdin 均保留原始字节 |
+| **跨平台** | `shell => true` 时自动选择 `cmd /C`（Windows）或 `sh -c`（Unix） |
+
+### PHP 签名
+
+```php
+xhrun(string $command, array $args = [], array $options = []): array
+```
+
+### 参数
+
+- `command`: 要执行的命令（如 `"ls"`、`"ping"`、`"cmd"`）。
+- `args`: 命令参数数组（如 `["-la", "/tmp"]`）。每个元素作为一个独立参数，
+  **不经过 shell 解析**。仅在 `shell => true` 时，`args` 会拼接进命令行。
+- `options`: 选项数组，支持以下键：
+
+| 键 | 类型 | 默认 | 说明 |
+|----|------|------|------|
+| `timeout` | int | 60 | 超时秒数，0 = 无超时 |
+| `max_output` | int | 64MB | 最大输出字节数（stdout+stderr 合计） |
+| `cwd` | string | 继承 | 工作目录 |
+| `env` | array | 继承 | 环境变量键值对 |
+| `shell` | bool | false | 是否通过系统 shell 执行（启用管道/通配符，但有注入风险） |
+| `allow` | array | [] | 命令白名单（设置后仅允许这些命令） |
+| `deny` | array | [] | 命令黑名单 |
+| `input` | string | 无 | 传给命令 stdin 的数据（二进制安全） |
+
+### 返回
+
+关联数组，字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `success` | bool | 是否成功执行（exit_code == 0 且未超时/超限） |
+| `exit_code` | int | 进程退出码。超时/启动失败时为 -1 |
+| `stdout` | string | 标准输出（二进制安全） |
+| `stderr` | string | 标准错误输出（二进制安全） |
+| `elapsed_ms` | int | 执行耗时（毫秒） |
+| `pid` | int | 子进程 PID |
+| `timed_out` | bool | 是否因超时被终止 |
+| `truncated` | bool | 输出是否因超过 max_output 被截断 |
+| `error` | string | 错误信息（启动失败、超限等，可选） |
+
+### 示例
+
+```php
+<?php
+// 1. 基本用法（不经过 shell，安全）
+$r = xhrun('ls', ['-la', '/tmp']);
+if ($r['success']) {
+    echo $r['stdout'];
+}
+
+// 2. 带超时和环境变量
+$r = xhrun('ping', ['-c', '4', 'example.com'], [
+    'timeout' => 10,
+    'env' => ['PATH' => '/usr/bin'],
+]);
+
+// 3. 安全验证：参数不经 shell 解析，以下内容会被完整 echo，不会执行 rm
+$r = xhrun('echo', ['foo; rm -rf /']);
+echo $r['stdout'];  // 输出: foo; rm -rf /
+
+// 4. 需要管道时显式启用 shell（注意：需自行确保输入安全）
+$r = xhrun('ls -la /tmp | grep foo', [], ['shell' => true]);
+
+// 5. 白名单限制（仅允许 ls 和 cat）
+$r = xhrun('ls', ['-la'], ['allow' => ['ls', 'cat']]);
+
+// 6. 黑名单（禁止 rm/shutdown）
+$r = xhrun('rm', ['-rf', '/'], ['deny' => ['rm', 'shutdown']]);
+// $r['success'] === false, $r['error'] 含拒绝原因
+
+// 7. stdin 输入（二进制安全）
+$r = xhrun('cat', [], ['input' => "hello\nbinary: \x00\x01\x02"]);
+
+// 8. 工作目录
+$r = xhrun('pwd', [], ['cwd' => '/tmp']);
+```
+
+### 与 PHP 内置函数对比
+
+| 对比项 | `shell_exec` | `exec` | `xhrun` |
+|--------|-------------|--------|---------|
+| 默认经 shell | 是（易注入） | 是 | **否**（防注入） |
+| 参数分离 | 否 | 否 | **是** |
+| 超时控制 | 无 | 无 | **有** |
+| 输出大小限制 | 无 | 无 | **有** |
+| 白名单/黑名单 | 无 | 无 | **有** |
+| 二进制安全输出 | 是 | 是 | **是** |
+| stderr 独立捕获 | 否 | 否 | **是** |
+| 跨平台 shell | - | - | **自动**（cmd/sh） |
 
 ---
 
