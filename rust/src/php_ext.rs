@@ -800,17 +800,28 @@ impl PhpXhRequest {
         let request = self.request.clone();
         let max_response_size = XhCurlManager::global().config().max_response_size;
 
+        // 预取 id 和 user_data（request 会被 move 进 async 块）
+        let id = request
+            .get_id()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| request.get_url().to_string());
+        let user_data = request.get_user_data().map(|s| s.to_string());
+
+        let id_for_task = id.clone();
         let result = global_runtime()
             .block_on(async move {
-                let request_id = request
-                    .get_id()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| request.get_url().to_string());
-                XhMulti::execute_single(client, request, request_id, None, max_response_size).await
+                XhMulti::execute_single(client, request, id_for_task, None, max_response_size).await
             })
             .map_err(|e| e.to_string())?;
 
-        Ok(response_to_php_array(&result))
+        // response_to_php_array 仅填充响应字段（status/body/headers/...），
+        // 需补充 id 和 user_data 以与其他 API（await/gather/multi/threadpool）返回字段一致。
+        let mut ht = response_to_php_array(&result);
+        let _ = ht.insert("id", id);
+        if let Some(ud) = user_data {
+            let _ = ht.insert("user_data", ud);
+        }
+        Ok(ht)
     }
 }
 
