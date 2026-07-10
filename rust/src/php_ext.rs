@@ -56,22 +56,20 @@ fn sapi_is_cli() -> bool {
 /// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
 ///
 /// # 代理配置失败处理
-/// 若全局代理地址无效（`create_client_builder` 返回错误），
-/// 回退到不设代理的默认客户端并在 stderr 打印警告，
-/// 而非 panic 导致 PHP 进程 abort（更符合 PHP 扩展的容错预期）。
+/// 若全局代理地址无效（`create_client` 返回错误），直接 panic。
+/// 理由：
+/// 1. 代理通常是安全/隐私相关配置，静默降级到无代理会让用户误以为
+///    请求走了代理，实际暴露真实 IP，这比直接报错更危险。
+/// 2. OnceLock 只初始化一次，降级后整个进程生命周期内不会重试，
+///    用户无法发现配置问题。
+/// 3. 与 `create_client_builder` 的设计一致：代理无效必须明确报错。
+/// 4. panic 只在首次调用 `global_client()` 时发生，用户修正配置后即可恢复。
 pub(crate) fn global_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        match XhCurlManager::global().create_client() {
-            Ok(client) => client,
-            Err(e) => {
-                // 代理等配置无效：回退到默认客户端，避免 panic 导致进程 abort
-                eprintln!("[XHCurl] 全局客户端初始化失败，回退到默认配置: {}", e);
-                reqwest::Client::builder()
-                    .build()
-                    .expect("创建回退 reqwest 客户端失败")
-            }
-        }
+        XhCurlManager::global()
+            .create_client()
+            .expect("全局 reqwest 客户端初始化失败（请检查 proxy/SSL 等全局配置）")
     })
 }
 
