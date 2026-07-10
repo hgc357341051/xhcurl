@@ -107,6 +107,32 @@ pub(crate) fn global_runtime() -> &'static tokio::runtime::Runtime {
 #[php(name = "XHCurl")]
 pub struct PhpXhCurl;
 
+/// 从 PHP 数组中提取 XHRequest 对象，转为 Vec<XhRequest>
+///
+/// 供 coroutine_gather / coroutine_each 共用，消除重复解析逻辑。
+fn extract_requests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> {
+    use ext_php_rs::convert::FromZval;
+
+    let mut req_list: Vec<XhRequest> = Vec::new();
+    let len = requests.len();
+    let mut iter = requests.iter();
+    for _ in 0..len {
+        match iter.next() {
+            Some((_key, val)) => {
+                // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
+                let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
+                    <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
+                match class_obj {
+                    Some(obj) => req_list.push(obj.request.clone()),
+                    None => return Err("数组元素不是 XHRequest 对象".to_string()),
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(req_list)
+}
+
 /// PHP XHCurl 类的方法实现
 #[php_impl]
 impl PhpXhCurl {
@@ -306,29 +332,19 @@ impl PhpXhCurl {
     /// public static XHCurl::gather(array $requests): array
     #[php(name = "gather")]
     pub fn coroutine_gather(requests: &ZendHashTable) -> Result<ZBox<ZendHashTable>, String> {
-        use ext_php_rs::convert::FromZval;
-        use ext_php_rs::types::ZendClassObject;
-
-        // 从 PHP 数组中提取 XHRequest 对象，转为 Vec<XhRequest>
-        let mut req_list: Vec<XhRequest> = Vec::new();
-        let len = requests.len();
-        let mut iter = requests.iter();
-        for _ in 0..len {
-            match iter.next() {
-                Some((_key, val)) => {
-                    // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
-                    let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
-                        <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
-                    match class_obj {
-                        Some(obj) => req_list.push(obj.request.clone()),
-                        None => return Err("数组元素不是 XHRequest 对象".to_string()),
-                    }
-                }
-                None => break,
-            }
-        }
-
+        let req_list = extract_requests(requests)?;
         crate::fiber::fiber_gather(req_list).map_err(|e| e.to_string())
+    }
+
+    /// XHCurl::each - 流式回调并发执行
+    /// 每完成一个请求立即调用回调，不累积全部结果（内存恒定）
+    ///
+    /// # PHP 签名
+    /// public static XHCurl::each(array $requests, callable $callback): int
+    #[php(name = "each")]
+    pub fn coroutine_each(requests: &ZendHashTable, callback: &Zval) -> Result<i64, String> {
+        let req_list = extract_requests(requests)?;
+        crate::fiber::fiber_each(req_list, callback)
     }
 }
 
@@ -1244,8 +1260,10 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         // 有响应时，elapsed_ms/error 由 fill_response_fields 统一写入，避免双重插入
         fill_response_fields(&mut response_ht, resp);
     } else {
-        // 无响应（请求失败）时，补充 elapsed_ms/error，确保失败路径字段完整
+        // 无响应（请求失败）时，补充 elapsed_ms/error/body，确保失败路径字段完整
+        // body 插入空字符串，与 fill_response_fields 的成功路径保持字段一致
         let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+        let _ = response_ht.insert("body", String::new());
         if let Some(err) = &result.error {
             let _ = response_ht.insert("error", err.clone());
         }

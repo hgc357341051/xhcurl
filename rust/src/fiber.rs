@@ -282,6 +282,109 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
 }
 
 // +----------------------------------------------------------------------+
+// | 协程 API：each（流式回调）                                            |
+// +----------------------------------------------------------------------+
+
+/// 并发发起多个 HTTP 请求，每完成一个就立即调用回调处理，不累积全部结果。
+///
+/// **PHP 签名**：`public static XHCurl::each(array $requests, callable $callback): int`
+///
+/// 与 `gather` 的区别：
+/// - gather：等全部完成，累积到数组一次性返回（内存随请求总数增长）
+/// - each：每完成一个立即调回调处理，不累积（内存恒定）
+///
+/// **回调签名**：`function(array $result): void`
+///
+/// **并行性**：与 gather 相同，请求在 tokio 上并行执行，结果按完成顺序交给回调。
+pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, String> {
+    let total = requests.len();
+    if total == 0 {
+        // 空请求列表：不 spawn 不 suspend，提前返回
+        return Ok(0);
+    }
+
+    // 1. 获取当前 Fiber
+    let get_current =
+        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
+    let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
+    if current_fiber.is_null() || !current_fiber.is_object() {
+        return Err("XHCurl::each 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
+    }
+
+    // 2. 校验用户回调（提前失败，避免 spawn 后才发现回调无效）
+    //    ZendCallable::new 借用 callback 的生命周期，在整个函数内可用
+    let callback_callable =
+        ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
+
+    // 3. spawn 所有 HTTP 请求到 tokio（并行执行）
+    //    使用 Semaphore 限制并发数，防止过多请求同时执行耗尽连接池/内存。
+    //    并发上限 = 请求数 与 64 的较小值（避免 10000 个请求同时 spawn）
+    let runtime = crate::php_ext::global_runtime();
+    let client = crate::php_ext::global_client().clone();
+    let max_concurrency = total.min(64);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
+
+    for request in requests {
+        let task_id = next_task_id();
+        let result_tx = SCHEDULER.with(|s| {
+            s.borrow()
+                .as_ref()
+                .ok_or_else(|| "调度器未初始化：each 必须在 run() 内调用".to_string())
+                .map(|sc| sc.result_tx.clone())
+        })?;
+
+        let client_clone = client.clone();
+        let request_clone = request;
+        let sem_clone = std::sync::Arc::clone(&semaphore);
+        runtime.spawn(async move {
+            // 获取并发许可（_permit 在作用域结束时自动释放）
+            // acquire 失败说明信号量已关闭，必须发送错误结果而非继续执行
+            let _permit = match sem_clone.acquire().await {
+                Ok(p) => p,
+                Err(_) => {
+                    // 信号量获取失败（已关闭），发送错误结果而非继续执行
+                    let result = RequestResult::error(
+                        task_id.to_string(),
+                        None,
+                        "并发信号量获取失败".to_string(),
+                        std::time::Duration::from_secs(0),
+                    );
+                    let _ = result_tx.send(TaskMessage { task_id, result });
+                    return;
+                }
+            };
+            let result = execute_http_task(client_clone, request_clone, task_id).await;
+            let _ = result_tx.send(TaskMessage { task_id, result });
+        });
+
+        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
+        SCHEDULER.with(|s| {
+            s.borrow_mut()
+                .as_mut()
+                .expect("调度器未初始化")
+                .pending
+                .insert(task_id, current_fiber.shallow_clone());
+        });
+    }
+
+    // 4. 循环挂起 N 次，每收到一个结果就调用回调
+    //    事件泵收到结果 → 查 pending 表 → resume 当前 Fiber → Fiber 从 suspend 返回
+    //    与 gather 不同：此处不累积结果，而是立即交给回调处理后丢弃（内存恒定）
+    let suspend = ZendCallable::try_from_name("Fiber::suspend").map_err(|e| e.to_string())?;
+
+    for _ in 0..total {
+        let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
+        // 调用用户回调处理当前结果，回调签名：function(array $result): void
+        callback_callable
+            .try_call(vec![&suspended_value as &dyn IntoZvalDyn])
+            .map_err(|e| format!("回调执行失败: {}", e))?;
+        // suspended_value 在此离开作用域 → 释放（不存任何地方，内存恒定）
+    }
+
+    Ok(total as i64)
+}
+
+// +----------------------------------------------------------------------+
 // | 协程 API：run（事件泵）                                               |
 // +----------------------------------------------------------------------+
 
