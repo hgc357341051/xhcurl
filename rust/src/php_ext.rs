@@ -274,63 +274,34 @@ impl PhpXhCurl {
     /// 一次性将所有请求提交到 tokio 工作线程并行执行，
     /// 返回结果按**完成顺序**排列（非请求提交顺序）。
     ///
-    /// 注意：单次 gather 请求数量上限为 MAX_REQUESTS_PER_BATCH（10000），
-    /// 超过会报错（防止内存溢出）。处理更大量请求数请用 each()。
-    ///
     /// # PHP 签名
     /// public static XHCurl::gather(array $requests): array
     #[php(name = "gather")]
     pub fn coroutine_gather(requests: &ZendHashTable) -> Result<ZBox<ZendHashTable>, String> {
-        let req_list = extract_xhrequests(requests)?;
+        use ext_php_rs::convert::FromZval;
+        use ext_php_rs::types::ZendClassObject;
+
+        // 从 PHP 数组中提取 XHRequest 对象，转为 Vec<XhRequest>
+        let mut req_list: Vec<XhRequest> = Vec::new();
+        let len = requests.len();
+        let mut iter = requests.iter();
+        for _ in 0..len {
+            match iter.next() {
+                Some((_key, val)) => {
+                    // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
+                    let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
+                        <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
+                    match class_obj {
+                        Some(obj) => req_list.push(obj.request.clone()),
+                        None => return Err("数组元素不是 XHRequest 对象".to_string()),
+                    }
+                }
+                None => break,
+            }
+        }
+
         crate::fiber::fiber_gather(req_list).map_err(|e| e.to_string())
     }
-
-    /// 并发发起多个 HTTP 请求，每完成一个就调用回调处理（不累积全部结果）
-    ///
-    /// 与 gather() 的核心区别：逐个把结果传给回调，回调返回后结果立即释放，
-    /// 内存仅与并发窗口(64)相关，与 N 无关，恒定。适合 10万+ 请求场景：
-    /// 处理完即丢弃（写库/落盘），不持有全部结果，避免 OOM。
-    ///
-    /// 必须在 XHCurl::run() 的回调内、且在 Fiber 上下文中调用。
-    ///
-    /// # PHP 签名
-    /// public static XHCurl::each(array $requests, callable $callback): void
-    ///
-    /// # 回调签名
-    /// $callback(array $result): void
-    #[php(name = "each")]
-    pub fn coroutine_each(
-        requests: &ZendHashTable,
-        callback: &Zval,
-    ) -> Result<(), String> {
-        let req_list = extract_xhrequests(requests)?;
-        crate::fiber::fiber_each(req_list, callback).map_err(|e| e.to_string())
-    }
-}
-
-/// 从 PHP 数组中提取 XHRequest 对象转为 Vec<XhRequest>。
-/// 供 coroutine_gather / coroutine_each 共用，确保元素校验逻辑一致。
-fn extract_xhrequests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> {
-    use ext_php_rs::convert::FromZval;
-    use ext_php_rs::types::ZendClassObject;
-
-    let mut req_list: Vec<XhRequest> = Vec::new();
-    let len = requests.len();
-    let mut iter = requests.iter();
-    for _ in 0..len {
-        match iter.next() {
-            Some((_key, val)) => {
-                let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
-                    <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
-                match class_obj {
-                    Some(obj) => req_list.push(obj.request.clone()),
-                    None => return Err("数组元素不是 XHRequest 对象".to_string()),
-                }
-            }
-            None => break,
-        }
-    }
-    Ok(req_list)
 }
 
 // +----------------------------------------------------------------------+

@@ -32,7 +32,6 @@ use ext_php_rs::boxed::ZBox;
 use ext_php_rs::convert::{FromZval, IntoZvalDyn};
 use ext_php_rs::types::{ZendCallable, ZendHashTable, Zval};
 
-use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::RequestResult;
 use crate::php_ext::for_each_kv;
 use crate::request::XhRequest;
@@ -207,15 +206,6 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
         return Ok(ZendHashTable::new());
     }
 
-    // 安全检查：限制单次 gather 的请求数量，防止无限制累积导致内存溢出（DoS）。
-    // 与 XhMulti::add 的上限保持一致。需要处理更多请求请用 each()（逐个回调、内存恒定）。
-    if total > MAX_REQUESTS_PER_BATCH {
-        return Err(format!(
-            "gather 请求数量 {} 超过上限 {}（请改用 XHCurl::each 逐个处理）",
-            total, MAX_REQUESTS_PER_BATCH
-        ));
-    }
-
     // 1. 获取当前 Fiber
     let get_current =
         ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
@@ -275,99 +265,6 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
     }
 
     Ok(results)
-}
-
-// +----------------------------------------------------------------------+
-// | 协程 API：each（逐个回调、内存恒定，大数据量安全）                    |
-// +----------------------------------------------------------------------+
-
-/// 并发发起多个 HTTP 请求，每完成一个就调用用户回调处理，**不累积全部结果**。
-///
-/// **PHP 签名**：`public static XHCurl::each(array $requests, callable $callback): void`
-///
-/// # 与 gather 的区别（核心安全/性能差异）
-/// - `gather`：把所有结果累积到一个数组返回 → 大 N 时内存 O(N) 线性增长 → **OOM 风险**
-/// - `each`：每完成一个就把结果传给 `$callback`，回调返回后结果立即释放
-///   → 内存仅与并发窗口(64)相关，**与 N 无关，恒定**
-///
-/// # 适用场景
-/// - 10万+ 请求：处理完即丢弃（写库/落盘），不持有全部结果
-/// - 流式消费：边收边处理，不等全部完成
-///
-/// # 并发模型
-/// 与 gather 一致：信号量限并发=64，但允许提交任意数量请求
-/// （不设 MAX_REQUESTS_PER_BATCH 上限，因为 each 本身就是为大数据量设计）。
-///
-/// # 回调签名
-/// `$callback(array $result): void`
-/// `$result` 字段与 gather/execute 返回的每个元素一致
-/// （id/success/elapsed_ms/user_data/status/body/headers/url 等）。
-///
-/// 必须在 XHCurl::run() 内调用。
-pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<(), String> {
-    let total = requests.len();
-    if total == 0 {
-        return Ok(());
-    }
-
-    // 1. 获取当前 Fiber（必须在 run() 内）
-    let get_current =
-        ZendCallable::try_from_name("Fiber::getCurrent").map_err(|e| e.to_string())?;
-    let current_fiber = get_current.try_call(vec![]).map_err(|e| e.to_string())?;
-    if current_fiber.is_null() || !current_fiber.is_object() {
-        return Err("XHCurl::each 必须在 Fiber 内部调用（请用 XHCurl::run 包裹）".to_string());
-    }
-
-    // 2. 将用户回调转为 ZendCallable（循环内反复调用）
-    let callback = ZendCallable::try_from(callback).map_err(|e| e.to_string())?;
-
-    // 3. spawn 所有请求到 tokio（与 gather 一致：信号量限并发=64）
-    let runtime = crate::php_ext::global_runtime();
-    let client = crate::php_ext::global_client().clone();
-    let max_concurrency = total.min(64);
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
-
-    for request in requests {
-        let task_id = next_task_id();
-        let result_tx = SCHEDULER.with(|s| {
-            s.borrow()
-                .as_ref()
-                .ok_or_else(|| "调度器未初始化：each 必须在 run() 内调用".to_string())
-                .map(|sc| sc.result_tx.clone())
-        })?;
-
-        let client_clone = client.clone();
-        let request_clone = request;
-        let sem_clone = std::sync::Arc::clone(&semaphore);
-        runtime.spawn(async move {
-            let _permit = sem_clone.acquire().await.ok();
-            let result = execute_http_task(client_clone, request_clone, task_id).await;
-            let _ = result_tx.send(TaskMessage { task_id, result });
-        });
-
-        // 为每个 task_id 注册当前 Fiber（与 gather 一致）
-        SCHEDULER.with(|s| {
-            s.borrow_mut()
-                .as_mut()
-                .expect("调度器未初始化")
-                .pending
-                .insert(task_id, current_fiber.shallow_clone());
-        });
-    }
-
-    // 4. 循环挂起 N 次：每次 resume 拿到一个结果 → 调回调 → 释放
-    //    关键：结果不累积，suspended_value 在循环体结束时 drop，内存恒定
-    let suspend = ZendCallable::try_from_name("Fiber::suspend").map_err(|e| e.to_string())?;
-    for _ in 0..total {
-        let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
-        // 把结果传给用户回调，处理完即释放（不持有全部结果）
-        callback
-            .try_call(vec![&suspended_value as &dyn IntoZvalDyn])
-            .map_err(|e| e.to_string())?;
-        // suspended_value 在此 drop → 内存释放
-    }
-
-    Ok(())
 }
 
 // +----------------------------------------------------------------------+
