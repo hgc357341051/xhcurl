@@ -16,7 +16,6 @@
 // |   主线程 (PHP) <──结果回调── [结果队列] <── 工作线程                    |
 // +----------------------------------------------------------------------+
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -311,8 +310,7 @@ impl XhThreadPool {
     }
 
     /// 执行单个 HTTP 请求
-    /// 使用 from_parts 正确构建 XhResponse，保留完整的 status/url/headers 信息
-    /// 使用流式读取响应体，带 max_response_size 限制，防止内存溢出
+    /// 委托给 `crate::executor::execute_request`，与 XhMulti、fiber 共用同一实现
     async fn execute_request(
         client: reqwest::Client,
         request: XhRequest,
@@ -320,125 +318,14 @@ impl XhThreadPool {
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
         max_response_size: usize,
     ) -> XhCurlResult<XhResponse> {
-        let start = Instant::now();
-
-        // 转换请求
-        let req_builder = request.to_reqwest(&client)?;
-
-        // 发送请求
-        let response = req_builder.send().await?;
-
-        // 获取状态码
-        let status = response.status().as_u16();
-
-        // 收集响应头
-        let mut headers_map = HashMap::new();
-        for (name, value) in response.headers().iter() {
-            if let Ok(value_str) = value.to_str() {
-                headers_map.insert(name.as_str().to_string(), value_str.to_string());
-            }
-        }
-
-        // 发送 Headers 事件（有界 channel，使用 await 实现背压）
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((
-                    request_id.clone(),
-                    StreamEvent::Headers {
-                        status,
-                        headers: headers_map.clone(),
-                    },
-                ))
-                .await;
-        }
-
-        // 获取远程地址
-        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
-
-        // 获取 HTTP 版本
-        let version = match response.version() {
-            reqwest::Version::HTTP_09 => Some("HTTP/0.9".to_string()),
-            reqwest::Version::HTTP_10 => Some("HTTP/1.0".to_string()),
-            reqwest::Version::HTTP_11 => Some("HTTP/1.1".to_string()),
-            reqwest::Version::HTTP_2 => Some("HTTP/2".to_string()),
-            reqwest::Version::HTTP_3 => Some("HTTP/3".to_string()),
-            _ => None,
-        };
-
-        // 获取最终 URL
-        let final_url = response.url().to_string();
-
-        // 使用流式读取响应体，带大小限制（与 XhMulti 保持一致）
-        // 防止恶意服务器返回超大响应导致内存溢出
-        let mut body_data = Vec::new();
-        let mut body_size: usize = 0;
-        let mut size_exceeded = false;
-
-        let mut stream = response;
-        while let Some(chunk) = stream.chunk().await? {
-            let chunk_len = chunk.len();
-
-            // 使用 checked_add 防止整数溢出
-            let new_size = body_size
-                .checked_add(chunk_len)
-                .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
-
-            if new_size > max_response_size {
-                // 超过限制：写入不超过 max_response_size 的部分后停止读取
-                let remaining = max_response_size - body_size;
-                if remaining > 0 {
-                    body_data.extend_from_slice(&chunk[..remaining]);
-                }
-                body_size = max_response_size;
-                size_exceeded = true;
-                break;
-            }
-
-            body_data.extend_from_slice(&chunk);
-            body_size = new_size;
-        }
-
-        // 发送 Chunk 事件（有界 channel，使用 await 实现背压）
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((
-                    request_id.clone(),
-                    StreamEvent::Chunk {
-                        data: body_data.clone(),
-                    },
-                ))
-                .await;
-        }
-
-        let elapsed = start.elapsed();
-
-        // 如果响应体超过大小限制，返回错误（与 XhMulti 行为一致）
-        if size_exceeded {
-            return Err(XhCurlError::Memory(format!(
-                "响应体大小超过限制 {} 字节",
-                max_response_size
-            )));
-        }
-
-        // 使用 from_parts 正确构建 XhResponse
-        let xh_response = XhResponse::from_parts(
-            status,
-            final_url,
-            headers_map,
-            body_data,
-            elapsed,
-            remote_addr,
-            version,
-        );
-
-        // 发送 Complete 事件（有界 channel，使用 await 实现背压）
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((request_id, StreamEvent::Complete { elapsed, body_size }))
-                .await;
-        }
-
-        Ok(xh_response)
+        crate::executor::execute_request(
+            client,
+            request,
+            request_id,
+            stream_tx,
+            max_response_size,
+        )
+        .await
     }
 
     /// 提交单个请求到线程池

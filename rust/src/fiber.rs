@@ -434,12 +434,14 @@ async fn execute_http_task(
     let user_data = request.get_user_data().map(|s| s.to_string());
 
     // 执行请求（复用 XhMulti::execute_single，不启用流式回调）
+    // 从全局配置读取 max_response_size，与 XHMulti/XHThreadPool 保持一致
+    let max_response_size = crate::curl::XhCurlManager::global().config().max_response_size;
     match crate::multi::XhMulti::execute_single(
         client,
         request,
         request_id.clone(),
         None,
-        10 * 1024 * 1024, // 10MB 默认限制
+        max_response_size,
     )
     .await
     {

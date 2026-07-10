@@ -57,65 +57,10 @@ pub struct XhResponse {
 }
 
 impl XhResponse {
-    /// 从 reqwest 响应创建 XhResponse
+    /// 从已解析的响应元数据创建 XhResponse
     ///
-    /// # 参数
-    /// - `response`: reqwest 的响应对象
-    /// - `elapsed`: 请求耗时
-    ///
-    /// # 返回
-    /// 转换后的 XhResponse（响应体尚未读取）
-    pub async fn from_reqwest(
-        response: reqwest::Response,
-        elapsed: Duration,
-    ) -> XhCurlResult<Self> {
-        // 获取状态码
-        let status = response.status().as_u16();
-
-        // 获取最终 URL（可能因重定向而变化）
-        let final_url = response.url().to_string();
-
-        // 解析响应头
-        let headers = HeaderManager::new();
-        for (name, value) in response.headers().iter() {
-            if let Ok(value_str) = value.to_str() {
-                let _ = headers.set(name.as_str(), value_str);
-            }
-        }
-
-        // 获取远程地址
-        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
-
-        // 获取 HTTP 版本
-        let version = match response.version() {
-            reqwest::Version::HTTP_09 => Some("HTTP/0.9".to_string()),
-            reqwest::Version::HTTP_10 => Some("HTTP/1.0".to_string()),
-            reqwest::Version::HTTP_11 => Some("HTTP/1.1".to_string()),
-            reqwest::Version::HTTP_2 => Some("HTTP/2".to_string()),
-            reqwest::Version::HTTP_3 => Some("HTTP/3".to_string()),
-            _ => None,
-        };
-
-        // 判断是否成功（2xx）
-        let is_success = response.status().is_success();
-
-        Ok(Self {
-            status,
-            headers,
-            body: None, // 懒加载：暂不读取响应体
-            final_url,
-            elapsed,
-            body_size: 0,
-            remote_addr,
-            version,
-            is_success,
-            error: None,
-        })
-    }
-
-    /// 从已解析的响应元数据创建 XhResponse（用于流式读取后构建）
-    /// 当 reqwest::Response 已被消费（chunk() 流式读取）时，
-    /// 无法再调用 from_reqwest，使用此方法手动构建
+    /// 流式读取（chunk()）消费 reqwest::Response 后，无法再调用其 API，
+    /// 使用此方法用已收集的元数据手动构建 XhResponse。
     ///
     /// # 参数
     /// - `status`: HTTP 状态码
@@ -179,29 +124,6 @@ impl XhResponse {
             is_success: false,
             error: Some(error),
         }
-    }
-
-    /// 读取响应体（懒加载触发）
-    /// 消费 reqwest::Response 并将完整响应体读入内存
-    ///
-    /// # 注意
-    /// 对于大响应体，建议使用流式读取（multi.rs 中的 chunk() 方式）
-    ///
-    /// # 参数
-    /// - `response`: reqwest 响应对象（被消费）
-    ///
-    /// # 返回
-    /// - `Ok(())`: 读取成功，可通过 `body()` 获取数据
-    /// - `Err`: 读取失败
-    pub async fn read_body(&mut self, response: reqwest::Response) -> XhCurlResult<()> {
-        if self.body.is_none() {
-            // 读取完整响应体（bytes() 消费 response）
-            let body = response.bytes().await.map_err(XhCurlError::from)?;
-            self.body_size = body.len();
-            self.body = Some(body.to_vec());
-        }
-
-        Ok(())
     }
 
     /// 直接设置响应体数据（用于流式读取后设置）

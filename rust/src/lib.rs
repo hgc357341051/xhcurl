@@ -67,6 +67,10 @@ pub mod multi;
 /// 基于 tokio + channel 实现真正的多线程并发
 pub mod threadpool;
 
+/// 单请求执行器（公共逻辑）
+/// 抽取 multi/threadpool 共用的请求执行逻辑，消除重复代码
+pub mod executor;
+
 /// PHP Fiber 协程桥接模块
 /// 实现 PHP 端协程式 await 异步 HTTP 请求
 #[cfg(feature = "php")]

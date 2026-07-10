@@ -369,8 +369,13 @@ impl XhMulti {
             let handle: JoinHandle<()> = tokio::spawn(async move {
                 // 如果有并发限制，获取 Semaphore 许可
                 // _permit 在作用域结束时自动释放
+                // Semaphore 关闭时 acquire 返回 Err（AcquireError），
+                // 此处优雅处理而非 expect panic
                 let _permit = if let Some(sem) = &semaphore {
-                    Some(sem.acquire().await.expect("Semaphore 获取失败"))
+                    match sem.acquire().await {
+                        Ok(p) => Some(p),
+                        Err(_) => None, // Semaphore 已关闭，跳过并发限制
+                    }
                 } else {
                     None
                 };
@@ -430,6 +435,9 @@ impl XhMulti {
     /// 执行单个请求
     /// 使用流式读取 + max_response_size 限制，防止内存溢出
     ///
+    /// 实际逻辑委托给 `crate::executor::execute_request`，
+    /// 与 `XhThreadPool::execute_request`、`fiber::execute_http_task` 共用同一实现。
+    ///
     /// # 参数
     /// - `client`: reqwest 客户端
     /// - `request`: 请求构建器
@@ -447,132 +455,14 @@ impl XhMulti {
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
         max_response_size: usize,
     ) -> XhCurlResult<XhResponse> {
-        // 记录开始时间
-        let start = Instant::now();
-
-        // 将 XhRequest 转换为 reqwest 请求
-        let req_builder = request.to_reqwest(&client)?;
-
-        // 发送请求
-        let response = req_builder.send().await?;
-
-        // 获取状态码和响应头
-        let status = response.status().as_u16();
-
-        // 收集响应头
-        let mut headers_map = HashMap::new();
-        for (name, value) in response.headers().iter() {
-            if let Ok(value_str) = value.to_str() {
-                headers_map.insert(name.as_str().to_string(), value_str.to_string());
-            }
-        }
-
-        // 如果启用了流式回调，发送 Headers 事件
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((
-                    request_id.clone(),
-                    StreamEvent::Headers {
-                        status,
-                        headers: headers_map.clone(),
-                    },
-                ))
-                .await;
-        }
-
-        // 获取远程地址
-        let remote_addr = response.remote_addr().map(|addr| addr.to_string());
-
-        // 获取 HTTP 版本
-        let version = match response.version() {
-            reqwest::Version::HTTP_09 => Some("HTTP/0.9".to_string()),
-            reqwest::Version::HTTP_10 => Some("HTTP/1.0".to_string()),
-            reqwest::Version::HTTP_11 => Some("HTTP/1.1".to_string()),
-            reqwest::Version::HTTP_2 => Some("HTTP/2".to_string()),
-            reqwest::Version::HTTP_3 => Some("HTTP/3".to_string()),
-            _ => None,
-        };
-
-        // 获取最终 URL（可能因重定向而变化）
-        let final_url = response.url().to_string();
-
-        // 使用流式读取响应体，带大小限制
-        // 修复：不再使用 response.bytes().await（无大小限制）
-        // 改为逐块读取，累计检查大小
-        let mut body_data = Vec::new();
-        let mut body_size: usize = 0;
-        let mut size_exceeded = false;
-
-        // 使用 chunk() 流式读取
-        let mut stream = response;
-        while let Some(chunk) = stream.chunk().await? {
-            let chunk_len = chunk.len();
-
-            // 检查累计大小是否超过限制
-            // 使用 checked_add 防止整数溢出
-            let new_size = body_size
-                .checked_add(chunk_len)
-                .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
-
-            if new_size > max_response_size {
-                // 超过限制：写入部分数据（不超过 max_response_size 的部分）
-                let remaining = max_response_size - body_size;
-                if remaining > 0 {
-                    body_data.extend_from_slice(&chunk[..remaining]);
-                }
-                body_size = max_response_size;
-                size_exceeded = true;
-                break; // 停止读取
-            }
-
-            // 未超限：写入完整 chunk
-            body_data.extend_from_slice(&chunk);
-            body_size = new_size;
-        }
-
-        // 如果启用了流式回调，发送 Chunk 事件
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((
-                    request_id.clone(),
-                    StreamEvent::Chunk {
-                        data: body_data.clone(),
-                    },
-                ))
-                .await;
-        }
-
-        // 计算耗时
-        let elapsed = start.elapsed();
-
-        // 如果响应体超过大小限制，返回错误
-        if size_exceeded {
-            return Err(XhCurlError::Memory(format!(
-                "响应体超过最大限制 {} 字节",
-                max_response_size
-            )));
-        }
-
-        // 使用 from_parts 正确构建 XhResponse
-        // 修复：原代码使用 from_error 后未设置 status/url/headers 等字段
-        let xh_response = XhResponse::from_parts(
-            status,
-            final_url,
-            headers_map,
-            body_data,
-            elapsed,
-            remote_addr,
-            version,
-        );
-
-        // 如果启用了流式回调，发送 Complete 事件
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((request_id, StreamEvent::Complete { elapsed, body_size }))
-                .await;
-        }
-
-        Ok(xh_response)
+        crate::executor::execute_request(
+            client,
+            request,
+            request_id,
+            stream_tx,
+            max_response_size,
+        )
+        .await
     }
 
     /// 获取待执行请求数量
