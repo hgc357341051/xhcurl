@@ -765,6 +765,26 @@ mod tests {
         assert!(error.error.is_some());
     }
 
+    /// 失败路径契约：`RequestResult::error()` 的 `response` 必为 `None`。
+    ///
+    /// `php_ext.rs::result_to_php_array` 依据 `response.is_none()` 判定进入失败分支，
+    /// 写入 `status => 0`（哨兵值）和 `body => ""`。本测试固化该数据契约，
+    /// 确保 `status: 0` 哨兵逻辑的前提条件不被意外破坏。
+    #[test]
+    fn test_error_result_response_none_ensures_status_zero_sentinel() {
+        let error = RequestResult::error(
+            "req-fail".to_string(),
+            None,
+            "DNS 解析失败".to_string(),
+            Duration::from_secs(2),
+        );
+        // 失败结果的 response 必为 None —— result_to_php_array 据此插入 status: 0
+        assert!(error.response.is_none(), "失败结果 response 必须为 None");
+        assert!(!error.is_success());
+        assert!(error.error.is_some());
+        assert_eq!(error.id, "req-fail");
+    }
+
     /// add 精确边界：填充至 MAX-1 后第 MAX 个成功，第 MAX+1 个失败。
     /// add 使用 `len() >= MAX` 判定（含等号），故达到 MAX 时下一次 add 必失败。
     #[test]

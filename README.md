@@ -43,7 +43,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 | **全局连接复用** | reqwest Client 全局单例，TCP keep-alive + TLS 会话缓存 |
 | **请求级配置覆盖** | `verifySsl`/`proxy`/`connectTimeout`/重定向可按请求覆盖全局配置 |
 | **自适应运行时** | CLI 模式多线程运行时（M:N 并行），FPM 模式单线程运行时（协作式并发） |
-| **用户自定义数据** | `setUserData()` 携带任意结构化数据，随结果原样回传 |
+| **用户自定义数据** | `setUserData()`（别名 `userData()`）携带任意结构化数据，随结果原样回传 |
 | **响应体大小限制** | 流式读取 + `max_response_size` 防止内存溢出 |
 | **安全 Shell 执行** | `xhrun()` 函数替代 `shell_exec`/`exec`/`system`，默认不经 shell 防注入 |
 
@@ -255,7 +255,7 @@ for ($i = 0; $i < 100; $i++) {
     $requests[] = XHCurl::createRequest("https://httpbin.org/get?id={$i}")
         ->get()
         ->timeout(10)
-        ->setUserData(['task_index' => $i, 'tag' => "batch-{$i}"]);
+        ->userData(['task_index' => $i, 'tag' => "batch-{$i}"]);
 }
 
 // gather 并发执行所有请求
@@ -291,7 +291,7 @@ for ($i = 0; $i < 100; $i++) {
     $requests[] = XHCurl::createRequest("https://httpbin.org/get?id={$i}")
         ->get()
         ->timeout(10)
-        ->setUserData(['task_index' => $i]);
+        ->userData(['task_index' => $i]);
 }
 
 // gather：累积所有结果后返回（内存中持有 100 个响应体）
@@ -348,13 +348,13 @@ XHCurl::run(function() {
 
 ### 用户自定义数据传递
 
-使用 `setUserData()` 携带任意结构化数据（数组/对象），随请求原样回传到结果中：
+使用 `userData()`（别名 `setUserData()`）携带任意结构化数据（数组/对象），随请求原样回传到结果中：
 
 ```php
 <?php
 $request = XHCurl::createRequest('https://api.example.com/data')
     ->get()
-    ->setUserData([
+    ->userData([
         'task_id'   => 42,
         'callback'  => 'process_user',
         'context'   => ['user_id' => 1001, 'role' => 'admin'],
@@ -489,8 +489,8 @@ XHCurl::setConfig([
 | `followRedirects(bool $follow)` | 跟随重定向 |
 | `maxRedirects(int $max)` | 最大重定向次数 |
 | `range(string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`） |
-| `setId(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
-| `setUserData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
+| `setId(string $id)` / `id(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
+| `setUserData(array $data)` / `userData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
 | `getUrl()` / `getMethod()` | 获取 URL / 方法 |
 
 > **请求级配置覆盖**：`verifySsl()`/`proxy()`/`connectTimeout()`/`followRedirects()`/
@@ -505,7 +505,7 @@ XHCurl::setConfig([
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | string | 请求 ID（未设置 `setId()` 时默认为请求 URL，所有执行路径统一） |
+| `id` | string | 请求 ID（未设置 `setId()`/`id()` 时默认为请求 URL，所有执行路径统一） |
 | `success` | bool | 是否成功 |
 | `status` | int | HTTP 状态码 |
 | `body` | string | 响应体（**二进制安全**，保留原始字节） |
@@ -516,7 +516,7 @@ XHCurl::setConfig([
 | `remote_addr` | string | 远程服务器地址（可选） |
 | `version` | string | HTTP 协议版本（可选，如 `HTTP/1.1`） |
 | `error` | string | 错误信息（失败时，可选） |
-| `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()` 时） |
+| `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()`/`userData()` 时） |
 
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
 > 超出会在执行前拒绝（避免先克隆再拒绝导致 OOM）。
@@ -527,7 +527,7 @@ XHCurl::setConfig([
 
 | 字段 | 失败路径取值 | 说明 |
 |------|-------------|------|
-| `id` | 始终存在 | 与成功路径一致（未设 `setId()` 时为请求 URL） |
+| `id` | 始终存在 | 与成功路径一致（未设 `setId()`/`id()` 时为请求 URL） |
 | `success` | `false` | 固定 |
 | `status` | `0` | **哨兵值**，不是真实 HTTP 状态码（无响应到达时无状态码可言） |
 | `body` | `""`（空字符串） | 无响应体 |
@@ -538,7 +538,7 @@ XHCurl::setConfig([
 | `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
-| `user_data` | 设置了 `setUserData()` 时存在 | 与成功路径一致 |
+| `user_data` | 设置了 `setUserData()`/`userData()` 时存在 | 与成功路径一致 |
 
 > **判断成败只看 `success`**：不要用 `status === 0` 判断失败——某些边缘场景下成功路径的
 > 状态码也可能为 0（如 HTTP 0xx），且失败路径 `status` 恒为 0 是约定哨兵值，并非 HTTP 规范。

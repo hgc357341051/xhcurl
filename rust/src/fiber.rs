@@ -675,7 +675,7 @@ fn fiber_is_terminated(fiber: &Zval) -> Result<bool, String> {
 async fn execute_http_task(
     client: reqwest::Client,
     request: XhRequest,
-    task_id: u64,
+    _task_id: u64,
 ) -> RequestResult {
     let start = std::time::Instant::now();
     let request_id = request

@@ -6,6 +6,62 @@
 ## [Unreleased]
 
 
+## [1.0.6] - 2026-07-11
+
+本版本从**使用者视角**全面审查并优化代码与文档，聚焦链式调用体验、API 命名一致性、
+配置字段实际生效、失败路径字段完整性与文档对齐实现。无破坏性变更。
+
+### 修复
+- **fiber_each 并发上限读取配置**：`fiber_each` 硬编码 `total.min(64)`，导致用户
+  `setConfig(['fiber_max_concurrency' => 128])` 后 `gather()` 生效但 `each()` 仍为 64。
+  统一读取 `GlobalConfig.fiber_max_concurrency`，与 `gather()` 行为一致。
+- **XhMulti 实现 Drop 防任务泄漏**：`XhMulti` 持有 `tasks: Vec<JoinHandle<()>>` 但无 Drop，
+  `spawn_all` 后 panic/早期返回时后台任务继续运行泄漏连接。新增 Drop 实现调用 `abort_tasks()`，
+  参考 `XhThreadPool` 的 Drop 模式。
+- **id 字段默认值统一为 URL**：fiber 路径 `await/gather/each` 默认 `"task-{N}"` 与同步 `execute()`
+  默认 URL 不一致。统一为未设置 `setId()` 时默认为请求 URL（与文档一致）。
+- **失败响应补 `status: 0` 字段**：请求失败时 `result_to_php_array` 不写 status 字段，用户访问
+  `$r['status']` 触发未定义索引警告。补 `status => 0`（哨兵值）和 `body => ""`，确保失败路径
+  字段集与成功路径一致。
+
+### 增强
+- **链式 setter 统一返回 `&mut Self`**：`method()`/`json()`/`form()`/`multipart()`/`setUserData()`
+  原返回 `Result<&mut Self, String>` 破坏链式调用（PHP 端需 `?` 或 `unwrap`）。改为失败时跳过本次
+  设置并返回 `&mut Self`，用户可写 `createRequest($url)->get()->json([...])->timeout(10)->execute()`。
+- **新增 `id()`/`userData()` 无前缀别名**：与其余 18 个无 `set` 前缀的链式 setter 风格一致。
+  保留 `setId`/`setUserData` 旧名为别名，向后兼容。
+- **负值处理统一为跳过**：`timeout`/`connectTimeout`/`maxRedirects`/`XHMulti::timeout`/
+  `maxConcurrency`/`maxResponseSize`/`XHThreadPool::__construct` 负值原 clamp 到 0（语义混乱），
+  统一为跳过本次设置（保留原值），与 `setConfig` 现有行为一致。
+- **http2_enabled 实际生效**：`GlobalConfig.http2_enabled` 字段存在但 `create_client_builder` 从不读取，
+  用户通过 `setConfig` 以为可配置实则无效。现 `false` 时显式 `.http1_only()` 禁用 HTTP/2，
+  `true` 时保持默认协商。
+
+### 重构
+- **移除 `use_multi_thread` 死字段**：`GlobalConfig.use_multi_thread` 仅 `default()` 和测试出现，
+  `set_config`/`get_config` 未暴露，`create_client_builder` 不读。运行时类型由 `sapi_is_cli()` 决定，
+  此字段无实际作用，直接删除。
+
+### 文档
+- **README 补全 4 个漏列方法**：`XHCurl::each()`、`XHMulti::timeout()`、`XHMulti::executeEach()`、
+  `XHThreadPool::executeEach()`，含签名、回调签名、返回值、示例。
+- **修正 FPM/CLI 能力表**：协程 `run/await/gather/each` 仅 CLI 可用（实现中 FPM 显式拒绝），
+  README 表格原声称 FPM 支持协程是错误的。协程章节顶部加 CLI-only 警告。
+- **响应字段表区分成功/失败路径**：新增"失败路径字段说明"小节，标注 `status` 失败时为 0（哨兵）、
+  `body` 为空字符串、`id` 未设置时默认为 URL（所有路径统一）。
+- **方法表补充双名格式**：`setId`/`id`、`setUserData`/`userData` 均列出，示例改用新名。
+- **故障排查新增 FPM 下调用 run() 报错条目**。
+
+### 测试
+- 新增 `test_error_result_response_none_ensures_status_zero_sentinel` 固化失败路径数据契约
+  （`response.is_none()` → `status: 0` 哨兵逻辑的前提条件）。
+- 请求级 Client 缓存测试改为 `contains_key()` 断言 + `unwrap_or_else` 处理中毒 Mutex，
+  确保并行测试安全（原 `len()` 断言在并行运行时因共享全局缓存而 flaky）。
+- PHP 运行时冒烟验证：链式调用无需 `?`、`id()`/`userData()` 新别名可用、旧名向后兼容、
+  `fiber_max_concurrency` 配置生效、`http2_enabled=false` 生效、负值跳过不 crash、
+  失败 `status=0`、`id` 默认为 URL 均通过。
+
+
 ## [1.0.5] - 2026-07-10
 
 本版本完成代码审计剩余 4 项优化（P2.4 / P2.5 / P3.11 / P3.16），无破坏性变更。

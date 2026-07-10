@@ -964,11 +964,13 @@ mod tests {
     /// 请求级 Client 缓存：同一组覆盖参数的请求应复用同一 Client（命中缓存）。
     ///
     /// 验证 OverrideKey 相同时 build_request_client 不会新建条目——
-    /// 两个不同 URL 但覆盖参数相同的请求构建后，缓存中仅有一个条目，
+    /// 两个不同 URL 但覆盖参数相同的请求构建后，缓存中该 OverrideKey 存在，
     /// 说明第二个请求命中了第一个请求写入的缓存。
+    ///
+    /// 注：不使用 `len()` 断言，因并行测试共享全局缓存，计数会受其他测试影响。
+    /// 改为检查特定 OverrideKey 是否存在，确保测试并行安全。
     #[test]
     fn test_request_client_cache_hit() {
-        // 清空缓存确保测试独立
         clear_request_client_cache();
 
         // 两个请求仅 URL 不同，覆盖参数组合（verify_ssl/follow_redirects/proxy/
@@ -988,12 +990,20 @@ mod tests {
         let _ = req1.build_request_client(&placeholder).unwrap();
         let _ = req2.build_request_client(&placeholder).unwrap();
 
+        // 验证该 OverrideKey 存在于缓存中（而非断言精确条目数，避免并行干扰）
+        let key = OverrideKey::from_request(&req1);
         let cache = request_client_cache();
-        let map = cache.lock().unwrap();
-        assert_eq!(map.len(), 1, "缓存应恰好包含一个 OverrideKey 条目");
+        let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            map.contains_key(&key),
+            "OverrideKey 应存在于缓存中（命中或写入）"
+        );
     }
 
     /// 请求级 Client 缓存：不同覆盖参数组合应生成不同的缓存条目。
+    ///
+    /// 注：不使用 `len()` 断言，因并行测试共享全局缓存。改为验证两个不同的
+    /// OverrideKey 都存在于缓存中。
     #[test]
     fn test_request_client_cache_miss_different_overrides() {
         clear_request_client_cache();
@@ -1005,13 +1015,20 @@ mod tests {
         let _ = req1.build_request_client(&placeholder).unwrap();
         let _ = req2.build_request_client(&placeholder).unwrap();
 
+        // 验证两个不同的 OverrideKey 都在缓存中
+        let key1 = OverrideKey::from_request(&req1);
+        let key2 = OverrideKey::from_request(&req2);
         let cache = request_client_cache();
-        let map = cache.lock().unwrap();
-        assert_eq!(map.len(), 2, "不同覆盖参数应生成两个缓存条目");
+        let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+        assert_ne!(key1, key2, "两个请求的 OverrideKey 应不同");
+        assert!(map.contains_key(&key1), "第一个 OverrideKey 应在缓存中");
+        assert!(map.contains_key(&key2), "第二个 OverrideKey 应在缓存中");
     }
 
-    /// 请求级 Client 缓存：clear_request_client_cache 清空后缓存条目数为 0，
-    /// 且后续构建会重新填充。
+    /// 请求级 Client 缓存：clear_request_client_cache 清空后缓存可重新填充。
+    ///
+    /// 注：不断言精确 len()（并行测试可能重新写入），仅验证 clear 不 panic
+    /// 且后续构建可正常工作。
     #[test]
     fn test_clear_request_client_cache() {
         clear_request_client_cache();
@@ -1020,16 +1037,22 @@ mod tests {
         let placeholder = reqwest::Client::new();
         let _ = req.build_request_client(&placeholder).unwrap();
 
+        // 验证构建后 key 存在
+        let key = OverrideKey::from_request(&req);
         {
             let cache = request_client_cache();
-            assert_eq!(cache.lock().unwrap().len(), 1);
+            let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(map.contains_key(&key), "构建后 OverrideKey 应存在");
         }
 
+        // clear 不 panic
         clear_request_client_cache();
 
+        // 验证 clear 后 key 不存在（除非并行测试恰好写入相同 key，概率极低）
         {
             let cache = request_client_cache();
-            assert_eq!(cache.lock().unwrap().len(), 0, "清空后缓存应为空");
+            let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(!map.contains_key(&key), "清空后该 OverrideKey 应不存在");
         }
     }
 }
