@@ -484,6 +484,12 @@ impl XhThreadPool {
             self.start()?;
         }
 
+        // drain 上次调用可能残留的陈旧消息（如 WorkerShutdown），
+        // 防止跨调用结果污染（自定义 idle_timeout > 0 场景下 worker 退出会留下残留消息）
+        if let Some(rx) = self.result_rx.as_mut() {
+            while rx.try_recv().is_ok() {}
+        }
+
         // 提交所有请求，记录成功提交的数量
         // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
         let mut submitted_count = 0;

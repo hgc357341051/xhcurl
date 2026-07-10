@@ -125,21 +125,16 @@ fn extract_requests(requests: &ZendHashTable) -> Result<Vec<XhRequest>, String> 
     }
 
     let mut req_list: Vec<XhRequest> = Vec::new();
-    let mut iter = requests.iter();
-    for _ in 0..len {
-        match iter.next() {
-            Some((_key, val)) => {
-                // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
-                let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
-                    <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
-                match class_obj {
-                    Some(obj) => req_list.push(obj.request.clone()),
-                    None => return Err("数组元素不是 XHRequest 对象".to_string()),
-                }
-            }
-            None => break,
+    for_each_kv(requests, |_key, val| {
+        // 尝试将 Zval 转为 &ZendClassObject<PhpXhRequest>
+        let class_obj: Option<&ZendClassObject<PhpXhRequest>> =
+            <&ZendClassObject<PhpXhRequest> as FromZval>::from_zval(val);
+        match class_obj {
+            Some(obj) => req_list.push(obj.request.clone()),
+            None => return Err("数组元素不是 XHRequest 对象".to_string()),
         }
-    }
+        Ok(())
+    })?;
     Ok(req_list)
 }
 
@@ -929,115 +924,6 @@ impl PhpXhRequest {
             let _ = ht.insert("user_data", ud);
         }
         Ok(ht)
-    }
-}
-
-// +----------------------------------------------------------------------+
-// | PHP 类：XHResponse（响应对象）                                        |
-// +----------------------------------------------------------------------+
-
-/// PHP XHResponse 类的 Rust 表示
-#[php_class]
-#[php(name = "XHResponse")]
-pub struct PhpXhResponse {
-    /// 内部响应对象
-    response: Option<XhResponse>,
-}
-
-/// PHP XHResponse 类的方法实现
-#[php_impl]
-impl PhpXhResponse {
-    /// 获取状态码
-    pub fn status(&self) -> i64 {
-        self.response
-            .as_ref()
-            .map(|r| r.status() as i64)
-            .unwrap_or(0)
-    }
-
-    /// 检查是否成功（2xx 状态码）
-    pub fn is_success(&self) -> bool {
-        self.response
-            .as_ref()
-            .map(|r| r.is_success())
-            .unwrap_or(false)
-    }
-
-    /// 获取指定响应头
-    pub fn header(&self, name: String) -> Option<String> {
-        self.response.as_ref().and_then(|r| r.header(&name))
-    }
-
-    /// 获取所有响应头
-    pub fn headers(&self) -> ZBox<ZendHashTable> {
-        let mut ht = ZendHashTable::new();
-        if let Some(response) = &self.response {
-            for (name, value) in response.headers().all() {
-                let _ = ht.insert(name.as_str(), value);
-            }
-        }
-        ht
-    }
-
-    /// 获取响应体（字符串）
-    pub fn body(&self) -> Result<String, String> {
-        self.response
-            .as_ref()
-            .ok_or("响应不存在".to_string())?
-            .body_text()
-            .map_err(|e| e.to_string())
-    }
-
-    /// 获取响应体（JSON 解析为数组）
-    pub fn json(&self) -> Result<ZBox<ZendHashTable>, String> {
-        let response = self.response.as_ref().ok_or("响应不存在".to_string())?;
-        let json = response.body_json().map_err(|e| e.to_string())?;
-        json_to_php_array(&json)
-    }
-
-    /// 获取响应体大小（字节）
-    pub fn body_size(&self) -> i64 {
-        self.response
-            .as_ref()
-            .map(|r| r.body_size() as i64)
-            .unwrap_or(0)
-    }
-
-    /// 获取最终 URL（可能因重定向而与请求 URL 不同）
-    pub fn url(&self) -> String {
-        self.response
-            .as_ref()
-            .map(|r| r.url().to_string())
-            .unwrap_or_default()
-    }
-
-    /// 获取请求耗时（毫秒）
-    pub fn elapsed_ms(&self) -> i64 {
-        self.response
-            .as_ref()
-            .map(|r| r.elapsed().as_millis() as i64)
-            .unwrap_or(0)
-    }
-
-    /// 获取错误信息
-    pub fn error(&self) -> Option<String> {
-        self.response
-            .as_ref()
-            .and_then(|r| r.error().map(|s| s.to_string()))
-    }
-
-    /// 获取远程服务器地址（IP:Port）
-    pub fn remote_addr(&self) -> Option<String> {
-        self.response
-            .as_ref()
-            .and_then(|r| r.remote_addr().map(|s| s.to_string()))
-    }
-
-    /// 获取 HTTP 协议版本
-    pub fn version(&self) -> Option<String> {
-        self.response
-            .as_ref()
-            .and_then(|r| r.version().map(|s| s.to_string()))
     }
 }
 
@@ -1902,80 +1788,6 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
     form
 }
 
-/// 将 JSON 值转换为 PHP 数组（ZendHashTable）。
-///
-/// 递归处理嵌套对象和数组，确保所有 JSON 类型（含 Null、嵌套 Object/Array）
-/// 都被正确转换，而非静默丢弃。
-///
-/// - 顶层为 JSON Object → 返回字符串键的关联数组
-/// - 顶层为 JSON Array → 返回整数键的索引数组
-/// - 其他标量类型 → 返回空数组（调用方应确保传入的是 Object 或 Array）
-fn json_to_php_array(json: &serde_json::Value) -> Result<ZBox<ZendHashTable>, String> {
-    match json {
-        serde_json::Value::Object(obj) => json_object_to_php_array(obj),
-        serde_json::Value::Array(arr) => json_array_to_php_array(arr),
-        _ => Ok(ZendHashTable::new()),
-    }
-}
-
-/// 将 JSON Object 转为 PHP 关联数组（字符串键）。
-fn json_object_to_php_array(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> Result<ZBox<ZendHashTable>, String> {
-    let mut ht = ZendHashTable::new();
-    for (key, val) in obj {
-        json_insert_value(&mut ht, key.clone(), val)?;
-    }
-    Ok(ht)
-}
-
-/// 将 JSON Array 转为 PHP 索引数组（整数键）。
-fn json_array_to_php_array(arr: &[serde_json::Value]) -> Result<ZBox<ZendHashTable>, String> {
-    let mut ht = ZendHashTable::new();
-    for (i, val) in arr.iter().enumerate() {
-        json_insert_value(&mut ht, i as i64, val)?;
-    }
-    Ok(ht)
-}
-
-/// 将单个 JSON 值插入哈希表的指定键位置（支持字符串键或整数索引）。
-///
-/// 递归处理嵌套类型，确保 Null/Object/Array 不被静默丢弃。
-/// `K` 须满足 `Into<ArrayKey<'static>>`，即 `String` 或 `i64` 等所有权类型。
-fn json_insert_value<K: Into<ext_php_rs::types::ArrayKey<'static>>>(
-    ht: &mut ZendHashTable,
-    key: K,
-    val: &serde_json::Value,
-) -> Result<(), String> {
-    match val {
-        serde_json::Value::String(s) => {
-            let _ = ht.insert(key, s.as_str());
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                let _ = ht.insert(key, i);
-            } else if let Some(f) = n.as_f64() {
-                let _ = ht.insert(key, f);
-            }
-        }
-        serde_json::Value::Bool(b) => {
-            let _ = ht.insert(key, *b);
-        }
-        serde_json::Value::Null => {
-            let _ = ht.insert(key, ());
-        }
-        serde_json::Value::Object(inner) => {
-            let inner_ht = json_object_to_php_array(inner)?;
-            let _ = ht.insert(key, inner_ht);
-        }
-        serde_json::Value::Array(inner) => {
-            let inner_ht = json_array_to_php_array(inner)?;
-            let _ = ht.insert(key, inner_ht);
-        }
-    }
-    Ok(())
-}
-
 // +----------------------------------------------------------------------+
 // | xhrun - 安全的跨平台 shell 命令执行函数                              |
 // +----------------------------------------------------------------------+
@@ -2390,14 +2202,12 @@ fn opt_string_vec(options: Option<&ZendHashTable>, key: &str) -> Vec<String> {
     match arr {
         Some(a) => {
             let mut v = Vec::with_capacity(a.len());
-            let mut iter = a.iter();
-            for _ in 0..a.len() {
-                if let Some((_, val)) = iter.next() {
-                    if let Some(s) = val.string() {
-                        v.push(s.to_string());
-                    }
+            let _ = for_each_kv(a, |_key, val| {
+                if let Some(s) = val.string() {
+                    v.push(s.to_string());
                 }
-            }
+                Ok(())
+            });
             v
         }
         None => Vec::new(),
@@ -2472,7 +2282,6 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
     module
         .class::<PhpXhCurl>()
         .class::<PhpXhRequest>()
-        .class::<PhpXhResponse>()
         .class::<PhpXhMulti>()
         .class::<PhpXhThreadPool>()
         .function(wrap_function!(xhrun))
