@@ -72,7 +72,7 @@ fn test_header_management() {
     assert_eq!(hm.get("content-type"), Some("application/json".to_string()));
 
     // 转换为 reqwest HeaderMap
-    let header_map = hm.to_header_map();
+    let header_map = hm.to_header_map().expect("合法头部应转换成功");
     assert_eq!(header_map.len(), 3);
 }
 

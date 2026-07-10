@@ -593,7 +593,7 @@ impl XhRequest {
         };
 
         // 设置请求头
-        let mut header_map = self.headers.to_header_map();
+        let mut header_map = self.headers.to_header_map()?;
 
         // Accept-Encoding（CURLOPT_ENCODING）
         if let Some(encoding) = &self.encoding {
@@ -752,7 +752,7 @@ impl XhRequest {
 
         builder
             .build()
-            .map_err(|e| XhCurlError::Generic(format!("构建请求级客户端失败: {}", e)))
+            .map_err(XhCurlError::from)
     }
 }
 

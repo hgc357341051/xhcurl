@@ -236,7 +236,21 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
         let sem_clone = std::sync::Arc::clone(&semaphore);
         runtime.spawn(async move {
             // 获取并发许可（_permit 在作用域结束时自动释放）
-            let _permit = sem_clone.acquire().await.ok();
+            // acquire 失败说明信号量已关闭，必须发送错误结果而非继续执行
+            let _permit = match sem_clone.acquire().await {
+                Ok(p) => p,
+                Err(_) => {
+                    // 信号量获取失败（已关闭），发送错误结果而非继续执行
+                    let result = RequestResult::error(
+                        task_id.to_string(),
+                        None,
+                        "并发信号量获取失败".to_string(),
+                        std::time::Duration::from_secs(0),
+                    );
+                    let _ = result_tx.send(TaskMessage { task_id, result });
+                    return;
+                }
+            };
             let result = execute_http_task(client_clone, request_clone, task_id).await;
             let _ = result_tx.send(TaskMessage { task_id, result });
         });
@@ -285,6 +299,12 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
 ///    - 被恢复的 Fiber 继续执行，可能再次 suspend
 /// 4. 主 Fiber 终止（返回值或抛异常）时，返回其结果
 pub fn fiber_run(main: &Zval) -> Result<Zval, String> {
+    // 检测嵌套调用:如果调度器已存在,说明当前已在 run() 事件泵内
+    let already_running = SCHEDULER.with(|s| s.borrow().is_some());
+    if already_running {
+        return Err("不支持嵌套调用 XHCurl::run".to_string());
+    }
+
     // 1. 初始化调度器
     init_scheduler();
 

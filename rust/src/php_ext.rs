@@ -186,6 +186,34 @@ impl PhpXhCurl {
                     c.proxy = Some(v);
                 }
             }
+
+            // 是否启用 HTTP/2
+            if let Some(v) = config.get("http2_enabled") {
+                if let Some(b) = v.bool() {
+                    c.http2_enabled = b;
+                }
+            }
+
+            // 是否启用 TCP Keep-Alive
+            if let Some(v) = config.get("tcp_keepalive") {
+                if let Some(b) = v.bool() {
+                    c.tcp_keepalive = b;
+                }
+            }
+
+            // TCP Keep-Alive 间隔（秒）
+            if let Some(v) = config.get("tcp_keepalive_interval") {
+                if let Some(l) = v.long() {
+                    c.tcp_keepalive_interval = l as u64;
+                }
+            }
+
+            // 默认并发连接数限制
+            if let Some(v) = config.get("max_connections") {
+                if let Some(l) = v.long() {
+                    c.max_connections = l as usize;
+                }
+            }
         });
 
         Ok(())
@@ -1205,20 +1233,22 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
     let mut response_ht = ZendHashTable::new();
     let _ = response_ht.insert("id", result.id.clone());
     let _ = response_ht.insert("success", result.is_success());
-    let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
 
     // 用户自定义数据：原样回传 JSON 字符串
     if let Some(ud) = &result.user_data {
         let _ = response_ht.insert("user_data", ud.clone());
     }
 
-    if let Some(err) = &result.error {
-        let _ = response_ht.insert("error", err.clone());
-    }
-
     // 写入完整响应信息（status/body/headers/url/remote_addr/version 等）
     if let Some(resp) = &result.response {
+        // 有响应时，elapsed_ms/error 由 fill_response_fields 统一写入，避免双重插入
         fill_response_fields(&mut response_ht, resp);
+    } else {
+        // 无响应（请求失败）时，补充 elapsed_ms/error，确保失败路径字段完整
+        let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+        if let Some(err) = &result.error {
+            let _ = response_ht.insert("error", err.clone());
+        }
     }
     response_ht
 }
@@ -1274,6 +1304,9 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
         let mut zv = Zval::new();
         zv.set_binary::<u8>(body_bytes.to_vec());
         let _ = ht.insert("body", zv);
+    } else {
+        // body 为空时插入空字符串，避免 PHP 端 $resp['body'] 触发 Undefined index
+        let _ = ht.insert("body", String::new());
     }
 
     // 最终 URL（可能因重定向变化）
@@ -1382,6 +1415,11 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
         let key_str = key.to_string();
         let val_str = if let Some(s) = val.string() {
             s
+        } else if let Some(bytes) = val.binary::<u8>() {
+            // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
+            // Zval::string() 遇到非 UTF-8 字节会返回 None 导致表单项被静默丢弃，
+            // 这里优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
+            String::from_utf8_lossy(&bytes).into_owned()
         } else if let Some(l) = val.long() {
             l.to_string()
         } else if let Some(d) = val.double() {

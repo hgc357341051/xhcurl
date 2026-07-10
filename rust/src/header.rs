@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::error::{XhCurlError, XhCurlResult};
+
 /// HTTP 头部管理器
 /// 线程安全的头部存储，支持大小写不敏感的键查找
 ///
@@ -136,22 +138,29 @@ impl HeaderManager {
     /// 用于实际发送 HTTP 请求时使用
     ///
     /// # 返回
-    /// reqwest::header::HeaderMap 实例
-    pub fn to_header_map(&self) -> reqwest::header::HeaderMap {
+    /// - `Ok(HeaderMap)`: 所有头部均合法，转换成功
+    /// - `Err(XhCurlError::InvalidArgument)`: 存在非法头部名或值
+    ///
+    /// 注意：非法头部（如鉴权头、Content-Type 含非法字符）会立即报错，
+    /// 而非静默丢弃，避免用户设置的头部意外丢失。
+    pub fn to_header_map(&self) -> XhCurlResult<reqwest::header::HeaderMap> {
         let headers = self.headers.read().unwrap();
         let mut map = reqwest::header::HeaderMap::new();
 
         for (name, value) in headers.iter() {
-            // 解析头部名称（处理无效字符）
-            if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
-                // 解析头部值
-                if let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) {
-                    map.insert(header_name, header_value);
-                }
-            }
+            // 解析头部名称，非法名称立即报错（避免静默丢弃鉴权头等关键头部）
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| {
+                    XhCurlError::InvalidArgument(format!("无效的请求头名 {:?}: {}", name, e))
+                })?;
+            // 解析头部值，非法值立即报错
+            let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                XhCurlError::InvalidArgument(format!("无效的请求头值 {:?}: {}", value, e))
+            })?;
+            map.insert(header_name, header_value);
         }
 
-        map
+        Ok(map)
     }
 }
 
@@ -241,5 +250,55 @@ mod tests {
                 Some(format!("value-{}", i))
             );
         }
+    }
+
+    /// 测试合法头部正常转换为 HeaderMap
+    #[test]
+    fn test_to_header_map_valid() {
+        let hm = HeaderManager::new();
+        hm.set("Content-Type", "application/json");
+        hm.set("Authorization", "Bearer token123");
+        hm.set("X-Request-ID", "req-abc-123");
+
+        let map = hm.to_header_map().expect("合法头部应转换成功");
+        assert_eq!(map.len(), 3);
+        assert_eq!(
+            map.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            map.get("authorization").unwrap(),
+            "Bearer token123"
+        );
+    }
+
+    /// 测试非法头部名（含空格）应返回错误
+    #[test]
+    fn test_to_header_map_invalid_name() {
+        let hm = HeaderManager::new();
+        // 头部名含空格，HTTP 头部名不允许空格
+        // 注意：set 会将键转为小写，故错误信息中为 "x test"
+        hm.set("X Test", "value");
+
+        let result = hm.to_header_map();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("无效的请求头名"), "错误信息应包含无效请求头名: {}", err);
+        assert!(err.contains("x test"), "错误信息应包含小写化后的非法头部名: {}", err);
+    }
+
+    /// 测试非法头部值（含控制字符）应返回错误
+    #[test]
+    fn test_to_header_map_invalid_value() {
+        let hm = HeaderManager::new();
+        // 头部值含控制字符（\0），HeaderValue 不允许
+        hm.set("X-Custom", "invalid\u{0}value");
+
+        let result = hm.to_header_map();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("无效的请求头值"), "错误信息应包含无效请求头值: {}", err);
+        // 错误信息格式化为值的 debug 形式，包含 "invalid" 前缀
+        assert!(err.contains("invalid"), "错误信息应包含非法头部值内容: {}", err);
     }
 }
