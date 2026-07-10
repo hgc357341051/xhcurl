@@ -208,5 +208,35 @@ sort($eachFields);
 check("each 与 gather 字段一致", $gatherFields === $eachFields);
 check("each 与 gather id 一致", $gatherResult[0]['id'] === $eachResult['id']);
 
+echo "\n=== run() 失败后可再次调用（P0 调度器泄漏修复）===\n";
+
+// 9. P0 修复验证：run() 抛异常后调度器被清理，可再次调用 run()
+//    修复前：run() 失败后 thread_local 永久残留，后续 run() 误报"不支持嵌套调用"
+$firstRunFailed = false;
+try {
+    XHCurl::run(function() {
+        throw new Exception("首次 run 失败");
+    });
+} catch (Throwable $e) {
+    $firstRunFailed = true;
+}
+check("首次 run() 抛异常", $firstRunFailed);
+
+// 立即再次调用 run()，应成功（不报"不支持嵌套调用"）
+$secondRunNestedError = false;
+$secondRunSuccess = false;
+try {
+    $result = XHCurl::run(function() use ($BASE) {
+        return XHCurl::gather(array(
+            XHCurl::createRequest($BASE . '/get')->get()->timeout(15)->setId('recovery'),
+        ));
+    });
+    $secondRunSuccess = is_array($result) && count($result) === 1;
+} catch (Throwable $e) {
+    $secondRunNestedError = strpos($e->getMessage(), '不支持嵌套调用') !== false;
+}
+check("run() 失败后再次 run() 不报'不支持嵌套调用'", !$secondRunNestedError);
+check("run() 失败后再次 run() 正常执行 gather", $secondRunSuccess);
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);

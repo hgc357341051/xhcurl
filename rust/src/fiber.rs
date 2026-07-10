@@ -77,6 +77,10 @@ struct Scheduler {
 
     /// 结果接收端（仅 PHP 线程的事件泵使用）
     result_rx: Receiver<TaskMessage>,
+
+    /// 已 spawn 的 tokio 任务句柄（await/gather/each 的 runtime.spawn 返回值）。
+    /// drop_scheduler 时全部 abort，避免主 Fiber 异常退出后任务残留全局运行时。
+    task_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Scheduler {
@@ -87,6 +91,7 @@ impl Scheduler {
             pending: std::collections::HashMap::new(),
             result_tx: tx,
             result_rx: rx,
+            task_handles: Vec::new(),
         }
     }
 }
@@ -112,8 +117,30 @@ fn init_scheduler() {
 /// 清理调度器（在 run() 出口调用）
 fn drop_scheduler() {
     SCHEDULER.with(|s| {
+        // 先 abort 所有残留的 tokio 任务，避免任务在全局运行时上继续执行
+        // （主 Fiber 异常退出时，未完成的 HTTP 任务仍会持有 result_tx clone，
+        //  256 容量的有界 channel 填满后任务会永久卡在 send().await 上）
+        if let Some(scheduler) = s.borrow_mut().as_mut() {
+            for handle in scheduler.task_handles.drain(..) {
+                handle.abort();
+            }
+        }
+        // drop Scheduler（释放 channel sender/receiver、pending 表中的 Zval）
         *s.borrow_mut() = None;
     });
+}
+
+/// RAII 守卫，确保 fiber_run 在任何返回路径（成功或失败）都清理调度器。
+///
+/// 在 `init_scheduler()` 后构造，离开作用域时自动调用 `drop_scheduler()`。
+/// 避免错误路径（create_fiber/start/take_php_exception 失败、run_event_loop 返回 Err）
+/// 跳过清理导致 thread_local 永久残留，使后续 run() 永远误报"不支持嵌套调用"。
+struct SchedulerGuard;
+
+impl Drop for SchedulerGuard {
+    fn drop(&mut self) {
+        drop_scheduler();
+    }
 }
 
 // +----------------------------------------------------------------------+
@@ -146,11 +173,17 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
             .map(|sc| sc.result_tx.clone())
     })?;
 
-    runtime.spawn(async move {
+    let handle = runtime.spawn(async move {
         // 在 tokio 工作线程上执行 HTTP 请求
         let result = execute_http_task(client, request_clone, task_id).await;
         // 通过线程安全 channel 发送结果回 PHP 线程
         let _ = result_tx.send(TaskMessage { task_id, result });
+    });
+    // 保存 JoinHandle，主 Fiber 异常退出时 drop_scheduler 会 abort
+    SCHEDULER.with(|s| {
+        if let Some(scheduler) = s.borrow_mut().as_mut() {
+            scheduler.task_handles.push(handle);
+        }
     });
 
     // 2. 获取当前 PHP Fiber 对象
@@ -235,7 +268,7 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
         let client_clone = client.clone();
         let request_clone = request;
         let sem_clone = std::sync::Arc::clone(&semaphore);
-        runtime.spawn(async move {
+        let handle = runtime.spawn(async move {
             // 获取并发许可（_permit 在作用域结束时自动释放）
             // acquire 失败说明信号量已关闭，必须发送错误结果而非继续执行
             let _permit = match sem_clone.acquire().await {
@@ -254,6 +287,13 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
             };
             let result = execute_http_task(client_clone, request_clone, task_id).await;
             let _ = result_tx.send(TaskMessage { task_id, result });
+        });
+
+        // 保存 JoinHandle，主 Fiber 异常退出时 drop_scheduler 会 abort
+        SCHEDULER.with(|s| {
+            if let Some(scheduler) = s.borrow_mut().as_mut() {
+                scheduler.task_handles.push(handle);
+            }
         });
 
         // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
@@ -337,7 +377,7 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
         let client_clone = client.clone();
         let request_clone = request;
         let sem_clone = std::sync::Arc::clone(&semaphore);
-        runtime.spawn(async move {
+        let handle = runtime.spawn(async move {
             // 获取并发许可（_permit 在作用域结束时自动释放）
             // acquire 失败说明信号量已关闭，必须发送错误结果而非继续执行
             let _permit = match sem_clone.acquire().await {
@@ -356,6 +396,13 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
             };
             let result = execute_http_task(client_clone, request_clone, task_id).await;
             let _ = result_tx.send(TaskMessage { task_id, result });
+        });
+
+        // 保存 JoinHandle，主 Fiber 异常退出时 drop_scheduler 会 abort
+        SCHEDULER.with(|s| {
+            if let Some(scheduler) = s.borrow_mut().as_mut() {
+                scheduler.task_handles.push(handle);
+            }
         });
 
         // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
@@ -418,6 +465,9 @@ pub fn fiber_run(main: &Zval) -> Result<Zval, String> {
 
     // 1. 初始化调度器
     init_scheduler();
+    // RAII 守卫：确保任何返回路径（含 ? 提前返回）都清理调度器，
+    // 避免单次失败后 thread_local 永久残留导致后续 run() 误报"不支持嵌套调用"
+    let _guard = SchedulerGuard;
 
     // 2. 创建主 Fiber 并启动
     //    new Fiber($main)
@@ -432,13 +482,8 @@ pub fn fiber_run(main: &Zval) -> Result<Zval, String> {
     // ext-php-rs 0.15 的 try_call_method 不传播 PHP 异常，主动检查并取出
     take_php_exception()?;
 
-    // 3. 事件泵循环
-    let result = run_event_loop(&fiber);
-
-    // 4. 清理调度器
-    drop_scheduler();
-
-    result
+    // 3. 事件泵循环（guard 在函数返回时自动 drop，清理调度器）
+    run_event_loop(&fiber)
 }
 
 /// 事件泵主循环。
@@ -578,7 +623,9 @@ fn create_fiber(main: &Zval) -> Result<Zval, String> {
         .map_err(|e| e.to_string())?;
 
     // 包装为 Zval 返回
-    // set_object 不会增加 refcount（移交所有权），ZBox 在此之后不应再使用
+    // refcount 语义：set_object 内部调用 val.inc_count()（ext-php-rs 0.15 zval.rs:1024），
+    // 使对象 refcount 从 1 增至 2。obj（ZBox）随后离开作用域 Drop 时调用
+    // zend_object_release（dec_count），refcount 回到 1。最终 zv 独占引用（refcount=1）。
     let mut zv = Zval::new();
     zv.set_object(&mut obj);
     Ok(zv)
