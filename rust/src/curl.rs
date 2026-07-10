@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use crate::cookie::CookieManager;
-use crate::error::{XhCurlError, XhCurlResult};
+use crate::error::{XhCurlError, XhCurlResult, DEFAULT_MAX_RESPONSE_SIZE};
 
 /// 全局配置结构体
 /// 对应 C 版本的 xhcurl_globals 结构体
@@ -75,7 +75,7 @@ impl Default for GlobalConfig {
             // 请求超时 60 秒
             request_timeout: 60,
             // 最大响应体 10MB（防止内存溢出）
-            max_response_size: 10 * 1024 * 1024,
+            max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
             // 默认启用重定向跟随
             follow_redirects: true,
             // 最大重定向 10 次（防止循环）
@@ -336,7 +336,7 @@ mod tests {
         let config = GlobalConfig::default();
         assert_eq!(config.connect_timeout, 30);
         assert_eq!(config.request_timeout, 60);
-        assert_eq!(config.max_response_size, 10 * 1024 * 1024);
+        assert_eq!(config.max_response_size, DEFAULT_MAX_RESPONSE_SIZE);
         assert!(config.follow_redirects);
         assert!(config.verify_ssl);
         assert!(config.http2_enabled);

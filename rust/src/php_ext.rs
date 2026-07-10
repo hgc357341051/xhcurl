@@ -24,6 +24,7 @@ use ext_php_rs::types::{ArrayKey, ZendClassObject, ZendHashTable, Zval};
 use ext_php_rs::zend::php_sapi_name;
 
 use crate::curl::XhCurlManager;
+use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::XhMulti;
 use crate::request::{HttpMethod, XhRequest};
 use crate::response::XhResponse;
@@ -33,9 +34,7 @@ use crate::threadpool::{ThreadPoolConfig, XhThreadPool};
 // | 常量定义                                                              |
 // +----------------------------------------------------------------------+
 
-/// 单次批量请求的最大数量限制
-/// 防止用户传入过多请求导致内存溢出
-const MAX_REQUESTS_PER_BATCH: usize = 10000;
+// MAX_REQUESTS_PER_BATCH 定义在 error.rs，供 multi / threadpool / php_ext 共用
 
 // +----------------------------------------------------------------------+
 // | 全局运行时与客户端复用                                                |
@@ -1326,8 +1325,11 @@ fn response_to_php_array(response: &XhResponse) -> ZBox<ZendHashTable> {
 }
 
 /// 将 XhResponse 的所有字段填充到 PHP 哈希表
-/// 包含 status/body/body_size/headers/url/remote_addr/version/error
-fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhResponse) {
+/// 包含 status/body/body_size/headers/url/remote_addr/version/error/elapsed_ms
+///
+/// pub(crate) 可见性：fiber.rs 的 result_to_php_array 也复用此函数，
+/// 确保 Fiber 协程与同步/批量 API 返回的响应字段完全一致。
+pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhResponse) {
     let _ = ht.insert("status", response.status() as i64);
     let _ = ht.insert("body_size", response.body_size() as i64);
 

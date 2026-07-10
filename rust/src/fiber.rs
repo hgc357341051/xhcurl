@@ -455,6 +455,8 @@ async fn execute_http_task(
 // +----------------------------------------------------------------------+
 
 /// 将 RequestResult 转为 PHP 数组
+/// 复用 php_ext.rs::fill_response_fields，确保协程 API 与同步/批量 API
+/// 返回的响应字段完全一致（headers/remote_addr/version 等完整字段）
 fn result_to_php_array(result: &RequestResult) -> Result<ZBox<ZendHashTable>, String> {
     let mut ht = ZendHashTable::new();
     let _ = ht.insert("id", result.id.clone());
@@ -471,13 +473,9 @@ fn result_to_php_array(result: &RequestResult) -> Result<ZBox<ZendHashTable>, St
         let _ = ht.insert("error", err.clone());
     }
 
+    // 写入完整响应信息（与 XHRequest::execute() / XHMulti::execute() 字段一致）
     if let Some(resp) = &result.response {
-        let _ = ht.insert("status", resp.status() as i64);
-        let _ = ht.insert("body_size", resp.body_size() as i64);
-        if let Ok(body) = resp.body_text() {
-            let _ = ht.insert("body", body);
-        }
-        let _ = ht.insert("url", resp.url().to_string());
+        crate::php_ext::fill_response_fields(&mut ht, resp);
     }
 
     Ok(ht)

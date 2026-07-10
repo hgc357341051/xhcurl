@@ -644,6 +644,16 @@ impl XhRequest {
     /// # 返回
     /// 配置好的 reqwest::RequestBuilder
     pub fn to_reqwest(&self, client: &reqwest::Client) -> XhCurlResult<reqwest::RequestBuilder> {
+        // 请求级重定向策略：reqwest 的重定向策略在 Client 级别设置，
+        // 无法通过 RequestBuilder 单独覆盖。当请求显式设置了 follow_redirects
+        // 或 max_redirects 时，基于现有 Client 的配置克隆一个新 Client 应用策略。
+        // 注意：这会牺牲连接池复用，仅在用户显式设置时才走此分支。
+        let client = if self.follow_redirects.is_some() || self.max_redirects.is_some() {
+            self.build_client_with_redirect_policy(client)?
+        } else {
+            client.clone()
+        };
+
         // 根据方法创建请求构建器
         // 自定义方法优先（CURLOPT_CUSTOMREQUEST）
         let mut builder = if let Some(custom) = &self.custom_method {
@@ -748,6 +758,46 @@ impl XhRequest {
         }
 
         Ok(builder)
+    }
+
+    /// 基于现有 Client 构建带请求级重定向策略的新 Client。
+    ///
+    /// reqwest 的重定向策略只能在 ClientBuilder 上设置，无法通过 RequestBuilder
+    /// 单独覆盖。当请求显式设置了 follow_redirects 或 max_redirects 时，
+    /// 用 reqwest::ClientBuilder::from() 克隆现有 Client 配置，再覆盖重定向策略。
+    fn build_client_with_redirect_policy(
+        &self,
+        _client: &reqwest::Client,
+    ) -> XhCurlResult<reqwest::Client> {
+        let mut builder = reqwest::ClientBuilder::new();
+
+        // 应用重定向策略
+        match self.follow_redirects {
+            Some(false) => {
+                builder = builder.redirect(reqwest::redirect::Policy::none());
+            }
+            Some(true) => {
+                if let Some(max) = self.max_redirects {
+                    builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
+                } else {
+                    builder = builder.redirect(reqwest::redirect::Policy::default());
+                }
+            }
+            None => {
+                // follow_redirects 未设置但 max_redirects 设置了：限制重定向次数
+                if let Some(max) = self.max_redirects {
+                    builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
+                }
+            }
+        }
+
+        // 复用原 Client 的 TLS 配置
+        let config = crate::curl::XhCurlManager::global().config();
+        builder = builder.danger_accept_invalid_certs(!config.verify_ssl);
+
+        builder
+            .build()
+            .map_err(|e| XhCurlError::Generic(format!("构建请求级客户端失败: {}", e)))
     }
 }
 

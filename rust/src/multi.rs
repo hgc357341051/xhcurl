@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::error::{XhCurlError, XhCurlResult};
+use crate::error::{
+    DEFAULT_MAX_RESPONSE_SIZE, MAX_REQUESTS_PER_BATCH, XhCurlError, XhCurlResult,
+};
 use crate::request::XhRequest;
 use crate::response::XhResponse;
 
@@ -35,9 +37,8 @@ use crate::response::XhResponse;
 // | 常量定义                                                              |
 // +----------------------------------------------------------------------+
 
-/// 单次批量请求的最大数量限制
-/// 防止用户传入过多请求导致内存溢出
-const MAX_REQUESTS_PER_BATCH: usize = 10000;
+// MAX_REQUESTS_PER_BATCH 和 DEFAULT_MAX_RESPONSE_SIZE 定义在 error.rs，
+// 供 multi / threadpool / php_ext / curl 共用，避免多处重复定义。
 
 /// 流式事件 channel 的默认缓冲区大小
 /// 限制积压事件数量，实现背压控制
@@ -46,10 +47,6 @@ const STREAM_CHANNEL_CAPACITY: usize = 1024;
 /// 结果 channel 的默认缓冲区倍数
 /// 相对于请求数量的倍数，确保不会因缓冲不足而阻塞
 const RESULT_CHANNEL_MULTIPLIER: usize = 2;
-
-/// 默认最大响应体大小（10MB）
-/// 超过此大小的响应体会被截断并返回错误
-const DEFAULT_MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
 // +----------------------------------------------------------------------+
 // | 流式回调事件                                                          |
