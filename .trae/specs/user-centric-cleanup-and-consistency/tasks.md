@@ -45,11 +45,11 @@
   - [x] SubTask 7.5: `setUserData()` 改为失败时跳过返回 `&mut Self`
   - [x] SubTask 7.6: 验证 PHP 端链式 `->get()->json([...])->timeout(10)->execute()` 无需 `?`
 
-- [ ] Task 8: 移除 set 前缀，新增无前缀方法并保留旧名为别名
+- [x] Task 8: 移除 set 前缀，新增无前缀方法并保留旧名为别名
   - [x] SubTask 8.1: `php_ext.rs` 新增 `id(string)` 方法（与 `setId` 等价）
   - [x] SubTask 8.2: `php_ext.rs` 新增 `userData(array)` 方法（与 `setUserData` 等价）
   - [x] SubTask 8.3: 保留 `setId`/`setUserData` 不删除（向后兼容）
-  - [ ] SubTask 8.4: README 更新示例用新名 `id()`/`userData()`
+  - [x] SubTask 8.4: README 更新示例用新名 `id()`/`userData()`
 
 - [x] Task 9: 负值处理统一为"跳过+保留原值"
   - [x] SubTask 9.1: `php_ext.rs` 中 `XHRequest::timeout(-1)` 等改为跳过（不 clamp 到 0）
@@ -68,23 +68,23 @@
   - [x] SubTask 11.2: 删除 `default()` 中的初始化
   - [x] SubTask 11.3: 检查并清理任何引用（测试中的 `assert!(config.use_multi_thread)`）
 
-- [ ] Task 12: 失败响应补 status: 0 字段
+- [x] Task 12: 失败响应补 status: 0 字段
   - [x] SubTask 12.1: `php_ext.rs::result_to_php_array`（约 1496-1504 行）失败路径补 `status => 0`
   - [x] SubTask 12.2: 确保成功/失败路径字段集一致（都有 status/body）
-  - [ ] SubTask 12.3: 添加测试验证失败时 `status` 字段存在且为 0
+  - [x] SubTask 12.3: 添加测试验证失败时 `status` 字段存在且为 0
 
 ## Phase 5: 验证与文档收尾
 
-- [ ] Task 13: 运行完整验证流水线
-  - [ ] SubTask 13.1: `cargo fmt --check`
-  - [ ] SubTask 13.2: `cargo clippy -- -D warnings`（非 php）
-  - [ ] SubTask 13.3: `cargo clippy --all-targets --features php -- -D warnings`
-  - [ ] SubTask 13.4: `cargo test --lib`
-  - [ ] SubTask 13.5: PHP 运行时冒烟测试（扩展加载、链式调用、each 配置、id 默认值、失败 status 字段）
+- [x] Task 13: 运行完整验证流水线
+  - [x] SubTask 13.1: `cargo fmt --check`
+  - [x] SubTask 13.2: `cargo clippy -- -D warnings`（非 php）
+  - [x] SubTask 13.3: `cargo clippy --all-targets --features php -- -D warnings`
+  - [x] SubTask 13.4: `cargo test --lib`
+  - [x] SubTask 13.5: PHP 运行时冒烟测试（扩展加载、链式调用、each 配置、id 默认值、失败 status 字段）
 
-- [ ] Task 14: 更新 CHANGELOG 并提交
-  - [ ] SubTask 14.1: CHANGELOG 新增 `[1.0.6]` 条目记录本次变更
-  - [ ] SubTask 14.2: 跑 fmt 后 git commit
+- [x] Task 14: 更新 CHANGELOG 并提交
+  - [x] SubTask 14.1: CHANGELOG 新增 `[1.0.6]` 条目记录本次变更
+  - [x] SubTask 14.2: 跑 fmt 后 git commit
   - [ ] SubTask 14.3: （可选）打 tag v1.0.6 并推送
 
 # Task Dependencies
