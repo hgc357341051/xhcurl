@@ -495,7 +495,7 @@ fn result_zval_to_array(zval: &Zval) -> Result<ZBox<ZendHashTable>, String> {
 // | 安全迭代辅助（复用 php_ext.rs 的修复方案）                            |
 // +----------------------------------------------------------------------+
 
-/// 安全遍历 PHP 哈希表（规避 ext-php-rs 0.12.0 的 Iter 终止 bug）
+/// 安全遍历 PHP 哈希表（手动控制迭代次数，防止 Iter 提前终止）
 fn for_each_kv<F>(ht: &ZendHashTable, mut f: F) -> Result<(), String>
 where
     F: FnMut(&ArrayKey, &Zval) -> Result<(), String>,

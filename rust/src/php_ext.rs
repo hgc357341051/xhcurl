@@ -1146,7 +1146,7 @@ impl PhpXhThreadPool {
 
 /// 安全地遍历 PHP 哈希表的所有键值对。
 ///
-/// 规避 ext-php-rs 0.12.0 中 `Iter` 的终止条件 bug：
+/// 手动控制迭代次数（`ht.len()`），防止 `Iter` 提前终止或越界：
 /// `Iter::next_zval` 用 `key_type == -1` 判断结束，
 /// 但 PHP 的 `HASH_KEY_NON_EXISTENT == 3`，该判断永不成立，
 /// 导致遍历完最后一个元素后再调用 `next()` 会触发空指针解引用。
@@ -1165,7 +1165,7 @@ where
             None => break,
         }
     }
-    // 关键：此处不再调用 iter.next()，避免触发 ext-php-rs 的终止 bug
+    // 关键：此处不再调用 iter.next()，避免触发 Iter 终止路径的空指针问题
     Ok(())
 }
 
@@ -1289,7 +1289,7 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
 fn php_array_to_json(ht: &ZendHashTable) -> Result<String, String> {
     let mut map = serde_json::Map::new();
 
-    // 使用安全迭代器（规避 ext-php-rs 0.12.0 的 Iter 终止 bug）
+    // 使用安全迭代器（手动控制迭代次数，防止 Iter 提前终止）
     for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
         let json_val = zval_to_json(val)?;
@@ -1332,7 +1332,7 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
 fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
     let mut form = Vec::new();
 
-    // 使用安全迭代器（规避 ext-php-rs 0.12.0 的 Iter 终止 bug）
+    // 使用安全迭代器（手动控制迭代次数，防止 Iter 提前终止）
     let _ = for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
         let val_str = if let Some(s) = val.string() {
@@ -1548,19 +1548,11 @@ pub fn xhrun(
         .to_lowercase();
 
     if !allow_list.is_empty() && !allow_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
-        return Ok(failure_result(
-            command,
-            -1,
-            &format!("命令 '{}' 不在白名单中", command),
-        ));
+        return Ok(failure_result(command, -1, "命令不在白名单中"));
     }
 
     if deny_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
-        return Ok(failure_result(
-            command,
-            -1,
-            &format!("命令 '{}' 在黑名单中", command),
-        ));
+        return Ok(failure_result(command, -1, "命令在黑名单中"));
     }
 
     // ===== 4. 构建命令 =====
