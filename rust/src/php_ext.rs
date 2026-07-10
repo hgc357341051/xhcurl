@@ -1307,21 +1307,51 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
     let _ = ht.insert("elapsed_ms", response.elapsed().as_millis() as i64);
 }
 
-/// 将 PHP 数组转换为 JSON 字符串
-/// 递归处理嵌套数组
+/// 将 PHP 数组转换为 JSON 字符串。
+///
+/// 列表数组（键为 0,1,2,... 连续整数）转为 JSON 数组，
+/// 关联数组转为 JSON 对象（与 PHP json_encode 行为一致）。
 fn php_array_to_json(ht: &ZendHashTable) -> Result<String, String> {
-    let mut map = serde_json::Map::new();
+    let value = ht_to_json_value(ht)?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
 
-    // 使用安全迭代器（手动控制迭代次数，防止 Iter 提前终止）
+/// 将 PHP 哈希表转为 JSON 值。
+///
+/// 列表判定：第 i 个元素（按迭代顺序）的键恰好为 i → JSON 数组，
+/// 否则（含字符串键或非连续整数键）→ JSON 对象。
+fn ht_to_json_value(ht: &ZendHashTable) -> Result<serde_json::Value, String> {
+    // 在闭包内即时转换为 owned 的 serde_json::Value（&Zval 不能逃逸闭包）
+    let mut keys: Vec<(Option<i64>, String)> = Vec::new();
+    let mut values: Vec<serde_json::Value> = Vec::new();
     for_each_kv(ht, |key, val| {
-        let key_str = key.to_string();
-        let json_val = zval_to_json(val)?;
-        map.insert(key_str, json_val);
+        let idx = match key {
+            ArrayKey::Long(i) => Some(*i),
+            _ => None,
+        };
+        keys.push((idx, key.to_string()));
+        values.push(zval_to_json(val)?);
         Ok(())
     })?;
 
-    let value = serde_json::Value::Object(map);
-    serde_json::to_string(&value).map_err(|e| e.to_string())
+    if values.is_empty() {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    }
+
+    let is_list = keys
+        .iter()
+        .enumerate()
+        .all(|(i, (idx, _))| *idx == Some(i as i64));
+
+    if is_list {
+        Ok(serde_json::Value::Array(values))
+    } else {
+        let mut map = serde_json::Map::new();
+        for ((_, key), val) in keys.into_iter().zip(values) {
+            map.insert(key, val);
+        }
+        Ok(serde_json::Value::Object(map))
+    }
 }
 
 /// 将 Zval 转换为 JSON 值
@@ -1338,13 +1368,7 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
     } else if let Some(b) = val.bool() {
         Ok(serde_json::Value::Bool(b))
     } else if let Some(ht) = val.array() {
-        let mut map = serde_json::Map::new();
-        // 嵌套数组同样使用安全迭代器
-        for_each_kv(ht, |key, v| {
-            map.insert(key.to_string(), zval_to_json(v)?);
-            Ok(())
-        })?;
-        Ok(serde_json::Value::Object(map))
+        ht_to_json_value(ht)
     } else {
         Ok(serde_json::Value::Null)
     }
