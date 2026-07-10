@@ -212,7 +212,10 @@ impl XhCurlManager {
     ///
     /// # 返回
     /// 配置好的 ClientBuilder，调用方可进一步自定义后构建
-    pub fn create_client_builder(&self) -> reqwest::ClientBuilder {
+    ///
+    /// # 错误
+    /// 全局代理地址格式无效时返回错误，避免静默忽略导致后续请求行为与配置不符。
+    pub fn create_client_builder(&self) -> XhCurlResult<reqwest::ClientBuilder> {
         let config = self.config();
 
         // 创建客户端构建器
@@ -242,13 +245,16 @@ impl XhCurlManager {
             .user_agent(&config.user_agent);
 
         // 设置代理
+        // 与 request.rs::build_request_client 行为一致：代理无效时明确报错，
+        // 而非静默忽略（否则用户设置了代理但请求实际不走代理，难以排查）
         if let Some(proxy_url) = &config.proxy {
-            if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
-                builder = builder.proxy(proxy);
-            }
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
+                XhCurlError::Generic(format!("无效的全局代理地址 {}: {}", proxy_url, e))
+            })?;
+            builder = builder.proxy(proxy);
         }
 
-        builder
+        Ok(builder)
     }
 
     /// 创建共享的 reqwest 客户端
@@ -257,7 +263,7 @@ impl XhCurlManager {
     /// # 返回
     /// 配置好的 reqwest::Client
     pub fn create_client(&self) -> XhCurlResult<reqwest::Client> {
-        self.create_client_builder()
+        self.create_client_builder()?
             .build()
             .map_err(XhCurlError::from)
     }

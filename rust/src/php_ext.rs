@@ -54,12 +54,24 @@ fn sapi_is_cli() -> bool {
 /// reqwest Client 内部维护连接池（TCP keep-alive、TLS 会话缓存），
 /// 全局复用可避免每次请求重新建连，显著提升批量请求性能。
 /// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
+///
+/// # 代理配置失败处理
+/// 若全局代理地址无效（`create_client_builder` 返回错误），
+/// 回退到不设代理的默认客户端并在 stderr 打印警告，
+/// 而非 panic 导致 PHP 进程 abort（更符合 PHP 扩展的容错预期）。
 pub(crate) fn global_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        XhCurlManager::global()
-            .create_client()
-            .expect("初始化全局 HTTP 客户端失败")
+        match XhCurlManager::global().create_client() {
+            Ok(client) => client,
+            Err(e) => {
+                // 代理等配置无效：回退到默认客户端，避免 panic 导致进程 abort
+                eprintln!("[XHCurl] 全局客户端初始化失败，回退到默认配置: {}", e);
+                reqwest::Client::builder()
+                    .build()
+                    .expect("创建回退 reqwest 客户端失败")
+            }
+        }
     })
 }
 

@@ -696,7 +696,7 @@ impl XhRequest {
     fn build_request_client(&self, _client: &reqwest::Client) -> XhCurlResult<reqwest::Client> {
         // 从全局管理器获取完整配置的 ClientBuilder，确保 UA/keepalive/连接池/TLS
         // 等全部继承，再逐项覆盖请求级配置。
-        let mut builder = crate::curl::XhCurlManager::global().create_client_builder();
+        let mut builder = crate::curl::XhCurlManager::global().create_client_builder()?;
 
         // 请求级连接超时（覆盖全局默认，0 = 使用全局默认，故仅 > 0 时覆盖）
         if let Some(secs) = self.connect_timeout {
