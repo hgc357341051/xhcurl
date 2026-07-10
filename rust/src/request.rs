@@ -196,18 +196,6 @@ pub struct XhRequest {
     /// 自动设置 Authorization: Bearer {token}
     bearer_token: Option<String>,
 
-    /// 自定义 CA 证书路径（CURLOPT_CAINFO）
-    ca_info: Option<String>,
-
-    /// 客户端证书路径（CURLOPT_SSLCERT）
-    ssl_cert: Option<String>,
-
-    /// 客户端证书密钥路径（CURLOPT_SSLKEY）
-    ssl_key: Option<String>,
-
-    /// 客户端证书密钥密码（CURLOPT_SSLKEYPASSWD）
-    ssl_key_password: Option<String>,
-
     /// Accept-Encoding 头部（CURLOPT_ENCODING）
     /// 如 "gzip, deflate"
     encoding: Option<String>,
@@ -219,15 +207,6 @@ pub struct XhRequest {
     /// Range 请求范围（CURLOPT_RANGE）
     /// 格式: "0-1023" 表示请求前 1024 字节
     range: Option<String>,
-
-    /// 请求优先级（0 = 默认，数值越大优先级越高）
-    /// 用于线程池模式下的任务调度
-    priority: i32,
-
-    /// 流式回调间隔（字节）
-    /// 每接收指定大小数据触发一次回调
-    /// 0 表示禁用流式回调
-    stream_chunk_size: usize,
 }
 
 impl XhRequest {
@@ -256,15 +235,9 @@ impl XhRequest {
             cookies: None,
             auth: None,
             bearer_token: None,
-            ca_info: None,
-            ssl_cert: None,
-            ssl_key: None,
-            ssl_key_password: None,
             encoding: None,
             custom_method: None,
             range: None,
-            priority: 0,
-            stream_chunk_size: 0,
         }
     }
 
@@ -452,30 +425,6 @@ impl XhRequest {
         self
     }
 
-    /// 设置自定义 CA 证书路径（CURLOPT_CAINFO）
-    pub fn ca_info(mut self, path: impl Into<String>) -> Self {
-        self.ca_info = Some(path.into());
-        self
-    }
-
-    /// 设置客户端证书路径（CURLOPT_SSLCERT）
-    pub fn ssl_cert(mut self, path: impl Into<String>) -> Self {
-        self.ssl_cert = Some(path.into());
-        self
-    }
-
-    /// 设置客户端证书密钥路径（CURLOPT_SSLKEY）
-    pub fn ssl_key(mut self, path: impl Into<String>) -> Self {
-        self.ssl_key = Some(path.into());
-        self
-    }
-
-    /// 设置客户端证书密钥密码（CURLOPT_SSLKEYPASSWD）
-    pub fn ssl_key_password(mut self, password: impl Into<String>) -> Self {
-        self.ssl_key_password = Some(password.into());
-        self
-    }
-
     /// 设置 Accept-Encoding（CURLOPT_ENCODING）
     /// 如 "gzip, deflate, br"
     pub fn encoding(mut self, encoding: impl Into<String>) -> Self {
@@ -494,19 +443,6 @@ impl XhRequest {
     /// 格式: "0-1023" 或 "0-" 或 "-1023"
     pub fn range(mut self, range: impl Into<String>) -> Self {
         self.range = Some(range.into());
-        self
-    }
-
-    /// 设置请求优先级
-    pub fn priority(mut self, priority: i32) -> Self {
-        self.priority = priority;
-        self
-    }
-
-    /// 设置流式回调间隔（字节）
-    /// 0 = 禁用流式回调
-    pub fn stream_chunk_size(mut self, size: usize) -> Self {
-        self.stream_chunk_size = size;
         self
     }
 
@@ -567,24 +503,9 @@ impl XhRequest {
         self.range.as_deref()
     }
 
-    /// 获取自定义 CA 证书路径
-    pub fn get_ca_info(&self) -> Option<&str> {
-        self.ca_info.as_deref()
-    }
-
     /// 获取 Accept-Encoding
     pub fn get_encoding(&self) -> Option<&str> {
         self.encoding.as_deref()
-    }
-
-    /// 获取请求优先级
-    pub fn get_priority(&self) -> i32 {
-        self.priority
-    }
-
-    /// 获取流式回调间隔
-    pub fn get_stream_chunk_size(&self) -> usize {
-        self.stream_chunk_size
     }
 
     /// 获取连接超时

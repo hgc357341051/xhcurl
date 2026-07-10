@@ -115,9 +115,9 @@ fn test_multi_executor() {
     let mut multi = XhMulti::new(client).max_concurrency(10).timeout(30);
 
     // 添加请求
-    multi.add(XhRequest::new("https://httpbin.org/get").id("req1"));
-    multi.add(XhRequest::new("https://httpbin.org/get").id("req2"));
-    multi.add(XhRequest::new("https://httpbin.org/get").id("req3"));
+    let _ = multi.add(XhRequest::new("https://httpbin.org/get").id("req1"));
+    let _ = multi.add(XhRequest::new("https://httpbin.org/get").id("req2"));
+    let _ = multi.add(XhRequest::new("https://httpbin.org/get").id("req3"));
 
     assert_eq!(multi.len(), 3);
 

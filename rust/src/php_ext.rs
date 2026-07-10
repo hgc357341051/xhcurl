@@ -569,36 +569,6 @@ impl PhpXhRequest {
         Ok(self_)
     }
 
-    /// 设置请求优先级（线程池模式下生效）
-    /// 数值越大优先级越高
-    ///
-    /// # PHP 签名
-    /// public XHRequest::setPriority(int $priority): $self_
-
-    pub fn set_priority(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        priority: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().priority(priority as i32);
-        self_
-    }
-
-    /// 设置 Cookie 字符串
-    ///
-    /// 对应 curl 的 CURLOPT_COOKIE。
-    /// 格式: "name1=value1; name2=value2"
-    ///
-    /// # PHP 签名
-    /// public XHRequest::cookies(string $cookies): $self_
-
-    pub fn cookies(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        cookies: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().cookies(cookies);
-        self_
-    }
-
     /// 设置 HTTP 基本认证
     ///
     /// 对应 curl 的 CURLOPT_USERPWD。
@@ -631,63 +601,19 @@ impl PhpXhRequest {
         self_
     }
 
-    /// 设置自定义 CA 证书路径
+    /// 设置 Cookie 字符串
     ///
-    /// 对应 curl 的 CURLOPT_CAINFO。
-    ///
-    /// # PHP 签名
-    /// public XHRequest::caInfo(string $path): $self_
-
-    pub fn ca_info(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        path: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().ca_info(path);
-        self_
-    }
-
-    /// 设置客户端证书路径
-    ///
-    /// 对应 curl 的 CURLOPT_SSLCERT。
+    /// 对应 curl 的 CURLOPT_COOKIE。
+    /// 格式: "name1=value1; name2=value2"
     ///
     /// # PHP 签名
-    /// public XHRequest::sslCert(string $path): $self_
+    /// public XHRequest::cookies(string $cookies): $self_
 
-    pub fn ssl_cert(
+    pub fn cookies(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        path: String,
+        cookies: String,
     ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().ssl_cert(path);
-        self_
-    }
-
-    /// 设置客户端证书密钥路径
-    ///
-    /// 对应 curl 的 CURLOPT_SSLKEY。
-    ///
-    /// # PHP 签名
-    /// public XHRequest::sslKey(string $path): $self_
-
-    pub fn ssl_key(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        path: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().ssl_key(path);
-        self_
-    }
-
-    /// 设置客户端证书密钥密码
-    ///
-    /// 对应 curl 的 CURLOPT_SSLKEYPASSWD。
-    ///
-    /// # PHP 签名
-    /// public XHRequest::sslKeyPassword(string $password): $self_
-
-    pub fn ssl_key_password(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        password: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().ssl_key_password(password);
+        self_.request = self_.request.clone().cookies(cookies);
         self_
     }
 
@@ -1301,9 +1227,19 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
     let _ = ht.insert("status", response.status() as i64);
     let _ = ht.insert("body_size", response.body_size() as i64);
 
-    // 响应体（UTF-8 文本）
-    if let Ok(body) = response.body_text() {
-        let _ = ht.insert("body", body);
+    // 响应体：直接设置二进制安全的 PHP 字符串
+    // PHP 字符串本质是字节序列（zend_string 带长度），二进制安全。
+    // 不能用 String::from_utf8_lossy —— 它会把无效 UTF-8 字节替换为
+    // U+FFFD（3 字节），导致二进制响应体长度变化、数据损坏
+    // （例如 50 字节随机数据会膨胀为 ~98 字节）。
+    // 也不能用 Vec<u8> 直接 insert —— Vec<u8> 的 IntoZval 实现会
+    // 转为 PHP 数组而非字符串。
+    // 解决方案：构造 Zval 后调用 set_binary::<u8>() 设置二进制字符串，
+    // 再通过 Zval: IntoZval 移动插入哈希表。
+    if let Some(body_bytes) = response.body() {
+        let mut zv = Zval::new();
+        zv.set_binary::<u8>(body_bytes.to_vec());
+        let _ = ht.insert("body", zv);
     }
 
     // 最终 URL（可能因重定向变化）
