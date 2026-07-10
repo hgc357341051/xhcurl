@@ -704,9 +704,8 @@ impl XhRequest {
                             .mime_str(ct)
                             .map_err(|e| XhCurlError::Generic(format!("MIME 类型错误: {}", e)))?;
                     }
-                    form = form
-                        .text(field.name.clone(), String::new())
-                        .part(field.name.clone(), part);
+                    // 直接添加 part，无需先 text() 再 part()（原实现会重复添加同名空字段）
+                    form = form.part(field.name.clone(), part);
                 }
                 builder.multipart(form)
             }
@@ -738,6 +737,14 @@ impl XhRequest {
         // 设置超时（覆盖客户端默认值）
         if let Some(timeout) = self.request_timeout {
             builder = builder.timeout(Duration::from_secs(timeout));
+        }
+
+        // 请求级 User-Agent 覆盖（CURLOPT_USERAGENT）
+        // reqwest 共享 Client 只能设置全局 UA，此处通过请求头覆盖
+        if let Some(ua) = &self.user_agent {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
+                builder = builder.header(reqwest::header::USER_AGENT, v);
+            }
         }
 
         Ok(builder)

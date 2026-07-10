@@ -866,6 +866,53 @@ impl PhpXhRequest {
     pub fn get_method(&self) -> String {
         self.request.get_method().to_string()
     }
+
+    /// 同步执行单个 HTTP 请求，一次性返回完整响应
+    ///
+    /// 适用于用户已知响应数据不大的场景，无需创建 XHMulti/XHThreadPool，
+    /// 直接在当前请求对象上调用 execute() 即可获得完整响应。
+    ///
+    /// 返回的数组包含全部字段：
+    ///   - success: bool       是否成功（2xx 且无错误）
+    ///   - status: int         HTTP 状态码（请求失败时为 0）
+    ///   - body: string        响应体（UTF-8 文本）
+    ///   - body_size: int      响应体大小（字节）
+    ///   - headers: array      所有响应头（键值对）
+    ///   - url: string         最终 URL（可能因重定向变化）
+    ///   - elapsed_ms: int     请求耗时（毫秒）
+    ///   - remote_addr: ?string 远程服务器地址（IP:Port）
+    ///   - version: ?string    HTTP 协议版本（如 "HTTP/1.1"）
+    ///   - error: ?string      错误信息（请求成功时为 null）
+    ///
+    /// # PHP 签名
+    /// public XHRequest::execute(): array
+    ///
+    /// # 示例
+    /// $resp = XHCurl::createRequest("https://example.com/api")->get()->execute();
+    /// if ($resp['success']) {
+    ///     echo $resp['status'];      // 200
+    ///     echo $resp['body'];        // 响应体
+    ///     echo $resp['elapsed_ms'];  // 耗时
+    /// }
+
+    pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
+        let client = global_client().clone();
+        let request = self.request.clone();
+        let max_response_size = XhCurlManager::global().config().max_response_size;
+
+        let result = global_runtime()
+            .block_on(async move {
+                let request_id = request
+                    .get_id()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| request.get_url().to_string());
+                XhMulti::execute_single(client, request, request_id, None, max_response_size)
+                    .await
+            })
+            .map_err(|e| e.to_string())?;
+
+        Ok(response_to_php_array(&result))
+    }
 }
 
 // +----------------------------------------------------------------------+
@@ -997,14 +1044,14 @@ impl PhpXhResponse {
 #[php_class]
 #[php(name = "XHMulti")]
 pub struct PhpXhMulti {
-    /// 内部批量执行器（按需在 execute() 中创建，不在此持有）
-    _multi: Option<XhMulti>,
-
     /// 待执行的请求列表
     requests: Vec<XhRequest>,
 
     /// 最大并发数（0 = 无限制）
     max_concurrency: usize,
+
+    /// 最大响应体大小（字节，0 = 使用全局配置）
+    max_response_size: usize,
 }
 
 /// PHP XHMulti 类的方法实现
@@ -1014,9 +1061,9 @@ impl PhpXhMulti {
 
     pub fn __construct() -> Self {
         Self {
-            _multi: None,
             requests: Vec::new(),
             max_concurrency: 0,
+            max_response_size: 0,
         }
     }
 
@@ -1055,6 +1102,21 @@ impl PhpXhMulti {
         self_
     }
 
+    /// 设置单个响应的最大响应体大小（字节）
+    /// 防止恶意服务器返回超大响应导致内存溢出。
+    /// 0 = 使用全局配置（默认 10MB）。
+    ///
+    /// # PHP 签名
+    /// public XHMulti::maxResponseSize(int $size): $self_
+
+    pub fn max_response_size(
+        self_: &mut ZendClassObject<PhpXhMulti>,
+        size: i64,
+    ) -> &mut ZendClassObject<PhpXhMulti> {
+        self_.max_response_size = size as usize;
+        self_
+    }
+
     /// 执行所有请求
     ///
     /// # PHP 签名
@@ -1066,6 +1128,12 @@ impl PhpXhMulti {
         let client = global_client().clone();
         let max_concurrency = self.max_concurrency;
         let requests = std::mem::take(&mut self.requests);
+        // 0 表示使用全局配置值
+        let max_resp_size = if self.max_response_size > 0 {
+            self.max_response_size
+        } else {
+            XhCurlManager::global().config().max_response_size
+        };
 
         let results = global_runtime()
             .block_on(async move {
@@ -1073,6 +1141,7 @@ impl PhpXhMulti {
                 if max_concurrency > 0 {
                     multi = multi.max_concurrency(max_concurrency);
                 }
+                multi = multi.max_response_size(max_resp_size);
                 multi.add_many(requests).map_err(|e| e.to_string())?;
                 multi.execute().await.map_err(|e| e.to_string())
             })
@@ -1235,19 +1304,65 @@ fn results_to_php_array(
             let _ = response_ht.insert("error", err.clone());
         }
 
+        // 写入完整响应信息（status/body/headers/url/remote_addr/version 等）
         if let Some(resp) = &result.response {
-            let _ = response_ht.insert("status", resp.status() as i64);
-            let _ = response_ht.insert("body_size", resp.body_size() as i64);
-            if let Ok(body) = resp.body_text() {
-                let _ = response_ht.insert("body", body);
-            }
-            let _ = response_ht.insert("url", resp.url().to_string());
+            fill_response_fields(&mut response_ht, resp);
         }
 
         // 使用整数键，确保 PHP 端 $res[0] 可访问
         let _ = ht.insert_at_index(i as i64, response_ht);
     }
     Ok(ht)
+}
+
+/// 将单个 XhResponse 的完整信息填充到 PHP 哈希表中
+/// 供 XHRequest::execute() 和 results_to_php_array() 共用，
+/// 确保单请求与批量请求返回的字段完全一致。
+fn response_to_php_array(response: &XhResponse) -> ZBox<ZendHashTable> {
+    let mut ht = ZendHashTable::new();
+    let _ = ht.insert("success", response.is_success());
+    fill_response_fields(&mut ht, response);
+    ht
+}
+
+/// 将 XhResponse 的所有字段填充到 PHP 哈希表
+/// 包含 status/body/body_size/headers/url/remote_addr/version/error
+fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhResponse) {
+    let _ = ht.insert("status", response.status() as i64);
+    let _ = ht.insert("body_size", response.body_size() as i64);
+
+    // 响应体（UTF-8 文本）
+    if let Ok(body) = response.body_text() {
+        let _ = ht.insert("body", body);
+    }
+
+    // 最终 URL（可能因重定向变化）
+    let _ = ht.insert("url", response.url().to_string());
+
+    // 所有响应头
+    let mut headers_ht = ZendHashTable::new();
+    for (name, value) in response.headers().all() {
+        let _ = headers_ht.insert(name.as_str(), value);
+    }
+    let _ = ht.insert("headers", headers_ht);
+
+    // 远程服务器地址
+    if let Some(addr) = response.remote_addr() {
+        let _ = ht.insert("remote_addr", addr);
+    }
+
+    // HTTP 协议版本
+    if let Some(version) = response.version() {
+        let _ = ht.insert("version", version);
+    }
+
+    // 错误信息
+    if let Some(err) = response.error() {
+        let _ = ht.insert("error", err);
+    }
+
+    // 请求耗时（毫秒）
+    let _ = ht.insert("elapsed_ms", response.elapsed().as_millis() as i64);
 }
 
 /// 将 PHP 数组转换为 JSON 字符串
