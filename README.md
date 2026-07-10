@@ -1,7 +1,7 @@
 # XHCurl - 高性能 PHP HTTP 客户端扩展（Rust 实现）
 
 [![Build Status](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml/badge.svg)](https://github.com/hgc357341051/xhcurl/actions/workflows/build-rust.yml)
-[![PHP Version](https://img.shields.io/badge/PHP-8.1%20--%208.4-blue.svg)](https://php.net)
+[![PHP Version](https://img.shields.io/badge/PHP-8.1%20--%208.5-blue.svg)](https://php.net)
 [![Rust](https://img.shields.io/badge/Rust-stable%20%7C%20nightly%20(Win)-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-green.svg)](#平台支持)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
@@ -553,7 +553,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `timed_out` | bool | 是否因超时被终止 |
 | `truncated` | bool | 输出是否因超过 max_output 被截断 |
 | `error` | string | 错误信息（启动失败、超限等，可选） |
-| `command` | string | 失败时的命令名（仅 `failure_result` 路径返回，可选） |
+| `command` | string | 失败时的命令名（白名单/黑名单拒绝、超时、截断等错误路径返回，可选） |
 
 ### 示例
 

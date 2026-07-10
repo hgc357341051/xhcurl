@@ -1487,7 +1487,6 @@ pub fn xhrun(
     args: Option<&ZendHashTable>,
     options: Option<&ZendHashTable>,
 ) -> Result<ZBox<ZendHashTable>, String> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
@@ -1647,67 +1646,11 @@ pub fn xhrun(
     let mut truncated = false;
     let mut timed_out = false;
 
-    // 取出 stdout/stderr 管道，在子线程中读取避免死锁
-    let mut child_stdout = child.stdout.take();
-    let mut child_stderr = child.stderr.take();
-
     // 读线程：独立限制 stdout/stderr 各自的大小为 max_output
     let total_limit = max_output;
-    let stdout_handle = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
-        let mut buf = Vec::new();
-        let mut exceeded = false;
-        if let Some(out) = child_stdout.as_mut() {
-            let mut tmp = [0u8; 8192];
-            loop {
-                match out.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if buf.len() + n <= total_limit {
-                            buf.extend_from_slice(&tmp[..n]);
-                        } else {
-                            let remaining = total_limit.saturating_sub(buf.len());
-                            if remaining > 0 {
-                                buf.extend_from_slice(&tmp[..remaining]);
-                            }
-                            exceeded = true;
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Ok((buf, exceeded))
-    });
+    let stdout_handle = spawn_output_reader(child.stdout.take(), total_limit);
 
-    let stderr_handle = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
-        let mut buf = Vec::new();
-        let mut exceeded = false;
-        if let Some(err) = child_stderr.as_mut() {
-            let mut tmp = [0u8; 8192];
-            loop {
-                match err.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if buf.len() + n <= total_limit {
-                            buf.extend_from_slice(&tmp[..n]);
-                        } else {
-                            let remaining = total_limit.saturating_sub(buf.len());
-                            if remaining > 0 {
-                                buf.extend_from_slice(&tmp[..remaining]);
-                            }
-                            exceeded = true;
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Ok((buf, exceeded))
-    });
+    let stderr_handle = spawn_output_reader(child.stderr.take(), total_limit);
 
     // 主线程：等待子进程，带超时
     let exit_code: i64;
@@ -1813,11 +1756,13 @@ pub fn xhrun(
 
     if timed_out {
         let _ = result.insert("error", format!("命令执行超时（{} 秒）", timeout_secs));
+        let _ = result.insert("command", command);
     } else if truncated {
         let _ = result.insert(
             "error",
             format!("输出超过最大限制 {} 字节，已截断", max_output),
         );
+        let _ = result.insert("command", command);
     }
 
     Ok(result)
@@ -1886,6 +1831,43 @@ fn failure_result(command: &str, exit_code: i64, error: &str) -> ZBox<ZendHashTa
     let _ = result.insert("error", error);
     let _ = result.insert("command", command);
     result
+}
+
+/// 在子线程中读取子进程输出流，带大小限制。
+///
+/// 用于 xhrun 的 stdout/stderr 读取，避免主线程阻塞导致的死锁。
+/// 返回 (读取到的字节, 是否因超过 limit 被截断)。
+fn spawn_output_reader<R: std::io::Read + Send + 'static>(
+    mut stream: Option<R>,
+    limit: usize,
+) -> std::thread::JoinHandle<std::io::Result<(Vec<u8>, bool)>> {
+    std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::new();
+        let mut exceeded = false;
+        if let Some(out) = stream.as_mut() {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match out.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf.len() + n <= limit {
+                            buf.extend_from_slice(&tmp[..n]);
+                        } else {
+                            let remaining = limit.saturating_sub(buf.len());
+                            if remaining > 0 {
+                                buf.extend_from_slice(&tmp[..remaining]);
+                            }
+                            exceeded = true;
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok((buf, exceeded))
+    })
 }
 
 // +----------------------------------------------------------------------+
