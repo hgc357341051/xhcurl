@@ -7,9 +7,9 @@
 // | PHP 类映射：                                                           |
 // |   XHCurl      → 全局管理器（静态方法）                                 |
 // |   XHRequest   → 请求构建器（链式调用）                                 |
-// |   XHResponse  → 响应对象                                               |
 // |   XHMulti     → 异步批量执行器                                         |
 // |   XHThreadPool→ 线程池                                                 |
+// |   （响应统一以关联数组返回，无 XHResponse PHP 类）                        |
 // |                                                                        |
 // | 链式调用实现：                                                          |
 // |   ext-php-rs 0.14+：方法第一个参数命名为 self_（类型 &mut ZendClassObject<>），|

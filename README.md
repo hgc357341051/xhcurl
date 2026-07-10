@@ -343,16 +343,23 @@ echo "回调: " . $custom['callback'] . "\n";
 
 ```php
 XHCurl::setConfig([
-    'connect_timeout'    => 10,      // 连接超时（秒）
-    'request_timeout'    => 30,      // 请求超时（秒）
-    'max_response_size'  => 10485760,// 最大响应体（字节，默认 10MB）
-    'follow_redirects'   => true,    // 跟随重定向
-    'max_redirects'      => 10,      // 最大重定向次数
-    'verify_ssl'         => true,    // 验证 SSL 证书
-    'user_agent'         => 'XHCurl',// User-Agent
-    'proxy'              => null,    // 代理地址
+    'connect_timeout'        => 10,      // 连接超时（秒）
+    'request_timeout'        => 30,      // 请求超时（秒）
+    'max_response_size'      => 10485760,// 最大响应体（字节，默认 10MB）
+    'follow_redirects'       => true,    // 跟随重定向
+    'max_redirects'          => 10,      // 最大重定向次数
+    'verify_ssl'             => true,    // 验证 SSL 证书
+    'user_agent'             => 'XHCurl',// User-Agent
+    'proxy'                  => null,    // 代理地址
+    'tcp_keepalive'          => true,    // TCP keep-alive（连接复用）
+    'tcp_keepalive_interval' => 60,      // keep-alive 探测间隔（秒）
+    'max_connections'        => 100,     // 连接池上限
 ]);
 ```
+
+> **类型校验**：`setConfig()` 会对每个配置项做类型检查。数值项传入字符串、
+> 布尔项传入数值等不匹配情况会被收集，最终返回包含所有不匹配项名的错误信息，
+> 而非静默忽略。负数会被跳过（保留原值），不会 panic。
 
 ### XHRequest - 请求构建器
 
@@ -453,7 +460,8 @@ XHCurl::setConfig([
 | `error` | string | 错误信息（失败时，可选） |
 | `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()` 时） |
 
-> `XHResponse` 类为内部类型，当前未提供公开构造路径，所有 API 均直接返回上述数组。
+> 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
+> 超出会在执行前拒绝（避免先克隆再拒绝导致 OOM）。
 
 ### XHMulti - 批量异步执行器
 
