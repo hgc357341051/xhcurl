@@ -19,7 +19,7 @@ edition = "2021"
 # 项目描述
 description = "高性能 PHP cURL 扩展 - Rust 核心引擎"
 # 仓库链接
-repository = "https://github.com/xiaohu/xhcurl"
+repository = "https://github.com/hgc357341051/xhcurl"
 
 [lib]
 # 生成 cdylib（动态库）供 PHP 加载

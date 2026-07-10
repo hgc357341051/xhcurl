@@ -1890,7 +1890,9 @@ fn failure_result(command: &str, exit_code: i64, error: &str) -> ZBox<ZendHashTa
     let _ = result.insert("pid", 0_i64);
     let _ = result.insert("timed_out", false);
     let _ = result.insert("truncated", false);
-    let _ = result.insert("error", format!("{}: {}", error, command));
+    // error 与 command 分离，避免 error 字段内命令名重复
+    let _ = result.insert("error", error);
+    let _ = result.insert("command", command);
     result
 }
 

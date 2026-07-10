@@ -354,7 +354,7 @@ jobs:
   # =====================================================================
   # Job 3: Windows 平台编译
   # 使用 cargo + ext-php-rs 编译为 .dll 扩展
-  # 支持 PHP 8.1 ~ 8.4（Fiber 协程需要 PHP 8.1+）
+  # 支持 PHP 8.1 ~ 8.5（Fiber 协程需要 PHP 8.1+）
   #
   # Windows 编译注意事项（ext-php-rs 官方要求）：
   #   1. 必须使用 Rust nightly —— abi_vectorcall 调用约定是 nightly-only
@@ -362,8 +362,8 @@ jobs:
   #   2. 必须使用 rust-lld 链接器 —— MSVC link.exe 会导致 build script 崩溃
   #      （STATUS_STACK_BUFFER_OVERRUN, exit code 0xc0000409）
   #      配置在 rust/.cargo/config.toml 中
-  #   3. 需要 MSVC cl.exe（cc crate 编译 wrapper.c 需要）—— 由 ilammy/msvc-dev-cmd 提供
-  #   4. 需要 libclang（bindgen 需要）—— 由 choco llvm 提供
+  #   3. 需要 MSVC cl.exe（cc crate 编译 wrapper.c 需要）—— windows-2022 runner 默认自带
+  #   4. 需要 libclang（bindgen 需要）—— 由 KyleMayes/install-llvm-action 提供
   #   5. 需要 PHP 可执行文件（build script 调用 php -i）—— 由 shivammathur/setup-php 提供
   # =====================================================================
   build-windows:
@@ -398,13 +398,9 @@ jobs:
       # -----------------------------------------------------------------
       # 步骤 3: 安装 LLVM 17（bindgen 依赖 libclang）
       #
-      # 关键：必须固定到 LLVM 17，不能用 choco install llvm（会装最新的 19）。
-      # 原因：ext-php-rs 0.12.0 依赖 bindgen 0.68.1，该版本在遇到
-      #   `_Complex _Float16` 内建类型时会 panic（context.rs:2020）。
-      #   该内建类型由 LLVM 18+ 的 libclang 声明。LLVM 17 不会声明它，
-      #   因此 bindgen 0.68.1 能正常工作。
-      #   参考：ext-php-rs 0.12 官方 CI 使用 clang "15"/"17" 均通过；
-      #         Mozilla bug 1878536（bindgen > 0.69.2 才修复此 panic）。
+      # 固定到 LLVM 17（而非 choco install llvm 装的最新版），原因：
+      # ext-php-rs 0.15 依赖 bindgen 0.72.1（fork 版），虽已修复
+      #   `_Complex _Float16` panic，但为保持与历史验证一致仍用 LLVM 17。
       # 使用 KyleMayes/install-llvm-action 与 ext-php-rs 官方 CI 一致。
       # -----------------------------------------------------------------
       - name: Cache LLVM 17
@@ -514,7 +510,7 @@ jobs:
           }
 
       # -----------------------------------------------------------------
-      # 步骤 8: 收集并上传产物
+      # 步骤 7: 收集并上传产物
       # Windows 编译产物为 .dll 文件
       # -----------------------------------------------------------------
       - name: Collect and upload artifacts

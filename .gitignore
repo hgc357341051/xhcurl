@@ -48,15 +48,4 @@ xhcurl.la
 # OS 文件
 .DS_Store
 Thumbs.db
-*.php
-*.txt
-*.dll
-# 测试输出
-tests/*.out
-tests/*.diff
-tests/*.exp
-tests/*.log
-tests/*.mem
-tests/*.php
-tests/*.sh
-tests/*.xml
+

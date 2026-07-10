@@ -53,7 +53,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 
 | 平台 | PHP 版本 | 线程安全 | 状态 |
 |------|----------|----------|------|
-| Linux (Ubuntu 22.04) | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS | ✅ 支持 |
+| Linux (Ubuntu 24.04) | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS | ✅ 支持 |
 | macOS 14 | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS | ✅ 支持 |
 | Windows (x64) | 8.1, 8.2, 8.3, 8.4, 8.5 | NTS / TS | ✅ 支持 |
 
@@ -553,6 +553,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `timed_out` | bool | 是否因超时被终止 |
 | `truncated` | bool | 输出是否因超过 max_output 被截断 |
 | `error` | string | 错误信息（启动失败、超限等，可选） |
+| `command` | string | 失败时的命令名（仅 `failure_result` 路径返回，可选） |
 
 ### 示例
 
@@ -754,9 +755,9 @@ php -d extension=target/release/libxhcurl.so -r "echo XHCurl::version();"
 
 GitHub Actions（`build-rust.yml`）在 push 到 main 或创建 tag 时自动触发，编译以下矩阵：
 
-- **Linux**：PHP 8.1~8.4（Ubuntu 22.04）
-- **macOS**：PHP 8.1~8.3（macOS 14）
-- **Windows**：PHP 8.1~8.4 NTS/ZTS（Windows 2022）
+- **Linux**：PHP 8.1~8.5（Ubuntu 24.04）
+- **macOS**：PHP 8.1~8.5（macOS 14）
+- **Windows**：PHP 8.1~8.5 NTS/ZTS（Windows 2022）
 - **Lint & Test**：cargo fmt + clippy + 单元测试
 
 ---
