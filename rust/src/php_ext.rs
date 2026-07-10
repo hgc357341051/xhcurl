@@ -1563,7 +1563,11 @@ pub fn xhrun(
     };
 
     // ===== 2. 解析 options =====
-    let timeout_secs: u64 = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64) as u64;
+    let timeout_raw = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64);
+    if timeout_raw < 0 {
+        return Err(format!("timeout 不能为负数，得到 {}", timeout_raw));
+    }
+    let timeout_secs: u64 = timeout_raw as u64;
     // max_output = 0 表示无限制（与 timeout = 0 语义一致）
     let max_output: usize = {
         let v = opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64);
