@@ -1,13 +1,12 @@
 // +----------------------------------------------------------------------+
 // | XHCurl 扩展 - 线程池（XHThreadPool）                                   |
-// | 基于 tokio + crossbeam-channel 实现真正的多线程并发                    |
+// | 基于 tokio + channel 实现真正的多线程并发                              |
 // |                                                                        |
 // | 核心改进（对比 C 版本）：                                              |
 // | 1. 工作线程通过 channel 与主线程通信，解决"不能调用 PHP 函数"限制      |
 // | 2. 使用 tokio 运行时，自动管理工作线程生命周期                         |
-// | 3. 支持任务优先级调度                                                  |
-// | 4. 编译期线程安全：Send + Sync bounds                                  |
-// | 5. 统一 FPM/CLI 模式：FPM 使用单线程运行时，CLI 使用多线程运行时       |
+// | 3. 编译期线程安全：Send + Sync bounds                                  |
+// | 4. 统一 FPM/CLI 模式：FPM 使用单线程运行时，CLI 使用多线程运行时       |
 // |                                                                        |
 // | 工作模型：                                                             |
 // |   主线程 (PHP) ──发送任务──> [任务队列] ──> 工作线程 1                 |
@@ -36,8 +35,6 @@ pub enum TaskMessage {
     Request {
         /// 请求构建器
         request: XhRequest,
-        /// reqwest 客户端（共享连接池）
-        client: reqwest::Client,
         /// 流式回调发送端（可选）
         stream_tx: Option<mpsc::Sender<(String, StreamEvent)>>,
     },
@@ -66,16 +63,16 @@ pub struct ThreadPoolConfig {
     pub worker_count: usize,
 
     /// 任务队列容量
-    /// 0 = 无界队列
+    /// 0 = 无界队列（使用 unbounded_channel）
     pub queue_capacity: usize,
 
     /// 空闲线程超时（秒）
     /// 超过此时间无任务则关闭线程
-    /// 0 = 永不超时
+    /// 0 = 永不超时（默认，线程池保持工作线程存活以复用连接）
+    ///
+    /// 注意：设置非零值可能导致 worker 在请求间隔较长时退出，
+    /// 若此时仍有待处理任务，结果可能丢失。建议保持默认 0。
     pub idle_timeout: u64,
-
-    /// 是否启用任务优先级
-    pub enable_priority: bool,
 
     /// 最大响应体大小（字节）
     /// 防止恶意服务器返回超大响应导致内存溢出
@@ -93,8 +90,7 @@ impl Default for ThreadPoolConfig {
         Self {
             worker_count: cpu_count,
             queue_capacity: 1000, // 有界队列防止内存溢出
-            idle_timeout: 60,     // 60 秒空闲超时
-            enable_priority: true,
+            idle_timeout: 0,      // 永不超时：线程池应保持 worker 存活以复用连接
             max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
         }
     }
@@ -116,7 +112,11 @@ pub struct XhThreadPool {
     config: ThreadPoolConfig,
 
     /// 任务发送端（主线程 → 工作线程）
+    /// 有界 channel（queue_capacity > 0）或无界 channel（queue_capacity == 0）
     task_tx: Option<mpsc::Sender<TaskMessage>>,
+
+    /// 无界任务发送端（仅 queue_capacity == 0 时使用）
+    task_tx_unbounded: Option<mpsc::UnboundedSender<TaskMessage>>,
 
     /// 结果接收端（工作线程 → 主线程）
     result_rx: Option<mpsc::Receiver<ResultMessage>>,
@@ -141,6 +141,7 @@ impl XhThreadPool {
         Self {
             config,
             task_tx: None,
+            task_tx_unbounded: None,
             result_rx: None,
             workers: Vec::new(),
             client,
@@ -160,33 +161,44 @@ impl XhThreadPool {
             return Ok(()); // 已经启动
         }
 
-        // 创建任务 channel（有界队列防止内存溢出）
-        let (task_tx, task_rx) = mpsc::channel(if self.config.queue_capacity > 0 {
-            self.config.queue_capacity
+        // 创建任务 channel
+        // queue_capacity == 0 时使用无界 channel（避免 usize::MAX 分配极大内存的 bug）
+        let (task_tx, task_rx) = if self.config.queue_capacity > 0 {
+            let (tx, rx) = mpsc::channel(self.config.queue_capacity);
+            (Some(tx), Some(rx))
         } else {
-            usize::MAX // 无界
-        });
+            (None, None)
+        };
+
+        // 无界 channel 用于 queue_capacity == 0 的场景
+        let (task_tx_ub, task_rx_ub) = mpsc::unbounded_channel();
+        self.task_tx_unbounded = Some(task_tx_ub);
 
         // 创建结果 channel
         let (result_tx, result_rx) = mpsc::channel(self.config.queue_capacity.max(100));
 
-        // 将 task_rx 和 result_tx 包装为 Arc<Mutex> 以便在多个工作线程间共享
+        // 将 task_rx 包装为 Arc<Mutex> 以便在多个工作线程间共享
         // 注意：mpsc::Receiver 不是 Sync，需要使用 tokio::sync::Mutex
-        let task_rx = Arc::new(tokio::sync::Mutex::new(task_rx));
+        let task_rx = task_rx.map(|rx| Arc::new(tokio::sync::Mutex::new(rx)));
+        let task_rx_ub = Arc::new(tokio::sync::Mutex::new(task_rx_ub));
 
         // 创建工作线程
         for worker_id in 0..self.config.worker_count {
-            let task_rx = Arc::clone(&task_rx);
+            let task_rx = task_rx.clone();
+            let task_rx_ub = Arc::clone(&task_rx_ub);
             let result_tx = result_tx.clone();
             let client = self.client.clone();
             let idle_timeout = self.config.idle_timeout;
             let max_response_size = self.config.max_response_size;
+            let use_bounded = task_rx.is_some();
 
             // 生成工作线程任务
             let handle = tokio::spawn(async move {
                 Self::worker_loop(
                     worker_id,
                     task_rx,
+                    task_rx_ub,
+                    use_bounded,
                     result_tx,
                     client,
                     idle_timeout,
@@ -202,7 +214,7 @@ impl XhThreadPool {
         // 当所有 result_tx 都 drop 后，result_rx 会收到 None
         drop(result_tx);
 
-        self.task_tx = Some(task_tx);
+        self.task_tx = task_tx;
         self.result_rx = Some(result_rx);
         self.is_running = true;
 
@@ -213,29 +225,46 @@ impl XhThreadPool {
     ///
     /// # 参数
     /// - `worker_id`: 工作线程 ID
-    /// - `task_rx`: 任务接收端（共享）
+    /// - `task_rx`: 有界任务接收端（共享，可选）
+    /// - `task_rx_ub`: 无界任务接收端（共享）
+    /// - `use_bounded`: 是否使用有界 channel
     /// - `result_tx`: 结果发送端
-    /// - `client`: reqwest 客户端
-    /// - `idle_timeout`: 空闲超时（秒）
+    /// - `client`: reqwest 客户端（worker 闭包捕获，复用连接池）
+    /// - `idle_timeout`: 空闲超时（秒），0 = 永不超时
+    /// - `max_response_size`: 最大响应体大小
+    #[allow(clippy::too_many_arguments)]
     async fn worker_loop(
         _worker_id: usize,
-        task_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TaskMessage>>>,
+        task_rx: Option<Arc<tokio::sync::Mutex<mpsc::Receiver<TaskMessage>>>>,
+        task_rx_ub: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<TaskMessage>>>,
+        use_bounded: bool,
         result_tx: mpsc::Sender<ResultMessage>,
         client: reqwest::Client,
         idle_timeout: u64,
         max_response_size: usize,
     ) {
         loop {
-            // 获取任务（需要先获取锁再接收）
-            // 使用 timeout 包裹整个 lock+recv，避免永久阻塞
-            // 注意：recv() 在持有锁期间 await，多个工作线程串行竞争接收
+            // 获取任务
+            // idle_timeout == 0 时永久等待（默认行为，线程池保持 worker 存活）
+            // idle_timeout > 0 时空闲超时退出（用户显式设置，可能导致结果丢失）
             let task = if idle_timeout > 0 {
                 // 有空闲超时：限制 lock+recv 的总耗时
-                match tokio::time::timeout(Duration::from_secs(idle_timeout), async {
-                    task_rx.lock().await.recv().await
-                })
-                .await
-                {
+                let timeout_result = if use_bounded {
+                    let rx = task_rx.as_ref().unwrap();
+                    tokio::time::timeout(
+                        Duration::from_secs(idle_timeout),
+                        Box::pin(async { rx.lock().await.recv().await }),
+                    )
+                    .await
+                } else {
+                    tokio::time::timeout(
+                        Duration::from_secs(idle_timeout),
+                        Box::pin(async { task_rx_ub.lock().await.recv().await }),
+                    )
+                    .await
+                };
+
+                match timeout_result {
                     Ok(task) => task,
                     Err(_) => {
                         // 空闲超时，退出工作线程
@@ -244,16 +273,16 @@ impl XhThreadPool {
                 }
             } else {
                 // 无超时，永久等待
-                task_rx.lock().await.recv().await
+                if use_bounded {
+                    task_rx.as_ref().unwrap().lock().await.recv().await
+                } else {
+                    task_rx_ub.lock().await.recv().await
+                }
             };
 
             match task {
-                Some(TaskMessage::Request {
-                    request,
-                    client: _,
-                    stream_tx,
-                }) => {
-                    // 执行请求
+                Some(TaskMessage::Request { request, stream_tx }) => {
+                    // 执行请求（复用 worker 闭包捕获的 client，无需每次 clone）
                     let request_id = request
                         .get_id()
                         .map(|s| s.to_string())
@@ -334,19 +363,24 @@ impl XhThreadPool {
     /// - `Ok(())`: 提交成功
     /// - `Err`: 线程池未启动或队列已满
     pub fn submit(&self, request: XhRequest) -> XhCurlResult<()> {
-        let task_tx = self
-            .task_tx
-            .as_ref()
-            .ok_or_else(|| XhCurlError::ThreadPool("线程池未启动".to_string()))?;
+        let task = TaskMessage::Request {
+            request,
+            stream_tx: None,
+        };
 
-        // 使用 try_send 避免阻塞（如果队列满会立即返回错误）
-        task_tx
-            .try_send(TaskMessage::Request {
-                request,
-                client: self.client.clone(),
-                stream_tx: None,
-            })
-            .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        if let Some(task_tx) = &self.task_tx {
+            // 有界 channel
+            task_tx
+                .try_send(task)
+                .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        } else if let Some(task_tx) = &self.task_tx_unbounded {
+            // 无界 channel
+            task_tx
+                .send(task)
+                .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        } else {
+            return Err(XhCurlError::ThreadPool("线程池未启动".to_string()));
+        }
 
         Ok(())
     }
@@ -357,18 +391,22 @@ impl XhThreadPool {
         request: XhRequest,
         stream_tx: mpsc::Sender<(String, StreamEvent)>,
     ) -> XhCurlResult<()> {
-        let task_tx = self
-            .task_tx
-            .as_ref()
-            .ok_or_else(|| XhCurlError::ThreadPool("线程池未启动".to_string()))?;
+        let task = TaskMessage::Request {
+            request,
+            stream_tx: Some(stream_tx),
+        };
 
-        task_tx
-            .try_send(TaskMessage::Request {
-                request,
-                client: self.client.clone(),
-                stream_tx: Some(stream_tx),
-            })
-            .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        if let Some(task_tx) = &self.task_tx {
+            task_tx
+                .try_send(task)
+                .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        } else if let Some(task_tx) = &self.task_tx_unbounded {
+            task_tx
+                .send(task)
+                .map_err(|e| XhCurlError::ThreadPool(format!("提交任务失败: {}", e)))?;
+        } else {
+            return Err(XhCurlError::ThreadPool("线程池未启动".to_string()));
+        }
 
         Ok(())
     }
@@ -379,7 +417,7 @@ impl XhThreadPool {
     /// - `requests`: 请求列表
     ///
     /// # 返回
-    /// 所有请求的结果列表
+    /// 所有请求的结果列表（数量等于成功提交的请求数）
     pub async fn execute_all(
         &mut self,
         requests: Vec<XhRequest>,
@@ -388,18 +426,30 @@ impl XhThreadPool {
             self.start()?;
         }
 
-        let request_count = requests.len();
-        if request_count == 0 {
+        if requests.is_empty() {
             return Ok(Vec::new());
         }
 
-        // 提交所有请求
+        // 提交所有请求，记录成功提交的数量
+        // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
+        let mut submitted_count = 0;
         for request in requests {
-            self.submit(request)?;
+            match self.submit(request) {
+                Ok(()) => submitted_count += 1,
+                Err(e) => {
+                    // 提交失败，但已提交的请求需要继续收集结果
+                    // 不立即返回错误，避免已提交请求的结果丢失
+                    eprintln!("警告: 提交任务失败: {}", e);
+                }
+            }
         }
 
-        // 收集结果
-        let mut results = Vec::with_capacity(request_count);
+        if submitted_count == 0 {
+            return Err(XhCurlError::ThreadPool("所有请求提交失败".to_string()));
+        }
+
+        // 收集结果（数量等于成功提交的请求数）
+        let mut results = Vec::with_capacity(submitted_count);
         let mut shutdown_count = 0;
 
         let result_rx = self
@@ -407,10 +457,9 @@ impl XhThreadPool {
             .as_mut()
             .ok_or_else(|| XhCurlError::ThreadPool("结果接收端不存在".to_string()))?;
 
-        // 修复：原条件 `shutdown_count < worker_count && results.len() < request_count`
-        // 用 && 导致 worker 提前关闭时即使结果未收齐也退出，丢失结果。
-        // 正确逻辑：只要结果未收齐就继续等待，仅在所有 worker 关闭或 channel 关闭时退出。
-        while results.len() < request_count {
+        // 只要结果未收齐就继续等待
+        // 仅在所有 worker 关闭或 channel 关闭时退出
+        while results.len() < submitted_count {
             match result_rx.recv().await {
                 Some(ResultMessage::Completed(result)) => {
                     results.push(result);
@@ -436,9 +485,14 @@ impl XhThreadPool {
     /// 发送关闭信号，等待所有工作线程退出
     pub async fn shutdown(&mut self) {
         // 发送关闭信号
+        let shutdown_count = self.config.worker_count;
         if let Some(task_tx) = &self.task_tx {
-            for _ in 0..self.config.worker_count {
+            for _ in 0..shutdown_count {
                 let _ = task_tx.send(TaskMessage::Shutdown).await;
+            }
+        } else if let Some(task_tx) = &self.task_tx_unbounded {
+            for _ in 0..shutdown_count {
+                let _ = task_tx.send(TaskMessage::Shutdown);
             }
         }
 
@@ -449,6 +503,7 @@ impl XhThreadPool {
 
         // 清理 channel
         self.task_tx = None;
+        self.task_tx_unbounded = None;
         self.result_rx = None;
         self.is_running = false;
     }
@@ -467,13 +522,23 @@ impl XhThreadPool {
 impl Drop for XhThreadPool {
     fn drop(&mut self) {
         // 如果线程池还在运行，尝试关闭
-        // 注意：在 drop 中不能 await，所以使用 try_send
+        // 注意：在 drop 中不能 await，所以使用 try_send / send（无界）
         if self.is_running {
             if let Some(task_tx) = &self.task_tx {
                 for _ in 0..self.config.worker_count {
                     let _ = task_tx.try_send(TaskMessage::Shutdown);
                 }
+            } else if let Some(task_tx) = &self.task_tx_unbounded {
+                for _ in 0..self.config.worker_count {
+                    let _ = task_tx.send(TaskMessage::Shutdown);
+                }
             }
+        }
+
+        // abort 所有仍在运行的 worker task，避免任务泄漏
+        // drop 中不能 await JoinHandle，但可以 abort（立即取消 task）
+        for handle in self.workers.drain(..) {
+            handle.abort();
         }
     }
 }
@@ -498,8 +563,11 @@ mod tests {
         let config = ThreadPoolConfig::default();
         assert!(config.worker_count > 0);
         assert_eq!(config.queue_capacity, 1000);
-        assert_eq!(config.idle_timeout, 60);
-        assert!(config.enable_priority);
+        assert_eq!(config.idle_timeout, 0); // 默认永不超时
+        assert_eq!(
+            config.max_response_size,
+            DEFAULT_MAX_RESPONSE_SIZE
+        );
     }
 
     /// 测试线程池创建
@@ -516,11 +584,9 @@ mod tests {
     #[test]
     fn test_task_message() {
         let request = XhRequest::new("https://example.com");
-        let client = reqwest::Client::new();
 
         let msg = TaskMessage::Request {
             request,
-            client,
             stream_tx: None,
         };
 
