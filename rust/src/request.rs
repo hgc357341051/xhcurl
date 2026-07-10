@@ -118,6 +118,20 @@ impl MultipartField {
         }
     }
 
+    /// 创建文本字段（二进制安全，直接接收原始字节）
+    ///
+    /// 与 [`MultipartField::text`] 的区别：后者要求 `impl Into<String>`，
+    /// 非有效 UTF-8 字节会被替换/拒绝；本方法直接保留原始字节，
+    /// 适合从 PHP 端传入的二进制安全字符串（PHP 字符串本质是字节序列）。
+    pub fn text_bytes(name: impl Into<String>, value: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            filename: None,
+            content_type: None,
+        }
+    }
+
     /// 创建文件字段
     pub fn file(
         name: impl Into<String>,
