@@ -1269,15 +1269,15 @@ impl PhpXhMulti {
                         Ok(Some(result)) => {
                             // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                             let result_array = result_to_php_array(&result);
-                            // 调用用户回调，异常用 ? 向上传播（参考 fiber_each）
-                            callback_callable
-                                .try_call(vec![&result_array as &dyn IntoZvalDyn])
-                                .map_err(|e| match e {
-                                    ext_php_rs::error::Error::Exception(obj) => {
-                                        crate::fiber::extract_exception_message(&obj)
-                                    }
-                                    other => format!("回调执行失败: {}", other),
-                                })?;
+                            // 调用用户回调，异常时 abort 剩余任务再向上传播
+                            if let Err(e) =
+                                invoke_streaming_callback(&callback_callable, &result_array)
+                            {
+                                for handle in tasks.drain(..) {
+                                    handle.abort();
+                                }
+                                return Err(e);
+                            }
                             count += 1;
                             if (count as usize) >= expected {
                                 break;
@@ -1300,14 +1300,13 @@ impl PhpXhMulti {
                 // 无超时的结果收集
                 while let Some(result) = result_rx.recv().await {
                     let result_array = result_to_php_array(&result);
-                    callback_callable
-                        .try_call(vec![&result_array as &dyn IntoZvalDyn])
-                        .map_err(|e| match e {
-                            ext_php_rs::error::Error::Exception(obj) => {
-                                crate::fiber::extract_exception_message(&obj)
-                            }
-                            other => format!("回调执行失败: {}", other),
-                        })?;
+                    // 调用用户回调，异常时 abort 剩余任务再向上传播
+                    if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                        for handle in tasks.drain(..) {
+                            handle.abort();
+                        }
+                        return Err(e);
+                    }
                     count += 1;
                 }
             }
@@ -1513,16 +1512,10 @@ impl PhpXhThreadPool {
                     Some(ResultMessage::Completed(result)) => {
                         // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                         let result_array = result_to_php_array(&result);
-                        // 调用用户回调，异常捕获后中断循环（与 fiber_each 的 ? 传播等价）
-                        if let Err(e) =
-                            callback_callable.try_call(vec![&result_array as &dyn IntoZvalDyn])
+                        // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
+                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array)
                         {
-                            callback_err = Some(match e {
-                                ext_php_rs::error::Error::Exception(obj) => {
-                                    crate::fiber::extract_exception_message(&obj)
-                                }
-                                other => format!("回调执行失败: {}", other),
-                            });
+                            callback_err = Some(e);
                             break;
                         }
                         count += 1;
@@ -1541,8 +1534,18 @@ impl PhpXhThreadPool {
                 }
             }
 
+            // 完整性检查：worker panic 或提前退出可能导致结果数量不足
+            // 与 execute_all 行为一致，返回错误而非静默返回不完整结果
             if let Some(msg) = callback_err {
                 (pool, Err(msg))
+            } else if (count as usize) < submitted {
+                (
+                    pool,
+                    Err(format!(
+                        "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
+                        submitted, count
+                    )),
+                )
             } else {
                 (pool, Ok(count))
             }
@@ -1641,6 +1644,28 @@ fn results_to_php_array(
         let _ = ht.insert_at_index(i as i64, response_ht);
     }
     Ok(ht)
+}
+
+/// 调用流式回调（executeEach 共用），封装 try_call + 异常 message 提取。
+///
+/// 异常 message 提取使用 `fiber::extract_exception_message`（读 "message" 属性），
+/// 而非 `Error::Exception` 的 Display（其内部 `{e:?}` Debug 遍历 trace 属性，
+/// 可能含 NUL 字节导致 CString 转换失败，抛 InvalidCString 掩盖原始异常）。
+///
+/// 供 `XhMulti::execute_each` 和 `XHThreadPool::execute_each` 共用，消除重复。
+fn invoke_streaming_callback(
+    callback: &ZendCallable,
+    result_array: &ZBox<ZendHashTable>,
+) -> Result<(), String> {
+    callback
+        .try_call(vec![result_array as &dyn IntoZvalDyn])
+        .map(|_| ())
+        .map_err(|e| match e {
+            ext_php_rs::error::Error::Exception(obj) => {
+                crate::fiber::extract_exception_message(&obj)
+            }
+            other => format!("回调执行失败: {}", other),
+        })
 }
 
 /// 将单个 XhResponse 的完整信息填充到 PHP 哈希表中

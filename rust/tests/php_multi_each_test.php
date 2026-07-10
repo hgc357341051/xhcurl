@@ -117,5 +117,54 @@ sort($eachFields);
 check("multi executeEach 与 execute 字段一致", $gatherFields === $eachFields);
 check("multi executeEach 与 execute id 一致", $gatherResult[0]['id'] === $eachResult['id']);
 
+echo "\n=== 回调抛异常终止 executeEach ===\n";
+
+// 6. 回调抛异常终止 executeEach
+//    验证：回调异常后 executeEach 返回 Err（含异常 message），剩余请求不再回调
+$excMulti = new XHMulti();
+for ($i = 0; $i < 10; $i++) {
+    $excMulti->add(XHCurl::createRequest($BASE . '/get?id=' . $i)->get()->timeout(15)->setId('exc-' . $i));
+}
+$excCallbackCount = 0;
+$excErrorReturned = false;
+$excErrorMessage = '';
+try {
+    $excMulti->executeEach(function($result) use (&$excCallbackCount) {
+        $excCallbackCount++;
+        if ($excCallbackCount >= 2) {
+            throw new Exception("multi 回调异常终止");
+        }
+    });
+} catch (Throwable $e) {
+    $excErrorReturned = true;
+    $excErrorMessage = $e->getMessage();
+}
+check("multi executeEach 回调异常后返回错误", $excErrorReturned);
+check("multi executeEach 异常 message 正确传播", strpos($excErrorMessage, 'multi 回调异常终止') !== false);
+check("multi executeEach 异常终止后回调次数 < 10", $excCallbackCount < 10 && $excCallbackCount >= 1);
+
+echo "\n=== 批量超时终止 executeEach ===\n";
+
+// 7. 批量超时终止 executeEach
+//    使用 hanging server（127.0.0.1:18400，accept 但不响应）
+//    设置 1 秒批量超时，请求会因 hanging server 而挂起，触发批量超时
+$timeoutMulti = new XHMulti();
+for ($i = 0; $i < 3; $i++) {
+    $timeoutMulti->add(XHCurl::createRequest('http://127.0.0.1:18400/hang?id=' . $i)->get()->timeout(15)->setId('to-' . $i));
+}
+$timeoutMulti->timeout(1);
+$timeoutErrorReturned = false;
+$timeoutErrorMessage = '';
+try {
+    $timeoutMulti->executeEach(function($result) {
+        // 不应触发（请求会因 hanging server 挂起）
+    });
+} catch (Throwable $e) {
+    $timeoutErrorReturned = true;
+    $timeoutErrorMessage = $e->getMessage();
+}
+check("multi executeEach 超时返回错误", $timeoutErrorReturned);
+check("multi executeEach 超时 message 含'超时'", strpos($timeoutErrorMessage, '超时') !== false);
+
 echo "\n=== 测试结果: $pass 通过, $fail 失败 ===\n";
 exit($fail > 0 ? 1 : 0);
