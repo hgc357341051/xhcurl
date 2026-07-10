@@ -1413,13 +1413,14 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
     // 使用安全迭代器（手动控制迭代次数，防止 Iter 提前终止）
     let _ = for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
-        let val_str = if let Some(s) = val.string() {
-            s
-        } else if let Some(bytes) = val.binary::<u8>() {
-            // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
-            // Zval::string() 遇到非 UTF-8 字节会返回 None 导致表单项被静默丢弃，
-            // 这里优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
+        // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
+        // Zval::string() 遇到非 UTF-8 字节会返回 None 导致表单项被静默丢弃，
+        // 这里优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
+        // 与 body()/multipart() 的二进制安全读取保持一致。
+        let val_str = if let Some(bytes) = val.binary::<u8>() {
             String::from_utf8_lossy(&bytes).into_owned()
+        } else if let Some(s) = val.string() {
+            s
         } else if let Some(l) = val.long() {
             l.to_string()
         } else if let Some(d) = val.double() {
