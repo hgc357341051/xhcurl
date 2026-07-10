@@ -553,6 +553,21 @@ impl PhpXhRequest {
         Ok(self_)
     }
 
+    /// 设置请求 ID（用于批量请求时标识结果）
+    ///
+    /// 批量请求结果中通过 `id` 字段返回此值，便于 PHP 端关联请求与响应。
+    /// 若未设置，结果中 `id` 默认为请求 URL。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::setId(string $id): $self_
+    pub fn set_id(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        id: String,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().id(id);
+        self_
+    }
+
     /// 设置 HTTP 基本认证
     ///
     /// 对应 curl 的 CURLOPT_USERPWD。
@@ -1130,6 +1145,39 @@ where
     Ok(())
 }
 
+/// 将单个 `RequestResult` 转换为 PHP 关联数组。
+///
+/// 公共字段集（与单请求 `execute()` 返回字段保持一致 + 批量特有的 id/user_data）：
+/// - id, success, elapsed_ms
+/// - user_data?（可选，原样回传 JSON 字符串）
+/// - error?（可选，失败时）
+/// - fill_response_fields: status, body, body_size, url, headers,
+///   remote_addr?, version?, error?, elapsed_ms
+///
+/// pub(crate) 可见性：fiber.rs 的 `result_to_php_array` 复用此函数，
+/// 确保协程/批量/线程池三条路径返回字段完全一致，避免逻辑重复。
+pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<ZendHashTable> {
+    let mut response_ht = ZendHashTable::new();
+    let _ = response_ht.insert("id", result.id.clone());
+    let _ = response_ht.insert("success", result.is_success());
+    let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
+
+    // 用户自定义数据：原样回传 JSON 字符串
+    if let Some(ud) = &result.user_data {
+        let _ = response_ht.insert("user_data", ud.clone());
+    }
+
+    if let Some(err) = &result.error {
+        let _ = response_ht.insert("error", err.clone());
+    }
+
+    // 写入完整响应信息（status/body/headers/url/remote_addr/version 等）
+    if let Some(resp) = &result.response {
+        fill_response_fields(&mut response_ht, resp);
+    }
+    response_ht
+}
+
 /// 将请求结果列表转换为 PHP 数组
 /// 用于 XHMulti::execute() 和 XHThreadPool::execute() 的返回值
 ///
@@ -1142,25 +1190,7 @@ fn results_to_php_array(
 ) -> Result<ZBox<ZendHashTable>, String> {
     let mut ht = ZendHashTable::new();
     for (i, result) in results.iter().enumerate() {
-        let mut response_ht = ZendHashTable::new();
-        let _ = response_ht.insert("id", result.id.clone());
-        let _ = response_ht.insert("success", result.is_success());
-        let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
-
-        // 用户自定义数据：原样回传 JSON 字符串
-        if let Some(ud) = &result.user_data {
-            let _ = response_ht.insert("user_data", ud.clone());
-        }
-
-        if let Some(err) = &result.error {
-            let _ = response_ht.insert("error", err.clone());
-        }
-
-        // 写入完整响应信息（status/body/headers/url/remote_addr/version 等）
-        if let Some(resp) = &result.response {
-            fill_response_fields(&mut response_ht, resp);
-        }
-
+        let response_ht = result_to_php_array(result);
         // 使用整数键，确保 PHP 端 $res[0] 可访问
         let _ = ht.insert_at_index(i as i64, response_ht);
     }

@@ -349,7 +349,8 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
 
                 if let Some(fiber) = pending_fiber {
                     // 将 RequestResult 转为 PHP 数组
-                    let result_array = result_to_php_array(&msg.result)?;
+                    // 复用 php_ext::result_to_php_array，确保协程/批量/线程池字段一致
+                    let result_array = crate::php_ext::result_to_php_array(&msg.result);
 
                     // 调用 $fiber->resume($result_array) 恢复挂起的 Fiber
                     // resume 后，await() 从 Fiber::suspend() 返回，继续执行
@@ -466,32 +467,8 @@ async fn execute_http_task(
 // | 结果转换                                                              |
 // +----------------------------------------------------------------------+
 
-/// 将 RequestResult 转为 PHP 数组
-/// 复用 php_ext.rs::fill_response_fields，确保协程 API 与同步/批量 API
-/// 返回的响应字段完全一致（headers/remote_addr/version 等完整字段）
-fn result_to_php_array(result: &RequestResult) -> Result<ZBox<ZendHashTable>, String> {
-    let mut ht = ZendHashTable::new();
-    let _ = ht.insert("id", result.id.clone());
-    let _ = ht.insert("success", result.is_success());
-    let _ = ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
-
-    // 用户自定义数据：原样回传 JSON 字符串
-    // PHP 端可用 json_decode 还原为原结构（数组/对象）
-    if let Some(ud) = &result.user_data {
-        let _ = ht.insert("user_data", ud.clone());
-    }
-
-    if let Some(err) = &result.error {
-        let _ = ht.insert("error", err.clone());
-    }
-
-    // 写入完整响应信息（与 XHRequest::execute() / XHMulti::execute() 字段一致）
-    if let Some(resp) = &result.response {
-        crate::php_ext::fill_response_fields(&mut ht, resp);
-    }
-
-    Ok(ht)
-}
+// 注：RequestResult → PHP 数组的转换已统一抽到 php_ext::result_to_php_array，
+// 由 fiber / multi / threadpool 三条路径共用，确保字段集完全一致。
 
 /// 将 resume 传入的 Zval 转为数组（await 的返回值）
 ///
