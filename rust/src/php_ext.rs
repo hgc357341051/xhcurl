@@ -1279,6 +1279,8 @@ impl PhpXhMulti {
 
             // 流式收集：每收到一个结果就调用回调处理，不累积（内存恒定）
             let mut count: i64 = 0;
+            // 使用者通过回调返回 false 请求中止剩余任务（非异常，返回已处理数）
+            let mut user_aborted = false;
             if timeout > 0 {
                 // 带批量级超时的结果收集
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
@@ -1301,14 +1303,26 @@ impl PhpXhMulti {
                                     Ok(Some(result)) => {
                                         // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                                         let result_array = result_to_php_array(&result);
-                                        // 调用用户回调，异常时 abort 剩余任务再向上传播
-                                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
-                                            multi.abort_tasks();
-                                            return Err(e);
-                                        }
-                                        count += 1;
-                                        if (count as usize) >= expected {
-                                            break;
+                                        // 调用用户回调：返回 false 中止、异常 abort 后向上传播
+                                        match invoke_streaming_callback(&callback_callable, &result_array) {
+                                            Ok(false) => {
+                                                // 使用者请求中止剩余任务（非异常，返回已处理数）
+                                                // count += 1 计入本次回调（返回 false 的请求已处理）
+                                                count += 1;
+                                                multi.abort_tasks();
+                                                user_aborted = true;
+                                                break;
+                                            }
+                                            Ok(true) => {
+                                                count += 1;
+                                                if (count as usize) >= expected {
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                multi.abort_tasks();
+                                                return Err(e);
+                                            }
                                         }
                                     }
                                     Ok(None) => break, // channel 关闭
@@ -1338,16 +1352,27 @@ impl PhpXhMulti {
                             Ok(Some(result)) => {
                                 // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                                 let result_array = result_to_php_array(&result);
-                                // 调用用户回调，异常时 abort 剩余任务再向上传播
-                                if let Err(e) =
-                                    invoke_streaming_callback(&callback_callable, &result_array)
+                                // 调用用户回调：返回 false 中止、异常 abort 后向上传播
+                                match invoke_streaming_callback(&callback_callable, &result_array)
                                 {
-                                    multi.abort_tasks();
-                                    return Err(e);
-                                }
-                                count += 1;
-                                if (count as usize) >= expected {
-                                    break;
+                                    Ok(false) => {
+                                        // 使用者请求中止剩余任务（非异常，返回已处理数）
+                                        // count += 1 计入本次回调（返回 false 的请求已处理）
+                                        count += 1;
+                                        multi.abort_tasks();
+                                        user_aborted = true;
+                                        break;
+                                    }
+                                    Ok(true) => {
+                                        count += 1;
+                                        if (count as usize) >= expected {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        multi.abort_tasks();
+                                        return Err(e);
+                                    }
                                 }
                             }
                             Ok(None) => break, // channel 关闭
@@ -1372,11 +1397,24 @@ impl PhpXhMulti {
                                 match result {
                                     Some(result) => {
                                         let result_array = result_to_php_array(&result);
-                                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
-                                            multi.abort_tasks();
-                                            return Err(e);
+                                        // 调用用户回调：返回 false 中止、异常 abort 后向上传播
+                                        match invoke_streaming_callback(&callback_callable, &result_array) {
+                                            Ok(false) => {
+                                                // 使用者请求中止剩余任务（非异常，返回已处理数）
+                                                // count += 1 计入本次回调（返回 false 的请求已处理）
+                                                count += 1;
+                                                multi.abort_tasks();
+                                                user_aborted = true;
+                                                break;
+                                            }
+                                            Ok(true) => {
+                                                count += 1;
+                                            }
+                                            Err(e) => {
+                                                multi.abort_tasks();
+                                                return Err(e);
+                                            }
                                         }
-                                        count += 1;
                                     }
                                     None => break,
                                 }
@@ -1396,12 +1434,24 @@ impl PhpXhMulti {
                     // 原始逻辑（未启用流式，向后兼容）
                     while let Some(result) = result_rx.recv().await {
                         let result_array = result_to_php_array(&result);
-                        // 调用用户回调，异常时 abort 剩余任务再向上传播
-                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
-                            multi.abort_tasks();
-                            return Err(e);
+                        // 调用用户回调：返回 false 中止、异常 abort 后向上传播
+                        match invoke_streaming_callback(&callback_callable, &result_array) {
+                            Ok(false) => {
+                                // 使用者请求中止剩余任务（非异常，返回已处理数）
+                                // count += 1 计入本次回调（返回 false 的请求已处理）
+                                count += 1;
+                                multi.abort_tasks();
+                                user_aborted = true;
+                                break;
+                            }
+                            Ok(true) => {
+                                count += 1;
+                            }
+                            Err(e) => {
+                                multi.abort_tasks();
+                                return Err(e);
+                            }
                         }
-                        count += 1;
                     }
                 }
             }
@@ -1428,7 +1478,8 @@ impl PhpXhMulti {
             multi.join_tasks().await;
 
             // 完整性检查：task panic 会导致结果数量少于预期
-            if (count as usize) != expected {
+            // 使用者主动中止（回调返回 false）时跳过检查，正常返回已处理数
+            if !user_aborted && (count as usize) != expected {
                 return Err(format!(
                     "部分任务异常退出：预期 {} 个结果，实际收到 {} 个",
                     expected, count
@@ -1672,6 +1723,8 @@ impl PhpXhThreadPool {
             let mut shutdown_count = 0usize;
             // 回调异常需向上传播，但又要存回 pool，故先捕获错误信息，循环结束后统一返回
             let mut callback_err: Option<String> = None;
+            // 使用者通过回调返回 false 请求中止剩余任务（非异常，返回已处理数）
+            let mut user_aborted = false;
 
             // 只要结果未收齐就继续等待
             if streaming_enabled {
@@ -1684,11 +1737,23 @@ impl PhpXhThreadPool {
                                     // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                                     let result_array = result_to_php_array(&result);
                                     // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
-                                    if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
-                                        callback_err = Some(e);
-                                        break;
+                                    match invoke_streaming_callback(&callback_callable, &result_array) {
+                                        Ok(false) => {
+                                            // 使用者请求中止剩余任务（非异常）
+                                            // count += 1 计入本次回调（返回 false 的请求已处理）
+                                            // 不存回 pool，让 pool 被 drop（Drop 实现 abort dispatcher + workers）
+                                            count += 1;
+                                            user_aborted = true;
+                                            break;
+                                        }
+                                        Ok(true) => {
+                                            count += 1;
+                                        }
+                                        Err(e) => {
+                                            callback_err = Some(e);
+                                            break;
+                                        }
                                     }
-                                    count += 1;
                                 }
                                 Some(ResultMessage::WorkerShutdown) => {
                                     shutdown_count += 1;
@@ -1722,12 +1787,24 @@ impl PhpXhThreadPool {
                             // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                             let result_array = result_to_php_array(&result);
                             // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
-                            if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array)
+                            match invoke_streaming_callback(&callback_callable, &result_array)
                             {
-                                callback_err = Some(e);
-                                break;
+                                Ok(false) => {
+                                    // 使用者请求中止剩余任务（非异常）
+                                    // count += 1 计入本次回调（返回 false 的请求已处理）
+                                    // 不存回 pool，让 pool 被 drop（Drop 实现 abort dispatcher + workers）
+                                    count += 1;
+                                    user_aborted = true;
+                                    break;
+                                }
+                                Ok(true) => {
+                                    count += 1;
+                                }
+                                Err(e) => {
+                                    callback_err = Some(e);
+                                    break;
+                                }
                             }
-                            count += 1;
                         }
                         Some(ResultMessage::WorkerShutdown) => {
                             shutdown_count += 1;
@@ -1767,6 +1844,9 @@ impl PhpXhThreadPool {
             // 下次调用 execute_each/execute 时 pool.is_none() → 重建 pool。
             if let Some(msg) = callback_err {
                 (None, Err(msg))
+            } else if user_aborted {
+                // 使用者请求中止：不存回 pool（drop 中止剩余 worker），返回已处理数
+                (None, Ok(count))
             } else if (count as usize) < submitted {
                 (
                     pool,
@@ -1890,11 +1970,20 @@ fn results_to_php_array(
 fn invoke_streaming_callback(
     callback: &ZendCallable,
     result_array: &ZBox<ZendHashTable>,
-) -> Result<(), String> {
-    callback
-        .try_call(vec![result_array as &dyn IntoZvalDyn])
-        .map(|_| ())
-        .map_err(extract_callback_error)
+) -> Result<bool, String> {
+    let ret = callback.try_call(vec![result_array as &dyn IntoZvalDyn]);
+    match ret {
+        Ok(zval) => {
+            // 回调返回严格 false（=== false）→ 使用者请求中止
+            // 注意：仅 is_false() 为 true 时中止，避免 PHP 弱类型陷阱（如 0 == false 但 0 !== false）
+            if zval.is_false() {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        }
+        Err(e) => Err(extract_callback_error(e)),
+    }
 }
 
 /// 提取回调执行错误的可读消息。

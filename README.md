@@ -674,7 +674,48 @@ XHCurl 的三种执行模式均支持**请求级流式回调**——每完成一
 - **失败也回调**：失败请求同样触发回调（`success=false`、`status=0`、`body=""`、`error=...`），不抛 PHP 异常
 - **不累积、内存恒定**：结果处理权交给用户回调，框架不持有全部结果数组，适合海量请求场景
 - **回调异常中止**：回调内抛出异常时会中止剩余任务并向上传播异常（具体中止机制见下表）
+- **返回 false 中止**：`$onResult` 返回 `false`（严格 `=== false`）时中止剩余任务并返回已处理数（不视为错误，详见下文「回调返回值控制中止」）
 - **返回处理总数**：方法返回 `int`，表示已回调处理的结果总数
+
+#### 回调返回值控制中止
+
+除了用异常控制流程外，三种流式回调还支持通过 `$onResult` 的**返回值**显式控制是否中止剩余任务：
+
+- **返回 `false`（严格 `=== false`）** → 立即中止剩余任务，方法返回已处理的结果数（`int`，**不视为错误**）
+- **返回 `true` / `null` / `void` / 任意非 false 值** → 继续处理剩余任务（向后兼容）
+- **抛异常** → 中止剩余任务并返回错误（向后兼容）
+
+这让 PHP 使用者能根据业务情况显式决定"遇到异常时继续还是中断"，而非依赖异常控制流程。
+
+业务场景：遇到请求失败时中止剩余任务：
+
+```php
+$multi->executeEach(function($result) {
+    if ($result['success'] === false) {
+        // 请求失败，中止剩余任务
+        return false;
+    }
+    // 正常处理
+    writeToDb($result);
+});
+```
+
+业务场景：记录失败但继续处理剩余任务：
+
+```php
+$multi->executeEach(function($result) {
+    if ($result['success'] === false) {
+        logError($result['error']);
+        return; // 不返回 false，继续处理剩余任务
+    }
+    writeToDb($result);
+});
+```
+
+> **注意事项**：
+> - 仅严格 `=== false` 才中止（`0`、`''`、`[]`、`null` 都视为继续，避免 PHP 弱类型陷阱）
+> - 返回 `false` 中止时，后台剩余任务被 abort（与抛异常一致的清理机制）
+> - 方法返回已处理数（`int`），不抛异常、不返回错误
 
 #### 三者对比
 
@@ -687,6 +728,7 @@ XHCurl 的三种执行模式均支持**请求级流式回调**——每完成一
 | 批量级超时 | 无 | 有（`timeout()`） | 无 |
 | `onChunk`/`onHeaders` | 不支持 | 支持 | 支持 |
 | 回调异常处理 | abort 全部 task | `abort_tasks()` | drop pool → abort workers |
+| 返回 `false` 中止 | 支持（abort 全部 task） | 支持（`abort_tasks()`） | 支持（drop pool → abort workers） |
 
 > 协程 `each()` 仅支持请求级流式回调（`$callback`），不支持响应体分块级流式（`$onChunk`/`$onHeaders`）。如需后者，请用 `XHMulti::executeEach()` 或 `XHThreadPool::executeEach()`。
 

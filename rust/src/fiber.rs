@@ -427,23 +427,35 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
     //    与 gather 不同：此处不累积结果，而是立即交给回调处理后丢弃（内存恒定）
     let suspend = ZendCallable::try_from_name("Fiber::suspend").map_err(|e| e.to_string())?;
 
+    let mut count: i64 = 0;
     for _ in 0..total {
         let suspended_value = suspend.try_call(vec![]).map_err(|e| e.to_string())?;
         // 调用用户回调处理当前结果，回调签名：function(array $result): void
+        // 返回值约定：
+        //   - 返回 false（严格 === false）→ 使用者请求中止剩余任务，提前退出循环
+        //   - 返回其他值（true/null/void/任意非 false）→ 继续处理
+        //   - 抛异常 → 中止并传播异常（行为不变）
         //
         // try_call 已通过 take_exception 取出异常对象（Error::Exception 持有 ZBox<ZendObject>），
         // 直接提取 message 传播；不能用 Display（其内部 {e:?} Debug 遍历 trace 属性，
         // 可能含 NUL 字节导致 CString 转换失败，抛出 InvalidCString 掩盖原始异常）。
-        callback_callable
+        let ret = callback_callable
             .try_call(vec![&suspended_value as &dyn IntoZvalDyn])
             .map_err(|e| match e {
                 ext_php_rs::error::Error::Exception(obj) => extract_exception_message(&obj),
                 other => format!("回调执行失败: {}", other),
             })?;
+        count += 1;
+        // 检查回调返回值：严格 false 时中止（避免 PHP 弱类型陷阱，如 0 == false 但 0 !== false）
+        if ret.is_false() {
+            // 使用者请求中止剩余任务，提前退出循环
+            // 返回已处理数（count），不视为错误
+            break;
+        }
         // suspended_value 在此离开作用域 → 释放（不存任何地方，内存恒定）
     }
 
-    Ok(total as i64)
+    Ok(count)
 }
 
 // +----------------------------------------------------------------------+
