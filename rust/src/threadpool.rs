@@ -90,7 +90,7 @@ pub struct ThreadPoolConfig {
 }
 
 /// 默认队列容量（queue_capacity == 0 时使用）
-const DEFAULT_QUEUE_CAPACITY: usize = 1000;
+pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 1000;
 
 /// 每个 worker 的任务 channel 缓冲区大小
 /// 设为 1：dispatcher 在所有 worker 忙时阻塞，提供背压
@@ -490,22 +490,25 @@ impl XhThreadPool {
             while rx.try_recv().is_ok() {}
         }
 
-        // 提交所有请求，记录成功提交的数量
-        // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
+        // 提交所有请求，统计成功与失败数量
+        // 任一提交失败（队列满）即视为整体失败：已提交的请求不收集结果，
+        // 直接返回错误，由调用方决定是否重试（避免静默返回部分结果）。
         let mut submitted_count = 0;
+        let mut failed_count = 0;
         for request in requests {
             match self.submit(request) {
                 Ok(()) => submitted_count += 1,
-                Err(e) => {
-                    // 提交失败，但已提交的请求需要继续收集结果
-                    // 不立即返回错误，避免已提交请求的结果丢失
-                    eprintln!("警告: 提交任务失败: {}", e);
+                Err(_) => {
+                    failed_count += 1;
                 }
             }
         }
 
-        if submitted_count == 0 {
-            return Err(XhCurlError::ThreadPool("所有请求提交失败".to_string()));
+        if failed_count > 0 {
+            return Err(XhCurlError::ThreadPool(format!(
+                "{} 个请求提交失败（队列容量 {}），请减少批量大小或增大队列容量",
+                failed_count, DEFAULT_QUEUE_CAPACITY
+            )));
         }
 
         // 收集结果（数量等于成功提交的请求数）

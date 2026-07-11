@@ -30,7 +30,7 @@ use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::{StreamEvent, XhMulti, STREAM_CHANNEL_CAPACITY};
 use crate::request::{clear_request_client_cache, HttpMethod, XhRequest};
 use crate::response::XhResponse;
-use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool};
+use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool, DEFAULT_QUEUE_CAPACITY};
 
 // +----------------------------------------------------------------------+
 // | 常量定义                                                              |
@@ -582,8 +582,15 @@ impl PhpXhRequest {
         headers: &ZendHashTable,
     ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         // 先收集并校验全部键值对，全部通过后再存储
+        // 列表数组（整数键）无意义（header 需 name=value），任一整数键即抛异常
         let mut pairs: Vec<(String, String)> = Vec::new();
         for_each_kv(headers, |key, val| {
+            if key.is_long() {
+                return Err(
+                    "headers() 不支持列表数组（整数键），请使用关联数组 ['name' => 'value'] 形式"
+                        .to_string(),
+                );
+            }
             let name = key.to_string();
             let value = val
                 .string()
@@ -641,20 +648,22 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::body(string $data): $self_
+    ///
+    /// 非字符串/二进制值（数组/对象/资源/null）抛异常，避免静默设置空 body。
     pub fn body<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &Zval,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         // 优先二进制安全读取；回退到 string()（兼容 PHP 端传入数值等隐式转换场景）
         let bytes = if let Some(b) = data.binary::<u8>() {
             b
         } else if let Some(s) = data.string() {
             s.into_bytes()
         } else {
-            Vec::new()
+            return Err("body() 参数必须是字符串或二进制数据".to_string());
         };
         self_.request = self_.request.clone().body_bytes(bytes);
-        self_
+        Ok(self_)
     }
 
     /// 设置请求超时（秒）
@@ -933,6 +942,8 @@ impl PhpXhRequest {
     ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         let cookie_str = if let Some(arr) = cookies.array() {
             // 数组形式：['name' => 'value', ...] → "name=value; name2=value2"
+            // 值类型转换与 form() 对齐：标量（string/int/float/bool）转字符串，
+            // 数组/对象/资源抛异常（避免 cookie 项静默丢失）。
             let mut parts: Vec<String> = Vec::new();
             for_each_kv(arr, |key, val| {
                 // 跳过整数键（cookie 需 name=value，整数键无意义）
@@ -940,9 +951,26 @@ impl PhpXhRequest {
                     return Ok(());
                 }
                 let k = key.to_string();
-                if let Some(v) = val.string() {
-                    parts.push(format!("{}={}", k, v));
-                }
+                // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
+                // Zval::string() 遇到非 UTF-8 字节会返回 None 导致 cookie 项被静默丢弃，
+                // 优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
+                let v = if let Some(bytes) = val.binary::<u8>() {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else if let Some(s) = val.string() {
+                    s
+                } else if let Some(l) = val.long() {
+                    l.to_string()
+                } else if let Some(d) = val.double() {
+                    d.to_string()
+                } else if let Some(b) = val.bool() {
+                    if b { "1" } else { "0" }.to_string()
+                } else {
+                    return Err(format!(
+                        "cookies 数组值必须是标量（字段 '{}'），数组/对象/资源请用其他方式传递",
+                        k
+                    ));
+                };
+                parts.push(format!("{}={}", k, v));
                 Ok(())
             })
             .map_err(|e| format!("cookies 数组处理失败: {}", e))?;
@@ -1014,26 +1042,29 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::multipart(array $fields): $self_
     ///
-    /// 解析失败时跳过设置（保留原值），链式调用不中断。
+    /// 任一字段非法（非数组元素、name 缺失或为空、value 缺失或非字符串/二进制）
+    /// 立即抛异常，避免静默跳过导致字段丢失无信号。
     pub fn multipart<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         fields: &ZendHashTable,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
         use crate::request::MultipartField;
 
         let mut mp_fields = Vec::new();
         let len = fields.len();
         let mut iter = fields.iter();
-        for _ in 0..len {
+        for i in 0..len {
             match iter.next() {
                 Some((_key, val)) => {
-                    // 字段非数组时跳过该字段，继续处理其余字段
-                    let field_ht = match val.array() {
-                        Some(ht) => ht,
-                        None => continue,
-                    };
-                    let mut name = String::new();
-                    let mut value: Vec<u8> = Vec::new();
+                    // 字段非数组时抛异常（避免静默跳过导致字段丢失）
+                    let field_ht = val.array().ok_or_else(|| {
+                        format!(
+                            "multipart 字段 #{} 不是数组，请使用 ['name'=>...,'value'=>...] 形式",
+                            i
+                        )
+                    })?;
+                    let mut name: Option<String> = None;
+                    let mut value: Option<Vec<u8>> = None;
                     let mut filename: Option<String> = None;
                     let mut content_type: Option<String> = None;
 
@@ -1044,8 +1075,11 @@ impl PhpXhRequest {
                             let key_str = fkey.to_string();
                             match key_str.as_str() {
                                 "name" => {
-                                    if let Some(s) = fval.string() {
-                                        name = s;
+                                    // name 必须是字符串（二进制安全读取）
+                                    if let Some(bytes) = fval.binary::<u8>() {
+                                        name = Some(String::from_utf8_lossy(&bytes).into_owned());
+                                    } else if let Some(s) = fval.string() {
+                                        name = Some(s);
                                     }
                                 }
                                 "value" => {
@@ -1056,18 +1090,24 @@ impl PhpXhRequest {
                                     // 优先用 binary::<u8>() 取原始字节，
                                     // 仅在不是字符串时回退到其他类型转换。
                                     if let Some(bytes) = fval.binary::<u8>() {
-                                        value = bytes;
+                                        value = Some(bytes);
                                     } else if let Some(s) = fval.string() {
-                                        value = s.into_bytes();
+                                        value = Some(s.into_bytes());
                                     }
                                 }
                                 "filename" => {
-                                    if let Some(s) = fval.string() {
+                                    if let Some(bytes) = fval.binary::<u8>() {
+                                        filename =
+                                            Some(String::from_utf8_lossy(&bytes).into_owned());
+                                    } else if let Some(s) = fval.string() {
                                         filename = Some(s);
                                     }
                                 }
                                 "content_type" => {
-                                    if let Some(s) = fval.string() {
+                                    if let Some(bytes) = fval.binary::<u8>() {
+                                        content_type =
+                                            Some(String::from_utf8_lossy(&bytes).into_owned());
+                                    } else if let Some(s) = fval.string() {
                                         content_type = Some(s);
                                     }
                                 }
@@ -1075,6 +1115,21 @@ impl PhpXhRequest {
                             }
                         }
                     }
+
+                    // name 必须存在且非空（multipart 字段名缺失会导致服务端无法识别）
+                    let name = name.ok_or_else(|| {
+                        format!("multipart 字段 #{} 缺少 'name' 或 'name' 非字符串", i)
+                    })?;
+                    if name.is_empty() {
+                        return Err(format!("multipart 字段 #{} 的 'name' 不能为空", i));
+                    }
+                    // value 必须存在（缺失会导致字段值为空，与用户意图不符）
+                    let value = value.ok_or_else(|| {
+                        format!(
+                            "multipart 字段 #{} (name='{}') 缺少 'value' 或 'value' 非字符串",
+                            i, name
+                        )
+                    })?;
 
                     if let Some(fname) = filename {
                         mp_fields.push(MultipartField::file(
@@ -1093,7 +1148,7 @@ impl PhpXhRequest {
         }
 
         self_.request = self_.request.clone().body_multipart(mp_fields);
-        self_
+        Ok(self_)
     }
 
     /// 获取请求 URL
@@ -1104,6 +1159,61 @@ impl PhpXhRequest {
     /// 获取 HTTP 方法
     pub fn get_method(&self) -> String {
         self.request.get_method().to_string()
+    }
+
+    /// 获取请求超时（秒）
+    /// 对应 timeout() 设置的值；未设置时返回 null。
+    /// 注意：timeoutMs() 设置的毫秒值不在此返回（优先级更高但单位不同）。
+    pub fn get_timeout(&self) -> Option<i64> {
+        self.request.get_request_timeout().map(|v| v as i64)
+    }
+
+    /// 获取连接超时（秒）
+    /// 对应 connectTimeout() 设置的值；未设置时返回 null。
+    /// 注意：connectTimeoutMs() 设置的毫秒值不在此返回（优先级更高但单位不同）。
+    pub fn get_connect_timeout(&self) -> Option<i64> {
+        self.request.get_connect_timeout().map(|v| v as i64)
+    }
+
+    /// 获取所有请求头（关联数组）
+    /// 返回 ['header-name' => 'value', ...]，键为小写（HTTP/2 规范）。
+    pub fn get_headers(&self) -> ZBox<ZendHashTable> {
+        let mut ht = ZendHashTable::new();
+        for (name, value) in self.request.get_headers().all() {
+            let _ = ht.insert(name.as_str(), value.as_str());
+        }
+        ht
+    }
+
+    /// 获取 Cookie 字符串
+    /// 返回 "name=value; name2=value2" 格式或 null。
+    pub fn get_cookies(&self) -> Option<String> {
+        self.request.get_cookies().map(|s| s.to_string())
+    }
+
+    /// 获取代理地址
+    pub fn get_proxy(&self) -> Option<String> {
+        self.request.get_proxy().map(|s| s.to_string())
+    }
+
+    /// 获取是否验证 SSL 证书
+    pub fn get_verify_ssl(&self) -> Option<bool> {
+        self.request.get_verify_ssl()
+    }
+
+    /// 获取 User-Agent
+    pub fn get_user_agent(&self) -> Option<String> {
+        self.request.get_user_agent().map(|s| s.to_string())
+    }
+
+    /// 获取请求 ID
+    pub fn get_id(&self) -> Option<String> {
+        self.request.get_id().map(|s| s.to_string())
+    }
+
+    /// 获取用户自定义数据
+    pub fn get_user_data(&self) -> Option<String> {
+        self.request.get_user_data().map(|s| s.to_string())
     }
 
     /// 同步执行单个 HTTP 请求，一次性返回完整响应
@@ -1233,6 +1343,22 @@ impl PhpXhMulti {
         // 通过 Deref 访问 PhpXhRequest.request，克隆后添加
         self_.requests.push(request.request.clone());
         Ok(self_)
+    }
+
+    /// 获取待执行请求数量
+    ///
+    /// # PHP 签名
+    /// public XHMulti::count(): int
+    pub fn count(&self) -> i64 {
+        self.requests.len() as i64
+    }
+
+    /// 检查是否没有待执行请求
+    ///
+    /// # PHP 签名
+    /// public XHMulti::isEmpty(): bool
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
     }
 
     /// 设置最大并发数
@@ -1693,6 +1819,22 @@ impl PhpXhThreadPool {
         Ok(self_)
     }
 
+    /// 获取待执行请求数量
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::count(): int
+    pub fn count(&self) -> i64 {
+        self.requests.len() as i64
+    }
+
+    /// 检查是否没有待执行请求
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::isEmpty(): bool
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
     /// 执行所有请求
     ///
     /// # PHP 签名
@@ -1840,10 +1982,13 @@ impl PhpXhThreadPool {
                 (None, None)
             };
 
-            // 提交所有请求，记录成功提交的数量
-            // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
+            // 提交所有请求，统计成功与失败数量
+            // 任一提交失败（队列满）即视为整体失败：不收集结果，
+            // 直接返回错误（不存回 pool，让 pool 被 drop 中止已提交的 worker），
+            // 避免已提交任务的残留结果污染下次调用。
             // 启用流式时使用 submit_with_stream 将 stream_tx 传入 worker
             let mut submitted = 0usize;
+            let mut failed_count = 0usize;
             for request in requests {
                 let submit_result = match &stream_tx_opt {
                     Some(tx) => p.submit_with_stream(request, tx.clone()),
@@ -1851,14 +1996,19 @@ impl PhpXhThreadPool {
                 };
                 match submit_result {
                     Ok(()) => submitted += 1,
-                    Err(e) => {
-                        // 提交失败，但已提交的请求需要继续收集结果
-                        eprintln!("警告: 提交任务失败: {}", e);
+                    Err(_) => {
+                        failed_count += 1;
                     }
                 }
             }
-            if submitted == 0 {
-                return (pool, Err("所有请求提交失败".to_string()));
+            if failed_count > 0 {
+                return (
+                    None,
+                    Err(format!(
+                        "{} 个请求提交失败（队列容量 {}），请减少批量大小或增大队列容量",
+                        failed_count, DEFAULT_QUEUE_CAPACITY
+                    )),
+                );
             }
             // 提交完成后丢弃 stream_tx 副本，使 channel 在所有 worker 完成后能正确关闭
             drop(stream_tx_opt.take());
@@ -2702,15 +2852,32 @@ pub fn xhrun(
     }
 
     // 设置环境变量
+    // 值类型转换与 form() 对齐：标量（string/int/float/bool）转字符串，
+    // 数组/对象/资源抛异常（避免环境变量静默丢失）。
     if let Some(env) = env_ht {
         let mut iter = env.iter();
         for _ in 0..env.len() {
             if let Some((k, v)) = iter.next() {
                 // ArrayKey 的 Display 实现会返回键的字符串形式
                 let key_str = k.to_string();
-                if let Some(vs) = v.string() {
-                    cmd.env(key_str, vs);
-                }
+                // 二进制安全读取：优先用 binary::<u8>() 取原始字节
+                let val_str = if let Some(bytes) = v.binary::<u8>() {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else if let Some(s) = v.string() {
+                    s
+                } else if let Some(l) = v.long() {
+                    l.to_string()
+                } else if let Some(d) = v.double() {
+                    d.to_string()
+                } else if let Some(b) = v.bool() {
+                    if b { "1" } else { "0" }.to_string()
+                } else {
+                    return Err(format!(
+                        "xhrun env 值必须是标量（字段 '{}'），数组/对象/资源不支持",
+                        key_str
+                    ));
+                };
+                cmd.env(key_str, val_str);
             }
         }
     }

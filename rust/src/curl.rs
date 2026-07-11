@@ -227,12 +227,16 @@ impl XhCurlManager {
         let config = self.config();
 
         // 创建客户端构建器
-        let mut builder = reqwest::Client::builder()
-            // 设置连接超时
-            .connect_timeout(Duration::from_secs(config.connect_timeout))
-            // 设置请求超时
-            .timeout(Duration::from_secs(config.request_timeout))
-            // 设置重定向策略
+        // 0 值跳过（视为「无超时」），避免 Duration::from_secs(0) 立即超时
+        let mut builder = reqwest::Client::builder();
+        if config.connect_timeout > 0 {
+            builder = builder.connect_timeout(Duration::from_secs(config.connect_timeout));
+        }
+        if config.request_timeout > 0 {
+            builder = builder.timeout(Duration::from_secs(config.request_timeout));
+        }
+        // 设置重定向策略 / SSL / Keep-Alive / 连接池 / UA
+        builder = builder
             .redirect(if config.follow_redirects {
                 reqwest::redirect::Policy::limited(config.max_redirects as usize)
             } else {

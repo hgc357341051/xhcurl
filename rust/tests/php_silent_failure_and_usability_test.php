@@ -5,7 +5,7 @@
 // | 验证以下修复：                                                          |
 // |   1. json() 序列化失败抛异常（而非静默跳过）                              |
 // |   2. method() 无效方法名抛异常                                          |
-// |   3. multipart() 单字段非数组时跳过该字段（而非退出整个方法）              |
+// |   3. multipart() 单字段非数组时抛异常（而非静默跳过该字段）              |
 // |   4. proxy(null) 清除请求级代理覆盖                                      |
 // |   5. cookies() 接受数组（关联数组自动拼接）                               |
 // |   6. 失败结果数组新增 error_type 字段（dns/timeout/ssl/connection/unknown）|
@@ -94,26 +94,33 @@ check("method() 无效方法名抛异常", $caught);
 check("method() 异常 message 含方法名说明", $msgContainsMethod);
 
 // ==================================================================
-// 3. multipart() 单字段非数组时跳过该字段
-//    php_ext.rs 中 multipart() 遍历字段时，val.array() 返回 None 则 continue
-//    （跳过该字段），而非退出整个方法。其余字段正常处理。
+// 3. multipart() 单字段非数组时抛异常
+//    php_ext.rs 中 multipart() 遍历字段时，val.array() 返回 None 则
+//    抛异常（字段 #i 不是数组），而非静默跳过该字段。其余字段不处理。
 //    注意：实现使用 'value' 键（非 'contents'）作为字段内容。
 // ==================================================================
-echo "\n=== 3. multipart() 单字段非数组时跳过该字段 ===\n";
+echo "\n=== 3. multipart() 单字段非数组时抛异常 ===\n";
 
-$result = XHCurl::createRequest($BASE . '/post')
-    ->post()
-    ->multipart(array(
-        array('name' => 'file1', 'value' => 'content1'),
-        'invalid_field',  // 非数组，应跳过
-        array('name' => 'file2', 'value' => 'content2'),
-    ))
-    ->timeout(10)
-    ->execute();
-// PHP 内置服务器对 multipart/form-data 会消费 php://input 以填充 $_POST/$_FILES，
-// 导致 mock_server 的 data 字段为空，无法从响应体验证字段是否发送。
-// 此处只验证请求成功发出（success=true），不验证 body 内容。
-check("multipart() 单字段错误不中断整体", $result['success'] === true);
+$caught = false;
+$msgContainsMultipart = false;
+try {
+    XHCurl::createRequest($BASE . '/post')
+        ->post()
+        ->multipart(array(
+            array('name' => 'file1', 'value' => 'content1'),
+            'invalid_field',  // 非数组，应抛异常
+            array('name' => 'file2', 'value' => 'content2'),
+        ))
+        ->timeout(10)
+        ->execute();
+} catch (\Throwable $e) {
+    $caught = true;
+    $msg = $e->getMessage();
+    $msgContainsMultipart = strpos($msg, 'multipart') !== false
+                         || strpos($msg, '不是数组') !== false;
+}
+check("multipart() 单字段错误抛异常", $caught);
+check("multipart() 异常 message 含字段说明", $msgContainsMultipart);
 
 // ==================================================================
 // 4. proxy(null) 清除请求级代理覆盖

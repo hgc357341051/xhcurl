@@ -503,6 +503,18 @@ XHCurl::setConfig([
 | `setId(string $id)` / `id(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
 | `setUserData(array $data)` / `userData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
 | `getUrl()` / `getMethod()` | 获取 URL / 方法 |
+| `getTimeout()` | `(): ?int` 获取请求级超时（秒），未设置返回 null |
+| `getConnectTimeout()` | `(): ?int` 获取连接超时（秒），未设置返回 null |
+| `getHeaders()` | `(): array` 获取已设置的请求头（键名小写） |
+| `getCookies()` | `(): ?string` 获取 cookie 字符串，未设置返回 null |
+| `getProxy()` | `(): ?string` 获取请求级代理，未设置返回 null |
+| `getVerifySsl()` | `(): ?bool` 获取 SSL 验证设置，未设置返回 null |
+| `getUserAgent()` | `(): ?string` 获取 User-Agent，未设置返回 null |
+| `getId()` | `(): ?string` 获取请求 ID，未设置返回 null |
+| `getUserData()` | `(): ?string` 获取用户自定义数据（JSON 字符串），未设置返回 null |
+
+> **timeout 类 0 值语义**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`
+> 传 `0` 或负值表示跳过设置（使用全局默认值），而非"立即超时"。
 
 > **请求级配置覆盖**：`verifySsl()`/`proxy()`/`connectTimeout()`/`followRedirects()`/
 > `maxRedirects()` 都是请求级覆盖，会基于全局配置构建新 Client 应用这些参数。
@@ -522,8 +534,10 @@ XHCurl::setConfig([
 > - `json()` 序列化失败（含无法序列化的内容如资源）
 > - `setUserData()`/`userData()` 序列化失败
 > - `method()` 无效 HTTP 方法名
-> - `cookies()` 参数类型错误（非字符串非数组）
-> - `header()`/`headers()`：非法 header 名/值（含控制字符、NUL）调用时立即抛异常（fail-fast）
+> - `cookies()` 参数类型错误（非字符串非数组）；数组形式下整型/浮点/布尔值自动转字符串（`true→"1"`、`123→"123"`），数组/对象/资源抛异常
+> - `header()`/`headers()`：非法 header 名/值（含控制字符、NUL）调用时立即抛异常（fail-fast）；`headers()` 传入列表数组（整数键）抛异常，提示用关联数组
+> - `body()`：非字符串输入（`null`/`int`/`array` 等）抛异常
+> - `multipart()`：字段缺少 `name` 或 `name` 为空抛异常；非数组元素抛异常
 > - `form()`：含数组/对象/资源值时抛异常（提示用 `multipart()` 或 `json()`）
 > - `basicAuth()`：空字符串或无冒号分隔符时抛异常（提示格式 `user:pass`）
 >
@@ -594,6 +608,8 @@ XHCurl::setConfig([
 | `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行，详见下文 |
+| `count(): int` | 返回待执行请求数 |
+| `isEmpty(): bool` | 是否有待执行请求 |
 
 ```php
 $multi = new XHMulti();
@@ -652,6 +668,9 @@ $multi->executeEach(
 
 > `$onChunk` 的所有 chunk 拼接后等于完整响应体（与 `$result['body']` 一致）。
 > 两个参数均为可选，不传时行为与之前完全一致（向后兼容）。
+>
+> **`onHeaders` 回调 headers 键名小写**：`$onHeaders` 回调收到的 `$headers` 数组键名为
+> 小写（与响应头一致），如需访问 `Content-Type` 请用小写键 `content-type`。
 
 ### XHThreadPool - 线程池
 
@@ -664,6 +683,8 @@ $multi->executeEach(
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行（签名与 `XHMulti::executeEach` 一致，仅 CLI 可用） |
+| `count(): int` | 返回待执行请求数 |
+| `isEmpty(): bool` | 是否有待执行请求 |
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
@@ -675,6 +696,9 @@ $results = $pool->execute();
 > **空请求抛异常**：请求列表为空时 `execute()` 抛异常（而非返回空数组），请先调用 `add()`。
 >
 > **execute() 消费请求列表**：执行后已添加的请求会被清空，重用同一对象需重新 `add()`。
+>
+> **队列容量超限抛异常**：当批量请求数超过线程池队列容量（默认 1000）时，`execute()`
+> 抛异常（含失败数量），而非静默返回部分结果。建议分批执行或调整队列容量。
 
 ### 流式回调类型
 

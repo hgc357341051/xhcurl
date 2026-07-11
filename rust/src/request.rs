@@ -785,10 +785,15 @@ impl XhRequest {
 
         // 设置超时（覆盖客户端默认值）
         // request_timeout_ms（毫秒）优先级高于 request_timeout（秒）
+        // 0/负值跳过（视为「使用默认/无超时」），避免 Duration::from_millis(0) 立即超时
         if let Some(ms) = self.request_timeout_ms {
-            builder = builder.timeout(Duration::from_millis(ms));
+            if ms > 0 {
+                builder = builder.timeout(Duration::from_millis(ms));
+            }
         } else if let Some(timeout) = self.request_timeout {
-            builder = builder.timeout(Duration::from_secs(timeout));
+            if timeout > 0 {
+                builder = builder.timeout(Duration::from_secs(timeout));
+            }
         }
 
         // 请求级 User-Agent 覆盖（CURLOPT_USERAGENT）
@@ -806,13 +811,16 @@ impl XhRequest {
     ///
     /// 当请求显式设置了任一 Client 级配置（重定向策略、SSL 验证、代理、连接超时）
     /// 时返回 true。这些配置无法通过 RequestBuilder 单独覆盖，必须构建新 Client。
+    ///
+    /// connect_timeout / connect_timeout_ms 为 0 时视为「使用全局默认」，
+    /// 不触发 Client 重建（与 `OverrideKey::from_request` 的 filter 逻辑一致）。
     fn needs_request_client(&self) -> bool {
         self.follow_redirects.is_some()
             || self.max_redirects.is_some()
             || self.verify_ssl.is_some()
             || self.proxy.is_some()
-            || self.connect_timeout.is_some()
-            || self.connect_timeout_ms.is_some()
+            || self.connect_timeout.filter(|&s| s > 0).is_some()
+            || self.connect_timeout_ms.filter(|&ms| ms > 0).is_some()
     }
 
     /// 构建请求级客户端（应用请求级 Client 配置覆盖）。
@@ -843,8 +851,11 @@ impl XhRequest {
 
         // 请求级连接超时（覆盖全局默认）
         // connect_timeout_ms（毫秒）优先级高于 connect_timeout（秒）
+        // 0/负值跳过（视为「使用默认」），避免 Duration::from_millis(0) 立即超时
         if let Some(ms) = self.connect_timeout_ms {
-            builder = builder.connect_timeout(Duration::from_millis(ms));
+            if ms > 0 {
+                builder = builder.connect_timeout(Duration::from_millis(ms));
+            }
         } else if let Some(secs) = self.connect_timeout {
             if secs > 0 {
                 builder = builder.connect_timeout(Duration::from_secs(secs));
