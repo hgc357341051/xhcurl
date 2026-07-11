@@ -402,6 +402,7 @@ XHCurl::setConfig([
     'follow_redirects'       => true,    // 跟随重定向
     'max_redirects'          => 10,      // 最大重定向次数
     'verify_ssl'             => true,    // 验证 SSL 证书
+    'http2_enabled'            => true,   // 是否启用 HTTP/2 协商（false 时强制 HTTP/1.1）
     'user_agent'             => 'XHCurl',// User-Agent
     'proxy'                  => null,    // 代理地址
     'tcp_keepalive'          => true,    // TCP keep-alive（连接复用）
@@ -433,7 +434,7 @@ XHCurl::setConfig([
 
 | 方法 | 说明 |
 |------|------|
-| `get()` / `post()` / `put()` / `delete()` / `patch()` / `head()` | 设置标准 HTTP 方法 |
+| `get()` / `post()` / `put()` / `delete()` / `patch()` / `head()` / `options()` | 设置标准 HTTP 方法 |
 | `method(string $method)` | 通过字符串设置方法 |
 | `customMethod(string $method)` | 自定义方法（CURLOPT_CUSTOMREQUEST，如 PROPFIND/TRACE） |
 
@@ -502,6 +503,10 @@ XHCurl::setConfig([
 
 `execute()`（XHRequest）/ `XHMulti::execute()` / `XHThreadPool::execute()` /
 `XHCurl::await()` / `XHCurl::gather()` **全部以关联数组形式返回结果**，字段完全一致：
+
+> **错误处理统一**：所有 API（`execute()`/`XHMulti::execute()`/`XHThreadPool::execute()`/
+> `await()`/`gather()`/`each()`）在请求失败时**统一返回 `success=false` 的结果数组**，
+> 不抛 PHP 异常。请始终用 `if ($result['success'])` 判断成败，从 `$result['error']` 读取原因。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -814,6 +819,33 @@ $result = $request->execute();
 - 确认 PHP 版本和线程安全模式（NTS/ZTS）与 DLL 匹配
 - 使用 `php -v` 查看线程安全信息
 - NTS = Non Thread Safe，ZTS = Zend Thread Safe
+
+### 请求超时 / 连接失败
+
+**现象**：`$result['success'] === false`，`$result['error']` 含 "timeout" 或 "connection" 字样。
+
+**排查**：
+- 检查目标 URL 是否可达（`curl -v <url>`）
+- 确认 `setConfig(['connect_timeout' => N])` 和 `->timeout(N)` 设置是否合理
+- 网络隔离环境（如容器内）确认 DNS 解析正常
+
+### 代理配置无效
+
+**现象**：请求报错 "error sending request for url" 或 "proxy" 相关错误。
+
+**排查**：
+- `XHCurl::setConfig(['proxy' => 'http://proxy:8080'])` 格式需含 scheme（http/socks5）
+- 无效代理地址会在首次请求时报错（setConfig 不预校验，fail-fast 到请求时）
+- 可用 `XHCurl::getConfig()['proxy']` 确认配置已生效
+
+### 响应体超过大小限制
+
+**现象**：响应被截断，`$result['body_size']` 接近 `max_response_size` 配置值。
+
+**排查**：
+- 默认限制 10MB（`setConfig(['max_response_size' => 10_000_000])`）
+- 大文件下载需调高限制：`setConfig(['max_response_size' => 100_000_000])`（100MB）
+- 截断时 `success` 仍为 true，但 `body` 不完整；检查 `body_size` 与预期是否匹配
 
 ---
 

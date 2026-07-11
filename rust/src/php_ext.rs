@@ -342,10 +342,8 @@ impl PhpXhCurl {
         let _ = ht.insert("max_connections", config.max_connections as i64);
         let _ = ht.insert("fiber_max_concurrency", config.fiber_max_concurrency as i64);
 
-        // 代理地址（可选）
-        if let Some(proxy) = &config.proxy {
-            let _ = ht.insert("proxy", proxy.as_str());
-        }
+        // 代理地址（None 时为 null，与 setConfig 接受 null 对称）
+        let _ = ht.insert("proxy", config.proxy.as_deref());
 
         Ok(ht)
     }
@@ -504,6 +502,15 @@ impl PhpXhRequest {
     /// 设置为 HEAD 方法（仅获取响应头，不返回响应体）
     pub fn head(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
         self_.request = self_.request.clone().head();
+        self_
+    }
+
+    /// 设置为 OPTIONS 方法
+    ///
+    /// # PHP 签名
+    /// public XHRequest::options(): $self_
+    pub fn options(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().options();
         self_
     }
 

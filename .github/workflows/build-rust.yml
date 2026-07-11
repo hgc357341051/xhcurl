@@ -213,8 +213,19 @@ jobs:
           EXT_DIR=$(php-config --extension-dir)
           sudo cp "dist/linux/xhcurl-rust-linux-php${{ matrix.php-version }}.so" "$EXT_DIR/xhcurl.so"
 
-          # 尝试加载扩展
-          php -d extension=xhcurl -r "echo 'XHCurl Rust 扩展加载成功';" || true
+          # 尝试加载扩展（失败时 CI 应失败）
+          php -d extension=xhcurl -r "echo XHCurl::version();"
+
+      # -----------------------------------------------------------------
+      # 步骤 8.5: 运行 PHP 测试套件
+      # 遍历 rust/tests/php_*.php 逐一执行，任一失败则 CI 失败
+      # -----------------------------------------------------------------
+      - name: Run PHP tests
+        run: |
+          for f in rust/tests/php_*.php; do
+            echo "Running $f..."
+            php -d extension=xhcurl "$f" || { echo "::error::PHP test $f failed"; exit 1; }
+          done
 
       # -----------------------------------------------------------------
       # 步骤 9: 上传编译产物
@@ -228,7 +239,7 @@ jobs:
 
   # =====================================================================
   # Job 2: macOS 平台编译（macOS 14 / Apple Silicon）
-  # 支持 PHP 8.1 ~ 8.3（Fiber 协程需要 PHP 8.1+）
+  # 支持 PHP 8.1 ~ 8.5（Fiber 协程需要 PHP 8.1+）
   # ext-php-rs 在 macOS 上编译为 .dylib 扩展
   # =====================================================================
   build-macos:
@@ -614,24 +625,36 @@ jobs:
           cargo fmt -- --check
 
       # -----------------------------------------------------------------
+      # 步骤 5.5: 安装 PHP（为 clippy/test 启用 --features php 提供 PHP 开发头文件）
+      # ext-php-rs 的 bindgen 需要 php.h，参考 build-linux job 的 PHP 安装方式
+      # -----------------------------------------------------------------
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: php-config
+          extensions: curl, json
+          coverage: none
+
+      # -----------------------------------------------------------------
       # 步骤 6: Clippy 静态分析
-      # 不启用 php feature（避免依赖 PHP 开发头文件）
+      # 启用 php feature（已在步骤 5.5 安装 PHP 开发头文件）
       # -----------------------------------------------------------------
       - name: Run Clippy
         working-directory: rust
         run: |
           echo "=== 运行 Clippy 静态分析 ==="
-          cargo clippy -- -D warnings
+          cargo clippy --all-targets --features php -- -D warnings
 
       # -----------------------------------------------------------------
       # 步骤 7: 运行测试
-      # 不启用 php feature，仅测试核心逻辑
+      # 启用 php feature（已在步骤 5.5 安装 PHP 开发头文件）
       # -----------------------------------------------------------------
       - name: Run tests
         working-directory: rust
         run: |
           echo "=== 运行测试 ==="
-          cargo test
+          cargo test --lib --features php
 
   # =====================================================================
   # Job 5: 发布 GitHub Release
