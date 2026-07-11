@@ -1762,8 +1762,11 @@ impl PhpXhThreadPool {
 
             // 完整性检查：worker panic 或提前退出可能导致结果数量不足
             // 与 execute_all 行为一致，返回错误而非静默返回不完整结果
+            // 回调异常时不存回 pool，让 pool 被 drop（Drop 实现 abort dispatcher + workers），
+            // 中止剩余已提交的任务。与协程 each / XhMulti::execute_each 的"回调异常中止剩余任务"行为一致。
+            // 下次调用 execute_each/execute 时 pool.is_none() → 重建 pool。
             if let Some(msg) = callback_err {
-                (pool, Err(msg))
+                (None, Err(msg))
             } else if (count as usize) < submitted {
                 (
                     pool,

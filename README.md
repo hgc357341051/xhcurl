@@ -655,6 +655,41 @@ XHCurl 提供两种不同层级的"流式回调"，用户常混淆，此处明�
 
 > **协程 `each()`** 仅支持请求级流式（`$onResult`），不支持 `$onChunk`/`$onHeaders`。如需响应体分块级流式，请用 `XHMulti::executeEach()` 或 `XHThreadPool::executeEach()`。
 
+### 请求级流式回调行为契约
+
+XHCurl 的三种执行模式均支持**请求级流式回调**——每完成一个请求就立即回调处理成功或失败的结果，不累积结果数组，内存恒定：
+
+1. **协程 `XHCurl::each(array $requests, callable $callback): int`** —— 静态方法，必须在 `XHCurl::run()` 内调用，仅 CLI
+2. **`XHMulti::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int`** —— 实例方法，先 `add()` 再执行，CLI + FPM
+3. **`XHThreadPool::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int`** —— 实例方法，先 `add()` 再执行，仅 CLI
+
+三者主回调签名一致：`function(array $result): void`，`$result` 字段由共享的 `result_to_php_array` 生成（`id`/`success`/`status`/`body`/`headers`/`elapsed_ms`/`body_size`/`url`/`error?`/`user_data?`，详见「结果数组字段」）。
+
+#### 统一行为契约
+
+三种模式的请求级流式回调共享以下行为约定：
+
+- **即时触发**：每完成一个请求（成功或失败）立即调用回调，不等其他请求
+- **结果字段一致**：回调收到的 `$result` 数组字段与 `execute()`/`gather()` 等返回值完全一致（由 `result_to_php_array` 统一生成）
+- **失败也回调**：失败请求同样触发回调（`success=false`、`status=0`、`body=""`、`error=...`），不抛 PHP 异常
+- **不累积、内存恒定**：结果处理权交给用户回调，框架不持有全部结果数组，适合海量请求场景
+- **回调异常中止**：回调内抛出异常时会中止剩余任务并向上传播异常（具体中止机制见下表）
+- **返回处理总数**：方法返回 `int`，表示已回调处理的结果总数
+
+#### 三者对比
+
+| 维度 | 协程 `each()` | `XHMulti::executeEach()` | `XHThreadPool::executeEach()` |
+|------|----------------|--------------------------|-------------------------------|
+| 调用方式 | 静态方法，需包裹在 `run()` 内 | 实例方法，先 `add()` | 实例方法，先 `add()` |
+| 并发模型 | Semaphore（限制 in-flight 数） | Semaphore（限制 in-flight 数） | 固定 worker 池 |
+| 默认并发上限 | 64（`fiber_max_concurrency`） | 0 = 不限 | CPU 核心数 |
+| SAPI 限制 | 仅 CLI | CLI + FPM | 仅 CLI |
+| 批量级超时 | 无 | 有（`timeout()`） | 无 |
+| `onChunk`/`onHeaders` | 不支持 | 支持 | 支持 |
+| 回调异常处理 | abort 全部 task | `abort_tasks()` | drop pool → abort workers |
+
+> 协程 `each()` 仅支持请求级流式回调（`$callback`），不支持响应体分块级流式（`$onChunk`/`$onHeaders`）。如需后者，请用 `XHMulti::executeEach()` 或 `XHThreadPool::executeEach()`。
+
 ---
 
 ## xhrun - 安全 Shell 命令执行
