@@ -218,28 +218,63 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 8.5: 运行 PHP 测试套件
-      # 启动 mock HTTP 服务器（/get、/post、/hang 端点），再遍历执行
-      # rust/tests/php_*.php，任一失败则 CI 失败
+      # 测试隔离策略：
+      #   - mock_server（18399）只承载非阻塞端点（/get /post /cookies /stream）
+      #   - /hang 端点由独立 socat 进程在 18400 端口提供（fork 模式不阻塞）
+      #   - 每个测试文件运行前重启 mock_server，确保干净环境
+      #   - 单文件 timeout 120s 超时保护，防止挂死 CI
       # -----------------------------------------------------------------
       - name: Run PHP tests
         run: |
-          # 启动 mock HTTP 服务器（端口 18399：/get、/post；端口 18400：/hang）
-          php -S 127.0.0.1:18399 rust/tests/mock_server.php > /tmp/mock_18399.log 2>&1 &
-          MOCK_PID_1=$!
-          php -S 127.0.0.1:18400 rust/tests/mock_server.php > /tmp/mock_18400.log 2>&1 &
-          MOCK_PID_2=$!
-          # 等待服务器就绪
+          set -e
+
+          # 安装 socat（用于 /hang 端点，避免阻塞 PHP 内置服务器）
+          sudo apt-get install -y socat 2>/dev/null || true
+
+          # 启动 socat 在 18400 端口提供 /hang（fork 模式，每个连接独立 sleep）
+          socat TCP-LISTEN:18400,fork,reuseaddr SYSTEM:'sleep 60' &
+          SOCAT_PID=$!
+          echo "socat /hang server started (PID $SOCAT_PID)"
+
+          # 等待 socat 就绪
           sleep 1
 
-          # 运行所有 PHP 测试
+          cleanup() {
+            kill $SOCAT_PID 2>/dev/null || true
+            pkill -f "php -S 127.0.0.1:18399" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # 运行所有 PHP 测试（每个文件独立 mock_server 实例）
           EXIT_CODE=0
           for f in rust/tests/php_*.php; do
-            echo "Running $f..."
-            php -d extension=xhcurl "$f" || { echo "::error::PHP test $f failed"; EXIT_CODE=1; }
-          done
+            echo "=== Running $f ==="
 
-          # 清理 mock 服务器
-          kill $MOCK_PID_1 $MOCK_PID_2 2>/dev/null || true
+            # 重启 mock_server（干净环境）
+            pkill -f "php -S 127.0.0.1:18399" 2>/dev/null || true
+            sleep 1
+            php -S 127.0.0.1:18399 rust/tests/mock_server.php > /tmp/mock_18399.log 2>&1 &
+            MOCK_PID=$!
+            sleep 1
+
+            # 验证 mock_server 就绪
+            if ! curl -sf http://127.0.0.1:18399/get > /dev/null 2>&1; then
+              echo "::error::mock_server failed to start for $f"
+              cat /tmp/mock_18399.log
+              EXIT_CODE=1
+              continue
+            fi
+
+            # 运行测试（120s 超时保护）
+            if ! timeout 120 php -d extension=xhcurl "$f"; then
+              echo "::error::PHP test $f failed (or timed out)"
+              EXIT_CODE=1
+            fi
+
+            # 清理 mock_server
+            kill $MOCK_PID 2>/dev/null || true
+            sleep 1
+          done
 
           exit $EXIT_CODE
 

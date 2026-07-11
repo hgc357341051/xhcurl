@@ -3,13 +3,17 @@
 // | XHCurl 测试用 Mock HTTP 服务器                                         |
 // |                                                                        |
 // | 通过 PHP 内置服务器运行（php -S 127.0.0.1:18399 mock_server.php）       |
-// | 提供 /get、/post、/hang、/stream 端点，供 PHP 测试套件使用。              |
+// | 提供 /get、/post、/cookies、/stream 端点，供 PHP 测试套件使用。           |
 // |                                                                        |
 // | 端点说明：                                                              |
-// |   /get    返回 200 + 两个 Set-Cookie 头（测试重复头合并）+ JSON body      |
-// |   /post   回显请求：{"json": <解析后的JSON请求体>, ...}                   |
-// |   /hang   挂起连接 60 秒（测试超时中止）                                  |
-// |   /stream 流式输出大响应体，分多次 flush，触发 onChunk 多次回调            |
+// |   /get     返回 200 + 两个 Set-Cookie 头（测试重复头合并）+ JSON body      |
+// |   /post    回显请求：{"json": <解析后的JSON请求体>, ...}                   |
+// |   /cookies 回显请求的 Cookie 头（测试 cookies() 方法实际发送的内容）        |
+// |   /stream  流式输出大响应体，分多次 flush，触发 onChunk 多次回调            |
+// |                                                                        |
+// | 注意：/hang 端点已移除，改由独立 socat 进程在 18400 端口提供              |
+// | （socat TCP-LISTEN:18400,fork,reuseaddr SYSTEM:'sleep 60'），               |
+// | fork 模式不阻塞，避免 PHP 内置单进程服务器被 sleep 阻塞。                   |
 // +----------------------------------------------------------------------+
 
 $uri = $_SERVER['REQUEST_URI'] ?? '';
@@ -41,13 +45,6 @@ if ($path === '/post') {
         'headers' => getallheaders(),
         'url' => $uri,
     ]);
-    return;
-}
-
-if ($path === '/hang') {
-    // 挂起连接 60 秒，模拟不响应的服务器（测试超时中止）
-    sleep(60);
-    echo 'ok';
     return;
 }
 

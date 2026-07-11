@@ -166,11 +166,12 @@ check("修改 maxResponseSize 后重建生效（超限失败）", $failed);
 
 // ==================================================================
 // Task 2: executeEach 强制 timeout（最后执行，用 /hang）
+// /hang 由独立 socat 进程在 18400 端口提供
 // ==================================================================
 echo "\n=== Task 2: executeEach 强制 timeout（最后执行）===\n";
 
 $pool5 = new XHThreadPool(1);
-$pool5->add(XHCurl::createRequest($BASE . '/hang')->get()->timeout(30));
+$pool5->add(XHCurl::createRequest('http://127.0.0.1:18400/hang')->get()->timeout(30));
 $pool5->timeout(2);  // 2 秒批量超时
 $startTime = microtime(true);
 $caughtTimeout = false;

@@ -209,11 +209,11 @@ check("成功路径不含 error_type", !isset($result['error_type']) || $result[
 //    php_ext.rs timeout_ms() 设置 request_timeout_ms，优先级高于 timeout()。
 //    executor 中 builder.timeout(Duration::from_millis(ms)) 生效。
 //    /hang 端点 sleep(60s)，timeoutMs(300) 应在 300ms 后超时。
-//    注意：此测试放最后，因为 /hang 会阻塞 mock 服务器进程。
+//    /hang 由独立 socat 进程在 18400 端口提供（fork 模式不阻塞其他端点）。
 // ==================================================================
 echo "\n=== 7. timeoutMs() 毫秒级超时 ===\n";
 
-$result = XHCurl::createRequest($BASE . '/hang')
+$result = XHCurl::createRequest('http://127.0.0.1:18400/hang')
     ->get()
     ->timeoutMs(300)  // 300ms 超时
     ->execute();

@@ -318,26 +318,26 @@ function test_negative_max_redirects_clamped(): bool
 function test_multi_negative_concurrency_clamped(): bool
 {
     $multi = new XHMulti();
-    $multi->maxConcurrency(-10);
-    // 负值被 clamp，仅验证 setter 不崩溃：空请求 execute 现抛异常（Task 8）
+    // 第五轮 spec：负值改为抛异常（0 = 无限制）
     try {
-        $multi->execute();
+        $multi->maxConcurrency(-10);
         return false; // 应抛异常
     } catch (Throwable $e) {
-        return strpos($e->getMessage(), '没有待执行请求') !== false;
+        return strpos($e->getMessage(), 'maxConcurrency') !== false
+            || strpos($e->getMessage(), '负值') !== false;
     }
 }
 
 function test_multi_negative_response_size_clamped(): bool
 {
     $multi = new XHMulti();
-    $multi->maxResponseSize(-100);
-    // 负值被 clamp，仅验证 setter 不崩溃：空请求 execute 现抛异常（Task 8）
+    // 第五轮 spec：负值改为抛异常（0 = 使用全局默认）
     try {
-        $multi->execute();
+        $multi->maxResponseSize(-100);
         return false; // 应抛异常
     } catch (Throwable $e) {
-        return strpos($e->getMessage(), '没有待执行请求') !== false;
+        return strpos($e->getMessage(), 'maxResponseSize') !== false
+            || strpos($e->getMessage(), '负值') !== false;
     }
 }
 

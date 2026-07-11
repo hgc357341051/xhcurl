@@ -248,12 +248,12 @@ if (is_array($results) && count($results) >= 1) {
 // ==================================================================
 // Task 1: timeout 生效（批量超时后中止）
 //    设置很短的 timeout + 添加 /hang 请求，execute 应在超时后返回错误。
-//    注意：/hang 端点会阻塞 mock 服务器进程 60 秒，此测试放最后。
+//    /hang 由独立 socat 进程在 18400 端口提供（fork 模式不阻塞其他端点）。
 // ==================================================================
 echo "\n=== Task 1: timeout 生效（最后执行，避免阻塞）===\n";
 
 $pool9 = new XHThreadPool(1);
-$pool9->add(XHCurl::createRequest($BASE . '/hang')->get()->timeout(30));
+$pool9->add(XHCurl::createRequest('http://127.0.0.1:18400/hang')->get()->timeout(30));
 $pool9->timeout(2);  // 2 秒批量超时
 $startTime = microtime(true);
 $timeoutExceptionCaught = false;
