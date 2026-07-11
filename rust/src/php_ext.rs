@@ -23,10 +23,11 @@ use ext_php_rs::convert::IntoZvalDyn;
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ArrayKey, ZendCallable, ZendClassObject, ZendHashTable, Zval};
 use ext_php_rs::zend::php_sapi_name;
+use tokio::sync::mpsc;
 
 use crate::curl::XhCurlManager;
 use crate::error::MAX_REQUESTS_PER_BATCH;
-use crate::multi::XhMulti;
+use crate::multi::{StreamEvent, XhMulti, STREAM_CHANNEL_CAPACITY};
 use crate::request::{clear_request_client_cache, HttpMethod, XhRequest};
 use crate::response::XhResponse;
 use crate::threadpool::{ResultMessage, ThreadPoolConfig, XhThreadPool};
@@ -1194,12 +1195,23 @@ impl PhpXhMulti {
     /// - executeEach：每完成一个立即调回调处理，不累积（内存恒定）
     ///
     /// # PHP 签名
-    /// public XHMulti::executeEach(callable $callback): int
+    /// public XHMulti::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int
     ///
-    /// 回调签名：`function(array $result): void`
+    /// 回调签名：
+    /// - $onResult: function(array $result): void —— 每个请求完成时调用
+    /// - $onChunk: function(string $requestId, string $chunk): void —— 响应体分块（二进制安全）
+    /// - $onHeaders: function(string $requestId, int $status, array $headers): void —— 收到响应头时调用
+    ///
+    /// 当 $onChunk 或 $onHeaders 非 null 时，内部启用流式回调。
+    /// 不传这两个参数时行为与之前完全一致（向后兼容）。
     /// 返回值：处理的结果总数（等于请求数；空请求列表返回 0）
     #[php(name = "executeEach")]
-    pub fn execute_each(&mut self, callback: &Zval) -> Result<i64, String> {
+    pub fn execute_each(
+        &mut self,
+        callback: &Zval,
+        on_chunk: Option<&Zval>,
+        on_headers: Option<&Zval>,
+    ) -> Result<i64, String> {
         // 空请求列表：不 spawn，提前返回
         if self.requests.is_empty() {
             return Ok(0);
@@ -1209,6 +1221,23 @@ impl PhpXhMulti {
         // ZendCallable::new 借用 callback 的生命周期，在整个函数内可用
         let callback_callable =
             ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
+
+        // 校验可选流式回调（onChunk / onHeaders），任一非 None 时启用流式
+        // ext-php-rs 的 Option<&Zval> 不区分"未传"和"传 null"：
+        // PHP 传 null 时收到 Some(null_zval)，需用 is_null() 判定视为 None。
+        let on_chunk_callable = match on_chunk {
+            Some(zv) if !zv.is_null() => {
+                Some(ZendCallable::new(zv).map_err(|e| format!("无效的 onChunk 回调: {}", e))?)
+            }
+            _ => None,
+        };
+        let on_headers_callable = match on_headers {
+            Some(zv) if !zv.is_null() => {
+                Some(ZendCallable::new(zv).map_err(|e| format!("无效的 onHeaders 回调: {}", e))?)
+            }
+            _ => None,
+        };
+        let streaming_enabled = on_chunk_callable.is_some() || on_headers_callable.is_some();
 
         // 复用 execute 的全局运行时与客户端配置
         let client = global_client()?.clone();
@@ -1234,6 +1263,16 @@ impl PhpXhMulti {
             if timeout > 0 {
                 multi = multi.timeout(timeout);
             }
+
+            // 启用流式回调（必须在 spawn_all 之前调用，使 stream_tx 生效）
+            // stream_tx 由 multi 持有，loop 期间 channel 不会关闭，
+            // 故 stream_rx.recv() 在此期间不会返回 None（仅 Pending 或 Some）
+            let mut stream_rx = if streaming_enabled {
+                Some(multi.enable_streaming())
+            } else {
+                None
+            };
+
             multi.add_many(requests).map_err(|e| e.to_string())?;
 
             let (mut result_rx, expected) = multi.spawn_all().await;
@@ -1254,43 +1293,133 @@ impl PhpXhMulti {
                         ));
                     }
                     let remaining = deadline - now;
-                    match tokio::time::timeout(remaining, result_rx.recv()).await {
-                        Ok(Some(result)) => {
-                            // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
-                            let result_array = result_to_php_array(&result);
-                            // 调用用户回调，异常时 abort 剩余任务再向上传播
-                            if let Err(e) =
-                                invoke_streaming_callback(&callback_callable, &result_array)
-                            {
-                                multi.abort_tasks();
-                                return Err(e);
+                    if streaming_enabled {
+                        let stream_rx = stream_rx.as_mut().unwrap();
+                        tokio::select! {
+                            result = tokio::time::timeout(remaining, result_rx.recv()) => {
+                                match result {
+                                    Ok(Some(result)) => {
+                                        // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                                        let result_array = result_to_php_array(&result);
+                                        // 调用用户回调，异常时 abort 剩余任务再向上传播
+                                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                                            multi.abort_tasks();
+                                            return Err(e);
+                                        }
+                                        count += 1;
+                                        if (count as usize) >= expected {
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => break, // channel 关闭
+                                    Err(_) => {
+                                        // 批量超时：abort 剩余任务，避免任务泄漏
+                                        multi.abort_tasks();
+                                        return Err(format!(
+                                            "批量请求超时（{} 秒），已完成 {}/{} 个",
+                                            timeout, count, expected
+                                        ));
+                                    }
+                                }
                             }
-                            count += 1;
-                            if (count as usize) >= expected {
-                                break;
+                            stream_msg = stream_rx.recv() => {
+                                if let Some((req_id, event)) = stream_msg {
+                                    if let Err(e) = dispatch_stream_event(&req_id, &event, &on_chunk_callable, &on_headers_callable) {
+                                        multi.abort_tasks();
+                                        return Err(e);
+                                    }
+                                }
+                                // None: stream channel 关闭（所有任务完成），继续等待结果
                             }
                         }
-                        Ok(None) => break, // channel 关闭
-                        Err(_) => {
-                            // 批量超时：abort 剩余任务，避免任务泄漏
-                            multi.abort_tasks();
-                            return Err(format!(
-                                "批量请求超时（{} 秒），已完成 {}/{} 个",
-                                timeout, count, expected
-                            ));
+                    } else {
+                        // 原始逻辑（未启用流式，向后兼容）
+                        match tokio::time::timeout(remaining, result_rx.recv()).await {
+                            Ok(Some(result)) => {
+                                // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                                let result_array = result_to_php_array(&result);
+                                // 调用用户回调，异常时 abort 剩余任务再向上传播
+                                if let Err(e) =
+                                    invoke_streaming_callback(&callback_callable, &result_array)
+                                {
+                                    multi.abort_tasks();
+                                    return Err(e);
+                                }
+                                count += 1;
+                                if (count as usize) >= expected {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break, // channel 关闭
+                            Err(_) => {
+                                // 批量超时：abort 剩余任务，避免任务泄漏
+                                multi.abort_tasks();
+                                return Err(format!(
+                                    "批量请求超时（{} 秒），已完成 {}/{} 个",
+                                    timeout, count, expected
+                                ));
+                            }
                         }
                     }
                 }
             } else {
                 // 无超时的结果收集
-                while let Some(result) = result_rx.recv().await {
-                    let result_array = result_to_php_array(&result);
-                    // 调用用户回调，异常时 abort 剩余任务再向上传播
-                    if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                if streaming_enabled {
+                    let stream_rx = stream_rx.as_mut().unwrap();
+                    while (count as usize) < expected {
+                        tokio::select! {
+                            result = result_rx.recv() => {
+                                match result {
+                                    Some(result) => {
+                                        let result_array = result_to_php_array(&result);
+                                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                                            multi.abort_tasks();
+                                            return Err(e);
+                                        }
+                                        count += 1;
+                                    }
+                                    None => break,
+                                }
+                            }
+                            stream_msg = stream_rx.recv() => {
+                                if let Some((req_id, event)) = stream_msg {
+                                    if let Err(e) = dispatch_stream_event(&req_id, &event, &on_chunk_callable, &on_headers_callable) {
+                                        multi.abort_tasks();
+                                        return Err(e);
+                                    }
+                                }
+                                // None: stream channel 关闭（所有任务完成），继续等待结果
+                            }
+                        }
+                    }
+                } else {
+                    // 原始逻辑（未启用流式，向后兼容）
+                    while let Some(result) = result_rx.recv().await {
+                        let result_array = result_to_php_array(&result);
+                        // 调用用户回调，异常时 abort 剩余任务再向上传播
+                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                            multi.abort_tasks();
+                            return Err(e);
+                        }
+                        count += 1;
+                    }
+                }
+            }
+
+            // 主循环结束后，处理可能残留的流式事件
+            // result 已收齐但 stream channel 可能仍有积压的 Chunk/Headers 事件未消费，
+            // 需 drain 确保用户回调收到完整的分块数据（否则 onChunk 拼接会缺失尾部 chunk）。
+            if let Some(stream_rx) = stream_rx.as_mut() {
+                while let Ok((req_id, event)) = stream_rx.try_recv() {
+                    if let Err(e) = dispatch_stream_event(
+                        &req_id,
+                        &event,
+                        &on_chunk_callable,
+                        &on_headers_callable,
+                    ) {
                         multi.abort_tasks();
                         return Err(e);
                     }
-                    count += 1;
                 }
             }
 
@@ -1418,12 +1547,23 @@ impl PhpXhThreadPool {
     /// - executeEach：每完成一个立即调回调处理，不累积（内存恒定）
     ///
     /// # PHP 签名
-    /// public XHThreadPool::executeEach(callable $callback): int
+    /// public XHThreadPool::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int
     ///
-    /// 回调签名：`function(array $result): void`
+    /// 回调签名：
+    /// - $onResult: function(array $result): void —— 每个请求完成时调用
+    /// - $onChunk: function(string $requestId, string $chunk): void —— 响应体分块（二进制安全）
+    /// - $onHeaders: function(string $requestId, int $status, array $headers): void —— 收到响应头时调用
+    ///
+    /// 当 $onChunk 或 $onHeaders 非 null 时，内部启用流式回调。
+    /// 不传这两个参数时行为与之前完全一致（向后兼容）。
     /// 返回值：处理的结果总数（等于成功提交的请求数；空请求列表返回 0）
     #[php(name = "executeEach")]
-    pub fn execute_each(&mut self, callback: &Zval) -> Result<i64, String> {
+    pub fn execute_each(
+        &mut self,
+        callback: &Zval,
+        on_chunk: Option<&Zval>,
+        on_headers: Option<&Zval>,
+    ) -> Result<i64, String> {
         // 安全检查：线程池仅在 CLI 模式下可用（与 execute 一致）
         // FPM 模式下多线程会与 PHP 内存管理器（TSRM/内存池）冲突
         if !sapi_is_cli() {
@@ -1439,6 +1579,23 @@ impl PhpXhThreadPool {
         // 提前校验回调，避免 spawn 后才发现回调无效
         let callback_callable =
             ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
+
+        // 校验可选流式回调（onChunk / onHeaders），任一非 None 时启用流式
+        // ext-php-rs 的 Option<&Zval> 不区分"未传"和"传 null"：
+        // PHP 传 null 时收到 Some(null_zval)，需用 is_null() 判定视为 None。
+        let on_chunk_callable = match on_chunk {
+            Some(zv) if !zv.is_null() => {
+                Some(ZendCallable::new(zv).map_err(|e| format!("无效的 onChunk 回调: {}", e))?)
+            }
+            _ => None,
+        };
+        let on_headers_callable = match on_headers {
+            Some(zv) if !zv.is_null() => {
+                Some(ZendCallable::new(zv).map_err(|e| format!("无效的 onHeaders 回调: {}", e))?)
+            }
+            _ => None,
+        };
+        let streaming_enabled = on_chunk_callable.is_some() || on_headers_callable.is_some();
 
         let max_concurrency = self.max_concurrency;
         // 取出现有线程池以便复用（同对象多次调用复用工作线程）
@@ -1471,11 +1628,25 @@ impl PhpXhThreadPool {
                 }
             }
 
+            // 创建流式 channel（与 XhMulti::enable_streaming 使用相同容量）
+            // stream_rx 为本地 owned 变量，不借用 pool，可与 result_rx 在 select! 中共存
+            let (mut stream_tx_opt, mut stream_rx) = if streaming_enabled {
+                let (tx, rx) = mpsc::channel::<(String, StreamEvent)>(STREAM_CHANNEL_CAPACITY);
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+
             // 提交所有请求，记录成功提交的数量
             // 若中途 submit 失败（队列满），已提交的请求仍需收集结果
+            // 启用流式时使用 submit_with_stream 将 stream_tx 传入 worker
             let mut submitted = 0usize;
             for request in requests {
-                match p.submit(request) {
+                let submit_result = match &stream_tx_opt {
+                    Some(tx) => p.submit_with_stream(request, tx.clone()),
+                    None => p.submit(request),
+                };
+                match submit_result {
                     Ok(()) => submitted += 1,
                     Err(e) => {
                         // 提交失败，但已提交的请求需要继续收集结果
@@ -1486,6 +1657,8 @@ impl PhpXhThreadPool {
             if submitted == 0 {
                 return (pool, Err("所有请求提交失败".to_string()));
             }
+            // 提交完成后丢弃 stream_tx 副本，使 channel 在所有 worker 完成后能正确关闭
+            drop(stream_tx_opt.take());
 
             let worker_count = p.worker_count();
             // 自己接管 result_rx：每收到一个就调回调，不通过 execute_all 累积
@@ -1501,28 +1674,87 @@ impl PhpXhThreadPool {
             let mut callback_err: Option<String> = None;
 
             // 只要结果未收齐就继续等待
-            while (count as usize) < submitted {
-                match result_rx.recv().await {
-                    Some(ResultMessage::Completed(result)) => {
-                        // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
-                        let result_array = result_to_php_array(&result);
-                        // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
-                        if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array)
-                        {
-                            callback_err = Some(e);
+            if streaming_enabled {
+                let stream_rx = stream_rx.as_mut().unwrap();
+                while (count as usize) < submitted {
+                    tokio::select! {
+                        msg = result_rx.recv() => {
+                            match msg {
+                                Some(ResultMessage::Completed(result)) => {
+                                    // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                                    let result_array = result_to_php_array(&result);
+                                    // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
+                                    if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array) {
+                                        callback_err = Some(e);
+                                        break;
+                                    }
+                                    count += 1;
+                                }
+                                Some(ResultMessage::WorkerShutdown) => {
+                                    shutdown_count += 1;
+                                    // 所有工作线程都已关闭，无法再收到结果
+                                    if shutdown_count >= worker_count {
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    // channel 关闭，无法再收到结果
+                                    break;
+                                }
+                            }
+                        }
+                        stream_msg = stream_rx.recv() => {
+                            if let Some((req_id, event)) = stream_msg {
+                                if let Err(e) = dispatch_stream_event(&req_id, &event, &on_chunk_callable, &on_headers_callable) {
+                                    callback_err = Some(e);
+                                    break;
+                                }
+                            }
+                            // None: stream channel 关闭（所有 worker 完成），继续等待结果
+                        }
+                    }
+                }
+            } else {
+                // 原始逻辑（未启用流式，向后兼容）
+                while (count as usize) < submitted {
+                    match result_rx.recv().await {
+                        Some(ResultMessage::Completed(result)) => {
+                            // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
+                            let result_array = result_to_php_array(&result);
+                            // 调用用户回调（通过 invoke_streaming_callback 统一异常提取）
+                            if let Err(e) = invoke_streaming_callback(&callback_callable, &result_array)
+                            {
+                                callback_err = Some(e);
+                                break;
+                            }
+                            count += 1;
+                        }
+                        Some(ResultMessage::WorkerShutdown) => {
+                            shutdown_count += 1;
+                            // 所有工作线程都已关闭，无法再收到结果
+                            if shutdown_count >= worker_count {
+                                break;
+                            }
+                        }
+                        None => {
+                            // channel 关闭，无法再收到结果
                             break;
                         }
-                        count += 1;
                     }
-                    Some(ResultMessage::WorkerShutdown) => {
-                        shutdown_count += 1;
-                        // 所有工作线程都已关闭，无法再收到结果
-                        if shutdown_count >= worker_count {
-                            break;
-                        }
-                    }
-                    None => {
-                        // channel 关闭，无法再收到结果
+                }
+            }
+
+            // 主循环结束后，处理可能残留的流式事件（与 XHMulti 一致）
+            // result 已收齐但 stream channel 可能仍有积压事件未消费。
+            if let Some(stream_rx) = stream_rx.as_mut() {
+                while let Ok((req_id, event)) = stream_rx.try_recv() {
+                    if let Err(e) = dispatch_stream_event(
+                        &req_id,
+                        &event,
+                        &on_chunk_callable,
+                        &on_headers_callable,
+                    ) {
+                        callback_err = Some(e);
                         break;
                     }
                 }
@@ -1659,12 +1891,71 @@ fn invoke_streaming_callback(
     callback
         .try_call(vec![result_array as &dyn IntoZvalDyn])
         .map(|_| ())
-        .map_err(|e| match e {
-            ext_php_rs::error::Error::Exception(obj) => {
-                crate::fiber::extract_exception_message(&obj)
+        .map_err(extract_callback_error)
+}
+
+/// 提取回调执行错误的可读消息。
+///
+/// 使用 `fiber::extract_exception_message` 读 Exception 对象的 message 属性，
+/// 而非 Error::Exception 的 Display（其 Debug 遍历 trace 属性可能含 NUL 字节）。
+fn extract_callback_error(e: ext_php_rs::error::Error) -> String {
+    match e {
+        ext_php_rs::error::Error::Exception(obj) => crate::fiber::extract_exception_message(&obj),
+        other => format!("回调执行失败: {}", other),
+    }
+}
+
+/// 分发流式事件到对应的 PHP 回调（on_chunk / on_headers）。
+///
+/// - `Headers` 事件 → 调用 `on_headers(string $requestId, int $status, array $headers)`
+/// - `Chunk` 事件 → 调用 `on_chunk(string $requestId, string $chunk)`（二进制安全）
+/// - `Complete`/`Error` → 不单独调回调（结果回调 onResult 已覆盖终结语义）
+///
+/// 当对应的回调为 None 时（用户未传该回调），跳过不调用。
+/// 回调异常时返回 Err(message)，与 invoke_streaming_callback 的错误提取一致。
+fn dispatch_stream_event(
+    request_id: &str,
+    event: &StreamEvent,
+    on_chunk: &Option<ZendCallable>,
+    on_headers: &Option<ZendCallable>,
+) -> Result<(), String> {
+    match event {
+        StreamEvent::Headers { status, headers } => {
+            let cb = match on_headers {
+                Some(cb) => cb,
+                None => return Ok(()),
+            };
+            // 构建 headers 关联数组（复用 fill_response_fields 中的头部转换逻辑）
+            let mut headers_ht = ZendHashTable::new();
+            for (name, value) in headers {
+                let _ = headers_ht.insert(name.as_str(), value.as_str());
             }
-            other => format!("回调执行失败: {}", other),
-        })
+            let status_i64 = *status as i64;
+            // request_id 借用为 String 以满足 IntoZvalDyn（&str 不可直接转 trait 对象）
+            let rid = request_id.to_string();
+            cb.try_call(vec![
+                &rid as &dyn IntoZvalDyn,
+                &status_i64 as &dyn IntoZvalDyn,
+                &headers_ht as &dyn IntoZvalDyn,
+            ])
+            .map(|_| ())
+            .map_err(extract_callback_error)
+        }
+        StreamEvent::Chunk { data } => {
+            let cb = match on_chunk {
+                Some(cb) => cb,
+                None => return Ok(()),
+            };
+            // 二进制安全字符串（与 fill_response_fields 的 body 处理一致）
+            let mut zv = Zval::new();
+            zv.set_binary::<u8>(data.clone());
+            let rid = request_id.to_string();
+            cb.try_call(vec![&rid as &dyn IntoZvalDyn, &zv as &dyn IntoZvalDyn])
+                .map(|_| ())
+                .map_err(extract_callback_error)
+        }
+        StreamEvent::Complete { .. } | StreamEvent::Error { .. } => Ok(()),
+    }
 }
 
 /// 将单个 XhResponse 的完整信息填充到 PHP 哈希表中

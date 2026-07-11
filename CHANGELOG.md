@@ -6,6 +6,40 @@
 ## [Unreleased]
 
 
+## [1.0.8] - 2026-07-11
+
+本版本新增**响应体分块流式回调**（`onChunk`/`onHeaders`），使 PHP 用户能在 HTTP 请求过程中
+实时处理响应体数据块和响应头，无需等待整个请求完成。适用于大文件流式下载、SSE、NDJSON 流式解析。
+
+### 新增
+- **`XHMulti::executeEach` 支持 `onChunk`/`onHeaders`**：新增两个可选参数
+  `?callable $onChunk = null` 和 `?callable $onHeaders = null`（向后兼容，已有代码不受影响）。
+  - `$onChunk(string $requestId, string $chunk): void` —— 每收到一块响应体时触发（二进制安全）
+  - `$onHeaders(string $requestId, int $status, array $headers): void` —— 收到响应头时触发
+  - 所有 chunk 拼接后等于完整响应体（与 `$result['body']` 一致）
+- **`XHThreadPool::executeEach` 同步支持 `onChunk`/`onHeaders`**：签名与 `XHMulti::executeEach` 一致。
+- **核心层流式能力暴露**：`StreamEvent`（Headers/Chunk/Complete/Error）通过线程安全 mpsc channel
+  从 tokio 工作线程传递到 PHP 线程，PHP 回调仅在 `block_on` 当前线程调用，确保线程安全。
+- **`mock_server.php` 新增 `/stream` 端点**：分块输出大响应体（`flush()` 确保分段发送），
+  供 `onChunk` 多次触发验证。参数：`n`（段数）、`size`（每段字节数）。
+- **`php_streaming_test.php` 新增**：28 项测试覆盖 onChunk/onHeaders 触发、chunk 拼接完整性、
+  XHMulti 和 XHThreadPool 两条路径、向后兼容回归、回调异常中止。
+
+### 增强
+- **流式事件 drain 机制**：主收集循环结束后 `try_recv` 排空 stream channel 残留事件，
+  确保用户回调收到完整的分块数据（避免尾部 chunk 丢失）。
+- **null 参数处理**：`Option<&Zval>` 参数正确处理 PHP `null`（视为未传），用户可显式传 `null`
+  跳过 `onChunk` 只用 `onHeaders`。
+
+### 文档
+- README 核心特性表新增"流式回调"行。
+- 新增"流式回调类型"小节，明确区分请求级（`onResult`）与响应体分块级（`onChunk`/`onHeaders`）。
+- 更新 `executeEach` 签名表（XHMulti + XHThreadPool）。
+- 补充 `onChunk`/`onHeaders` 使用示例。
+- `each()` 章节澄清协程仅支持请求级流式。
+- 故障排查新增"流式回调不触发"条目。
+
+
 ## [1.0.7] - 2026-07-11
 
 本版本聚焦**错误处理健壮性与 CI 质量保障**：消除所有 panic 路径（改返回 PHP 异常或结果数组）、

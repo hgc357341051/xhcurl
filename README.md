@@ -45,6 +45,7 @@ XHCurl 是一个基于 **Rust** 开发的高性能 PHP HTTP 客户端扩展，�
 | **自适应运行时** | CLI 模式多线程运行时（M:N 并行），FPM 模式单线程运行时（协作式并发） |
 | **用户自定义数据** | `setUserData()`（别名 `userData()`）携带任意结构化数据，随结果原样回传 |
 | **响应体大小限制** | 流式读取 + `max_response_size` 防止内存溢出 |
+| **流式回调** | 请求级（`each`/`executeEach`）+ 响应体分块级（`onChunk`/`onHeaders`）双流式 |
 | **安全 Shell 执行** | `xhrun()` 函数替代 `shell_exec`/`exec`/`system`，默认不经 shell 防注入 |
 
 ---
@@ -282,6 +283,9 @@ foreach ($results as $idx => $result) {
 | `each(array $requests, callable $callback)` | `int` —— 处理结果总数 | 每个请求完成后立即调用回调（流式处理） |
 
 适用场景：结果数量巨大且无需在内存中保留全部结果时，用 `each()` 边收边处理，避免峰值内存。
+
+> **注意**：协程 `each()` 仅支持请求级流式回调（`$callback`）。
+> 如需响应体分块级流式（`onChunk`/`onHeaders`），请使用 `XHMulti::executeEach()` 或 `XHThreadPool::executeEach()`。
 
 ```php
 <?php
@@ -561,7 +565,7 @@ XHCurl::setConfig([
 | `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
 | `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
-| `executeEach(callable $callback): int` | 流式回调执行，回调签名 `function(array $result): void`，返回处理结果总数 |
+| `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行，详见下文 |
 
 ```php
 $multi = new XHMulti();
@@ -574,6 +578,49 @@ $results = $multi->execute(); // 返回结果数组
 > 结果按**完成顺序**排列（非提交顺序）。用结果的 `id` 字段关联业务上下文，
 > 而非依赖数组索引。
 
+#### `executeEach` 响应体分块级流式回调
+
+`executeEach` 支持两个可选回调参数，用于在请求过程中实时处理响应体数据：
+
+```php
+<?php
+$multi = new XHMulti();
+$multi->add(XHCurl::createRequest('http://example.com/large-file')->get());
+
+// 仅请求级流式（向后兼容，行为不变）
+$multi->executeEach(function(array $result): void {
+    echo "请求完成: status={$result['status']}\n";
+});
+
+// 请求级 + 响应体分块级流式
+$multi->add(XHCurl::createRequest('http://example.com/stream')->get());
+$multi->executeEach(
+    // $onResult: 每个请求完成时调用（必传）
+    function(array $result): void {
+        echo "完成: {$result['id']}\n";
+    },
+    // $onChunk: 每收到一块响应体时调用（可选，二进制安全）
+    function(string $requestId, string $chunk): void {
+        echo "收到 {$requestId} 的 " . strlen($chunk) . " 字节\n";
+    },
+    // $onHeaders: 收到响应头时调用（可选）
+    function(string $requestId, int $status, array $headers): void {
+        echo "{$requestId} 响应头: HTTP {$status}\n";
+    }
+);
+```
+
+**回调签名：**
+
+| 回调 | 签名 | 触发时机 |
+|------|------|----------|
+| `$onResult` | `function(array $result): void` | 每个请求完成时（必传） |
+| `$onChunk` | `function(string $requestId, string $chunk): void` | 每收到一块响应体时（可选，`$chunk` 二进制安全） |
+| `$onHeaders` | `function(string $requestId, int $status, array $headers): void` | 收到响应头时（可选，每个请求触发一次） |
+
+> `$onChunk` 的所有 chunk 拼接后等于完整响应体（与 `$result['body']` 一致）。
+> 两个参数均为可选，不传时行为与之前完全一致（向后兼容）。
+
 ### XHThreadPool - 线程池
 
 仅 CLI 模式可用（FPM 多线程会与 PHP 内存管理器冲突）。创建独立工作线程池处理请求，
@@ -584,7 +631,7 @@ $results = $multi->execute(); // 返回结果数组
 | `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
-| `executeEach(callable $callback): int` | 流式回调执行，回调签名 `function(array $result): void`，返回处理结果总数（仅 CLI 可用） |
+| `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行（签名与 `XHMulti::executeEach` 一致，仅 CLI 可用） |
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
@@ -592,6 +639,21 @@ $pool->add($request1);
 $pool->add($request2);
 $results = $pool->execute();
 ```
+
+### 流式回调类型
+
+XHCurl 提供两种不同层级的"流式回调"，用户常混淆，此处明确区分：
+
+| 类型 | 触发时机 | 回调参数 | 适用方法 |
+|------|----------|----------|----------|
+| **请求级流式** | 每个请求**完成后**触发 | `function(array $result): void` | `each()`、`XHMulti::executeEach()`、`XHThreadPool::executeEach()` 的 `$onResult` 参数 |
+| **响应体分块级流式** | 请求过程中每收到一块数据触发 | `onChunk`/`onHeaders` | `XHMulti::executeEach()`、`XHThreadPool::executeEach()` 的可选参数 |
+
+**请求级流式（`$onResult`）**：批量并发执行时，每完成一个请求立即调用回调处理，不累积全部结果（内存恒定）。所有类（协程 `each`、`XHMulti`、`XHThreadPool`）均支持。
+
+**响应体分块级流式（`$onChunk`/`$onHeaders`）**：在单个请求过程中，每收到一块响应体数据就触发 `onChunk` 回调，收到响应头时触发 `onHeaders` 回调。适用于大文件流式下载、SSE（Server-Sent Events）、NDJSON 流式解析等场景。仅 `XHMulti::executeEach()` 和 `XHThreadPool::executeEach()` 支持此层级。
+
+> **协程 `each()`** 仅支持请求级流式（`$onResult`），不支持 `$onChunk`/`$onHeaders`。如需响应体分块级流式，请用 `XHMulti::executeEach()` 或 `XHThreadPool::executeEach()`。
 
 ---
 
@@ -846,6 +908,17 @@ $result = $request->execute();
 - 默认限制 10MB（`setConfig(['max_response_size' => 10_000_000])`）
 - 大文件下载需调高限制：`setConfig(['max_response_size' => 100_000_000])`（100MB）
 - 截断时 `success` 仍为 true，但 `body` 不完整；检查 `body_size` 与预期是否匹配
+
+### 流式回调不触发
+
+**现象**：传入 `$onChunk`/`$onHeaders` 后回调未执行。
+
+**排查**：
+- 确认回调参数位置正确：`executeEach($onResult, $onChunk, $onHeaders)`，`$onResult` 是必传的第一个参数
+- 确认 `$onChunk` 和 `$onHeaders` 的签名匹配（`function(string $requestId, ...)`）
+- 响应体较小时可能只产生一个 chunk（reqwest 内部缓冲），属正常行为
+- `$onHeaders` 每个请求仅触发一次（收到响应头时）
+- `$onChunk`/`$onHeaders` 仅 `XHMulti::executeEach()` 和 `XHThreadPool::executeEach()` 支持，协程 `each()` 不支持
 
 ---
 

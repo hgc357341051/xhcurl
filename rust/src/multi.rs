@@ -40,7 +40,7 @@ use crate::response::XhResponse;
 
 /// 流式事件 channel 的默认缓冲区大小
 /// 限制积压事件数量，实现背压控制
-const STREAM_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const STREAM_CHANNEL_CAPACITY: usize = 1024;
 
 /// 结果 channel 的默认缓冲区倍数
 /// 相对于请求数量的倍数，确保不会因缓冲不足而阻塞
