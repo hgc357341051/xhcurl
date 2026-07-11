@@ -23,6 +23,8 @@
   `XHThreadPool::execute`/`execute_each` 的 `.expect("线程池已初始化")` 改为 `?` 传播。
 - **失败路径字段补齐**：`result_to_php_array` 失败分支原仅有 `status/elapsed_ms/body/error`，
   补充 `headers => []`、`body_size => 0`、`url => ""`，确保失败路径字段集与成功路径完全一致。
+- **`setConfig` 接受 null proxy**：`getConfig()` 返回 `proxy => null` 后 `setConfig($orig)` 往返
+  报类型不匹配错误。`setConfig` 现接受 null（视为清除代理），与 `getConfig` 对称。
 
 ### 增强
 - **`getConfig()` 的 `proxy` 始终返回**：原 proxy 为 None 时 `getConfig()` 不含 `proxy` 键，
@@ -41,6 +43,8 @@
   test 改为 `--lib --features php`。
 - **扩展加载验证有效化**：移除 `|| true` 容忍失败，改为断言式验证。
 - **新增 PHP 测试套件执行**：CI 编译扩展后运行 `rust/tests/php_*.php`。
+  新增 `mock_server.php`（PHP 内置服务器）提供 `/get`、`/post`、`/hang` 端点，
+  CI 启动后供网络相关测试使用。
 - macOS PHP 版本注释修正为 8.1~8.5。
 
 ### 测试
