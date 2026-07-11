@@ -6,6 +6,50 @@
 ## [Unreleased]
 
 
+## [1.0.7] - 2026-07-11
+
+本版本聚焦**错误处理健壮性与 CI 质量保障**：消除所有 panic 路径（改返回 PHP 异常或结果数组）、
+统一失败路径字段、CI 启用 `--features php` 全量检查。无破坏性变更。
+
+### 修复
+- **`execute()` 统一返回结果数组**：网络/DNS/TLS 错误原抛 PHP 异常，与 `XHMulti`/fiber 路径不一致。
+  现包装为 `success=false` 结果数组（含 `status: 0`、`error` 字段），用户统一检查 `$r['success']` 即可。
+- **`global_client()`/`global_runtime()` 不再 panic**：初始化失败（如代理无效）原 `expect` 直接
+  panic 杀死 PHP 进程（FPM worker 崩溃重启）。改为返回 `Result`，错误以 PHP 异常形式抛出，
+  用户可 try/catch 并修正配置后重试。
+- **RwLock 中毒恢复**：`curl.rs`（7 处）和 `header.rs`（8 处）的 `.read().unwrap()`/`.write().unwrap()`
+  在锁中毒时 panic。改为 `unwrap_or_else(|e| e.into_inner())`，取中毒锁中的数据继续执行，避免 panic。
+- **fiber.rs `expect` 改为优雅传播**：5 处 `.expect("调度器未初始化")` 改为 `if let Some` + 提前返回错误；
+  `XHThreadPool::execute`/`execute_each` 的 `.expect("线程池已初始化")` 改为 `?` 传播。
+- **失败路径字段补齐**：`result_to_php_array` 失败分支原仅有 `status/elapsed_ms/body/error`，
+  补充 `headers => []`、`body_size => 0`、`url => ""`，确保失败路径字段集与成功路径完全一致。
+
+### 增强
+- **`getConfig()` 的 `proxy` 始终返回**：原 proxy 为 None 时 `getConfig()` 不含 `proxy` 键，
+  用户无法区分"未设置"和"获取失败"。现始终插入（None 时为 `null`），与 `setConfig` 接受 `null` 对称。
+- **新增 `XHRequest::options()` 快捷方法**：与 `get()`/`post()`/`put()`/`delete()` 等一致，
+  补齐 HTTP OPTIONS 方法的链式快捷方法。
+
+### 文档
+- README setConfig 示例补充 `http2_enabled => true`。
+- 新增"错误处理统一"说明：`execute()` 网络错误返回 `success=false` 而非抛异常。
+- 故障排查补充 3 条目：请求超时/连接失败、代理配置无效、响应体超限。
+
+### CI 质量保障
+- **clippy/test 启用 `--features php`**：原 CI 未启用 php feature，`php_ext.rs`/`fiber.rs`
+  约 2400 行代码不参与编译检查。现 clippy 改为 `--all-targets --features php -- -D warnings`，
+  test 改为 `--lib --features php`。
+- **扩展加载验证有效化**：移除 `|| true` 容忍失败，改为断言式验证。
+- **新增 PHP 测试套件执行**：CI 编译扩展后运行 `rust/tests/php_*.php`。
+- macOS PHP 版本注释修正为 8.1~8.5。
+
+### 测试
+- **`test_drop_aborts_tasks` 改为真测试**：原仅验证空 multi 的 Drop 不 panic。改为添加 TEST-NET-1
+  请求 + `spawn_all` + drop，用超时保护 `recv()` 验证 channel 关闭（任务被 abort）。
+- **`test_global_manager_config` 避免触碰全局单例**：改用 `XhCurlManager::new(GlobalConfig::default())`
+  独立实例，避免并行测试间全局状态污染。`XhCurlManager::new` 改为 `pub` 供测试使用。
+
+
 ## [1.0.6] - 2026-07-11
 
 本版本从**使用者视角**全面审查并优化代码与文档，聚焦链式调用体验、API 命名一致性、

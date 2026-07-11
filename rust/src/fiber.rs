@@ -174,8 +174,8 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
 
     // 2. 获取 tokio 运行时 handle，spawn HTTP 任务到工作线程
     //    HTTP 请求完全在 tokio 工作线程上执行，不触碰 PHP API
-    let runtime = crate::php_ext::global_runtime();
-    let client = crate::php_ext::global_client().clone();
+    let runtime = crate::php_ext::global_runtime()?;
+    let client = crate::php_ext::global_client()?.clone();
     let request_clone = request.clone();
     let result_tx = SCHEDULER.with(|s| {
         s.borrow()
@@ -199,11 +199,9 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
 
     // 3. 存入 pending 表
     SCHEDULER.with(|s| {
-        s.borrow_mut()
-            .as_mut()
-            .expect("调度器未初始化")
-            .pending
-            .insert(task_id, current_fiber);
+        if let Some(scheduler) = s.borrow_mut().as_mut() {
+            scheduler.pending.insert(task_id, current_fiber);
+        }
     });
 
     // 4. 调用 Fiber::suspend() 挂起当前 Fiber
@@ -253,8 +251,8 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
     //    使用 Semaphore 限制并发数，防止过多请求同时执行耗尽连接池/内存。
     //    并发上限取「请求数」与全局 fiber_max_concurrency 的较小值
     //    （0 表示不限制；默认 64，可通过 setConfig 调整）
-    let runtime = crate::php_ext::global_runtime();
-    let client = crate::php_ext::global_client().clone();
+    let runtime = crate::php_ext::global_runtime()?;
+    let client = crate::php_ext::global_client()?.clone();
     let cap = crate::curl::XhCurlManager::global()
         .config()
         .fiber_max_concurrency;
@@ -301,13 +299,13 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
             }
         });
 
-        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
+        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对对应多个 task_id）
         SCHEDULER.with(|s| {
-            s.borrow_mut()
-                .as_mut()
-                .expect("调度器未初始化")
-                .pending
-                .insert(task_id, current_fiber.shallow_clone());
+            if let Some(scheduler) = s.borrow_mut().as_mut() {
+                scheduler
+                    .pending
+                    .insert(task_id, current_fiber.shallow_clone());
+            }
         });
     }
 
@@ -366,8 +364,8 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
     //    使用 Semaphore 限制并发数，防止过多请求同时执行耗尽连接池/内存。
     //    并发上限取「请求数」与全局 fiber_max_concurrency 的较小值
     //    （0 表示不限制；默认 64，可通过 setConfig 调整）
-    let runtime = crate::php_ext::global_runtime();
-    let client = crate::php_ext::global_client().clone();
+    let runtime = crate::php_ext::global_runtime()?;
+    let client = crate::php_ext::global_client()?.clone();
     let cap = crate::curl::XhCurlManager::global()
         .config()
         .fiber_max_concurrency;
@@ -414,13 +412,13 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
             }
         });
 
-        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对应多个 task_id）
+        // 为每个 task_id 注册当前 Fiber（同一个 Fiber 对对应多个 task_id）
         SCHEDULER.with(|s| {
-            s.borrow_mut()
-                .as_mut()
-                .expect("调度器未初始化")
-                .pending
-                .insert(task_id, current_fiber.shallow_clone());
+            if let Some(scheduler) = s.borrow_mut().as_mut() {
+                scheduler
+                    .pending
+                    .insert(task_id, current_fiber.shallow_clone());
+            }
         });
     }
 
@@ -526,13 +524,11 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
         // 从 channel 获取完成的任务结果（带超时，避免永久阻塞 PHP 线程）
         // 超时设为 30 秒（而非原 300 秒），缩短无响应时的阻塞时间。
         // 超时后检查 pending 状态：有 pending 则继续等，无 pending 则报错。
-        let result_rx = SCHEDULER.with(|s| {
-            s.borrow()
-                .as_ref()
-                .expect("调度器未初始化")
-                .result_rx
-                .clone()
-        });
+        let result_rx = SCHEDULER.with(|s| s.borrow().as_ref().map(|sc| sc.result_rx.clone()));
+        let result_rx = match result_rx {
+            Some(rx) => rx,
+            None => return Err("调度器未初始化".to_string()),
+        };
 
         match result_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(msg) => {
@@ -540,9 +536,7 @@ fn run_event_loop(main_fiber: &Zval) -> Result<Zval, String> {
                 let pending_fiber = SCHEDULER.with(|s| {
                     s.borrow_mut()
                         .as_mut()
-                        .expect("调度器未初始化")
-                        .pending
-                        .remove(&msg.task_id)
+                        .and_then(|sc| sc.pending.remove(&msg.task_id))
                 });
 
                 if let Some(fiber) = pending_fiber {

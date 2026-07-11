@@ -119,9 +119,12 @@ pub struct XhCurlManager {
 impl XhCurlManager {
     /// 创建新的管理器实例
     ///
+    /// 用于不希望影响全局单例的场景（如单元测试）。
+    /// 生产代码通常使用 [`XhCurlManager::global()`] 获取共享单例。
+    ///
     /// # 参数
     /// - `config`: 初始配置
-    fn new(config: GlobalConfig) -> Self {
+    pub fn new(config: GlobalConfig) -> Self {
         Self {
             config: RwLock::new(config),
             initialized: RwLock::new(false),
@@ -151,7 +154,7 @@ impl XhCurlManager {
     /// # 返回
     /// 当前配置的克隆（避免长时间持有锁）
     pub fn config(&self) -> GlobalConfig {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
         config.clone()
     }
 
@@ -160,7 +163,7 @@ impl XhCurlManager {
     /// # 参数
     /// - `new_config`: 新的配置
     pub fn set_config(&self, new_config: GlobalConfig) {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
         *config = new_config;
     }
 
@@ -182,14 +185,14 @@ impl XhCurlManager {
     where
         F: FnOnce(&mut GlobalConfig),
     {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
         f(&mut config);
     }
 
     /// 初始化管理器
     /// 在 PHP 扩展的 MINIT 阶段调用
     pub fn initialize(&self) -> XhCurlResult<()> {
-        let mut initialized = self.initialized.write().unwrap();
+        let mut initialized = self.initialized.write().unwrap_or_else(|e| e.into_inner());
         if *initialized {
             // 已经初始化，直接返回成功
             return Ok(());
@@ -205,7 +208,7 @@ impl XhCurlManager {
     /// 清理管理器
     /// 在 PHP 扩展的 MSHUTDOWN 阶段调用
     pub fn shutdown(&self) {
-        let mut initialized = self.initialized.write().unwrap();
+        let mut initialized = self.initialized.write().unwrap_or_else(|e| e.into_inner());
         *initialized = false;
     }
 
@@ -282,8 +285,8 @@ impl XhCurlManager {
 
 impl std::fmt::Debug for XhCurlManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let config = self.config.read().unwrap();
-        let initialized = self.initialized.read().unwrap();
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+        let initialized = self.initialized.read().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("XhCurlManager")
             .field("config", &*config)
             .field("initialized", &*initialized)

@@ -9,7 +9,7 @@
 # 包名称
 name = "xhcurl"
 # 版本号（与 PHP 扩展版本保持一致）
-version = "1.0.6"
+version = "1.0.7"
 # 作者信息
 authors = ["XHCurl Team"]
 # 许可证

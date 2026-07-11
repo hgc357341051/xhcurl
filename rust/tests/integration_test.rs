@@ -31,9 +31,13 @@ fn test_request_build_flow() {
 }
 
 /// 测试全局管理器配置
+///
+/// 使用独立实例（XhCurlManager::new）而非全局单例（global()），
+/// 避免修改全局状态影响其他测试（单例的 OnceLock 在进程生命周期内不可重置，
+/// 并行测试间会相互污染）。
 #[test]
 fn test_global_manager_config() {
-    let manager = XhCurlManager::global();
+    let manager = XhCurlManager::new(GlobalConfig::default());
 
     // 修改配置
     manager.modify_config(|c| {
@@ -52,8 +56,7 @@ fn test_global_manager_config() {
     assert!(!config.follow_redirects);
     assert!(!config.verify_ssl);
 
-    // 恢复默认配置
-    manager.set_config(GlobalConfig::default());
+    // 独立实例随作用域结束自动 drop，无需手动恢复默认配置。
 }
 
 /// 测试头部管理

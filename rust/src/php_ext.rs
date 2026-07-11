@@ -57,21 +57,24 @@ pub(crate) fn sapi_is_cli() -> bool {
 /// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
 ///
 /// # 代理配置失败处理
-/// 若全局代理地址无效（`create_client` 返回错误），直接 panic。
+/// 若全局代理地址无效（`create_client` 返回错误），返回 `Err`，由调用方传播为 PHP 异常。
 /// 理由：
 /// 1. 代理通常是安全/隐私相关配置，静默降级到无代理会让用户误以为
 ///    请求走了代理，实际暴露真实 IP，这比直接报错更危险。
-/// 2. OnceLock 只初始化一次，降级后整个进程生命周期内不会重试，
-///    用户无法发现配置问题。
+/// 2. panic 会杀死 PHP 进程（FPM worker 崩溃重启），改为返回错误让用户可 try/catch。
 /// 3. 与 `create_client_builder` 的设计一致：代理无效必须明确报错。
-/// 4. panic 只在首次调用 `global_client()` 时发生，用户修正配置后即可恢复。
-pub(crate) fn global_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        XhCurlManager::global()
-            .create_client()
-            .expect("全局 reqwest 客户端初始化失败（请检查 proxy/SSL 等全局配置）")
-    })
+/// 4. 错误以 PHP 异常形式抛出，用户修正配置后可重试。
+pub(crate) fn global_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    let result = CLIENT.get_or_init(|| {
+        XhCurlManager::global().create_client().map_err(|e| {
+            format!(
+                "全局 reqwest 客户端初始化失败：{}（请检查 proxy/SSL 等全局配置）",
+                e
+            )
+        })
+    });
+    result.as_ref().map_err(|e| e.clone())
 }
 
 /// 获取全局共享的 tokio 运行时。
@@ -82,9 +85,9 @@ pub(crate) fn global_client() -> &'static reqwest::Client {
 ///
 /// 全局复用避免每次 execute() 都创建/销毁运行时（线程创建、IO 驱动注册开销大）。
 /// FPM 下每个 worker 进程持有独立的运行时（进程级单例），请求间复用。
-pub(crate) fn global_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
+pub(crate) fn global_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    let result = RUNTIME.get_or_init(|| {
         let mut builder = if sapi_is_cli() {
             tokio::runtime::Builder::new_multi_thread()
         } else {
@@ -94,8 +97,9 @@ pub(crate) fn global_runtime() -> &'static tokio::runtime::Runtime {
             .enable_all()
             .thread_name("xhcurl-worker")
             .build()
-            .expect("初始化全局 tokio 运行时失败")
-    })
+            .map_err(|e| format!("初始化全局 tokio 运行时失败：{}", e))
+    });
+    result.as_ref().map_err(|e| e.clone())
 }
 
 // +----------------------------------------------------------------------+
@@ -509,7 +513,9 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::options(): $self_
-    pub fn options(self_: &mut ZendClassObject<PhpXhRequest>) -> &mut ZendClassObject<PhpXhRequest> {
+    pub fn options(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
         self_.request = self_.request.clone().options();
         self_
     }
@@ -983,7 +989,7 @@ impl PhpXhRequest {
     ///     echo $resp['elapsed_ms'];  // 耗时
     /// }
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
-        let client = global_client().clone();
+        let client = global_client()?.clone();
         let request = self.request.clone();
         let max_response_size = XhCurlManager::global().config().max_response_size;
 
@@ -995,20 +1001,35 @@ impl PhpXhRequest {
         let user_data = request.get_user_data().map(|s| s.to_string());
 
         let id_for_task = id.clone();
-        let result = global_runtime()
-            .block_on(async move {
-                XhMulti::execute_single(client, request, id_for_task, None, max_response_size).await
-            })
-            .map_err(|e| e.to_string())?;
+        // 统一错误处理：网络/DNS/TLS 错误包装为 success=false 结果数组，
+        // 不抛异常（与 XHMulti/fiber 路径一致）
+        let result_array = global_runtime()?.block_on(async move {
+            match XhMulti::execute_single(client, request, id_for_task, None, max_response_size)
+                .await
+            {
+                Ok(resp) => {
+                    // 成功：构造完整结果数组
+                    let mut ht = response_to_php_array(&resp);
+                    let _ = ht.insert("id", id);
+                    if let Some(ud) = user_data {
+                        let _ = ht.insert("user_data", ud);
+                    }
+                    ht
+                }
+                Err(e) => {
+                    // 失败：构造 success=false 结果数组（与 result_to_php_array 失败路径一致）
+                    let result = crate::multi::RequestResult::error(
+                        id,
+                        user_data,
+                        e.to_string(),
+                        std::time::Duration::from_secs(0),
+                    );
+                    crate::php_ext::result_to_php_array(&result)
+                }
+            }
+        });
 
-        // response_to_php_array 仅填充响应字段（status/body/headers/...），
-        // 需补充 id 和 user_data 以与其他 API（await/gather/multi/threadpool）返回字段一致。
-        let mut ht = response_to_php_array(&result);
-        let _ = ht.insert("id", id);
-        if let Some(ud) = user_data {
-            let _ = ht.insert("user_data", ud);
-        }
-        Ok(ht)
+        Ok(result_array)
     }
 }
 
@@ -1131,7 +1152,7 @@ impl PhpXhMulti {
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
         // 复用全局运行时与客户端（避免每次创建/销毁的开销）
         // 运行时类型由 SAPI 决定：CLI 多线程并行，FPM 单线程并发
-        let client = global_client().clone();
+        let client = global_client()?.clone();
         let max_concurrency = self.max_concurrency;
         let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
@@ -1142,7 +1163,7 @@ impl PhpXhMulti {
             XhCurlManager::global().config().max_response_size
         };
 
-        let results = global_runtime()
+        let results = global_runtime()?
             .block_on(async move {
                 let mut multi = XhMulti::new(client);
                 if max_concurrency > 0 {
@@ -1186,7 +1207,7 @@ impl PhpXhMulti {
             ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
 
         // 复用 execute 的全局运行时与客户端配置
-        let client = global_client().clone();
+        let client = global_client()?.clone();
         let max_concurrency = self.max_concurrency;
         let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
@@ -1200,7 +1221,7 @@ impl PhpXhMulti {
         // 复用 execute 的「XhMulti 创建 + 配置 + spawn_all」模式，
         // 仅收集循环不同：recv 一个 result → result_to_php_array → 调回调 → 不累积
         // spawn 逻辑统一委托给 XhMulti::spawn_all，消除重复代码
-        global_runtime().block_on(async move {
+        global_runtime()?.block_on(async move {
             let mut multi = XhMulti::new(client);
             if max_concurrency > 0 {
                 multi = multi.max_concurrency(max_concurrency);
@@ -1357,23 +1378,27 @@ impl PhpXhThreadPool {
         // 取出现有线程池以便复用（同对象多次 execute 复用工作线程）
         let mut pool = self.pool.take();
 
+        // 预取全局客户端（首次创建线程池时需要 clone，复用时不需要）
+        let client = global_client()?.clone();
+
         // 复用全局运行时与客户端；通过 take/存回 模式避免借用 self
-        let (returned_pool, result) = global_runtime().block_on(async move {
+        let (returned_pool, result) = global_runtime()?.block_on(async move {
             // 首次调用时创建线程池，后续复用
             if pool.is_none() {
-                let client = global_client().clone();
                 let mut config = ThreadPoolConfig::default();
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
                 }
                 pool = Some(XhThreadPool::new(config, client));
             }
-            let p = pool.as_mut().expect("线程池已初始化");
+            let p = pool
+                .as_mut()
+                .ok_or_else(|| "内部错误：线程池未初始化".to_string())?;
             let res = p.execute_all(requests).await;
-            (pool, res)
-        });
+            Ok::<_, String>((pool, res))
+        })?;
 
-        // 存回线程池以便下次 execute 复用
+        // block_on 已 ? 解包 String 错误，此处 returned_pool 是 Option<XhThreadPool>
         self.pool = returned_pool;
         let results = result.map_err(|e| e.to_string())?;
 
@@ -1415,20 +1440,25 @@ impl PhpXhThreadPool {
         // 取出现有线程池以便复用（同对象多次调用复用工作线程）
         let mut pool = self.pool.take();
 
+        // 预取全局客户端（首次创建线程池时需要 clone）
+        let client = global_client()?.clone();
+
         // 复用 execute 的「ThreadPool 创建 + submit」模式，
         // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
         // 通过 take/存回 模式避免借用 self；回调异常时仍需存回 pool，故用显式错误捕获
-        let (returned_pool, count) = global_runtime().block_on(async move {
+        let (returned_pool, count) = global_runtime()?.block_on(async move {
             // 首次调用时创建线程池，后续复用
             if pool.is_none() {
-                let client = global_client().clone();
                 let mut config = ThreadPoolConfig::default();
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
                 }
                 pool = Some(XhThreadPool::new(config, client));
             }
-            let p = pool.as_mut().expect("线程池已初始化");
+            let p = match pool.as_mut() {
+                Some(p) => p,
+                None => return (pool, Err("内部错误：线程池未初始化".to_string())),
+            };
 
             // 启动线程池（若未启动）
             if !p.is_running() {
@@ -1576,12 +1606,15 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         // 有响应时，elapsed_ms/error 由 fill_response_fields 统一写入，避免双重插入
         fill_response_fields(&mut response_ht, resp);
     } else {
-        // 无响应（请求失败）时，补充 status/elapsed_ms/error/body，确保失败路径字段完整
-        // status 为 0（哨兵值，表示无 HTTP 响应），body 插入空字符串，
-        // 与 fill_response_fields 的成功路径保持字段集一致
+        // 无响应（请求失败）时，补充 status/body/headers/body_size/url 等，
+        // 确保失败路径字段集与成功路径（fill_response_fields）完全一致
+        // status 为 0（哨兵值，表示无 HTTP 响应），body 插入空字符串
         let _ = response_ht.insert("status", 0_i64);
         let _ = response_ht.insert("elapsed_ms", result.elapsed.as_millis() as i64);
         let _ = response_ht.insert("body", String::new());
+        let _ = response_ht.insert("body_size", 0_i64);
+        let _ = response_ht.insert("headers", ZendHashTable::new());
+        let _ = response_ht.insert("url", String::new());
         if let Some(err) = &result.error {
             let _ = response_ht.insert("error", err.clone());
         }

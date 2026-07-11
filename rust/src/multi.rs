@@ -858,15 +858,33 @@ mod tests {
 
     /// Drop 实现应安全：对非空 tasks drop 不 panic，
     /// 且 abort_tasks 已 drain 后再 drop（double-drain）也不 panic。
-    /// spawn_all 后立即 drop 模拟 panic/早期返回场景。
+    /// spawn_all 后立即 drop 模拟 panic/早期返回场景，并验证任务确实被 abort：
+    /// abort 后任务 future 被丢弃 → result_tx clone 被丢弃 → channel 关闭，
+    /// recv() 应返回 None 而非一直挂起等待结果。
     #[tokio::test]
     async fn test_drop_aborts_tasks() {
+        // 使用 TEST-NET-1（192.0.2.0/24，RFC 5737 保留地址），
+        // 该地址不可路由，TCP 连接会一直挂起直到被 abort。
         let client = reqwest::Client::new();
-        let multi = XhMulti::new(client);
-        // 添加一个会长时间运行的请求（用本地不会响应的端口）
-        // spawn_all 后立即 drop，验证不 panic
-        // 注意：此测试主要验证 Drop 不 panic，真正的 abort 行为难在单测中验证
+        let mut multi = XhMulti::new(client);
+        multi
+            .add(XhRequest::new("http://192.0.2.1:80"))
+            .expect("添加请求应成功");
+
+        // spawn_all 启动异步任务（阻塞在 TCP 连接）
+        let (mut result_rx, expected) = multi.spawn_all().await;
+        assert_eq!(expected, 1, "应已 spawn 1 个任务");
+
+        // drop 触发 Drop::abort_tasks，中止未完成的任务。
         drop(multi);
-        // 若 Drop 实现错误（如 double-drain），此处会 panic
+
+        // abort 后 channel 应关闭：recv() 返回 None 表示所有发送端已随任务丢弃。
+        // 加超时保护：若 abort 未生效，任务仍持有发送端，recv 会一直挂起。
+        let received = tokio::time::timeout(Duration::from_secs(3), result_rx.recv()).await;
+        assert!(
+            matches!(received, Ok(None)),
+            "drop 后任务应被 abort，channel 应关闭（recv 返回 None），实际: {:?}",
+            received
+        );
     }
 }

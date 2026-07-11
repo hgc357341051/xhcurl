@@ -45,7 +45,7 @@ impl HeaderManager {
     pub fn set(&self, name: &str, value: &str) {
         // 获取写锁（独占访问）
         // unwrap 安全：只有当 RwLock 被 poison（持有者 panic）时才会失败
-        let mut headers = self.headers.write().unwrap();
+        let mut headers = self.headers.write().unwrap_or_else(|e| e.into_inner());
 
         // 将键转为小写（HTTP/2 要求头部名称小写）
         // 值保持原样
@@ -61,7 +61,7 @@ impl HeaderManager {
         I: IntoIterator<Item = (S, S)>,
         S: AsRef<str>,
     {
-        let mut headers = self.headers.write().unwrap();
+        let mut headers = self.headers.write().unwrap_or_else(|e| e.into_inner());
         for (name, value) in pairs {
             headers.insert(name.as_ref().to_lowercase(), value.as_ref().to_string());
         }
@@ -91,7 +91,7 @@ impl HeaderManager {
     /// - `true`: 头部存在
     /// - `false`: 头部不存在
     pub fn has(&self, name: &str) -> bool {
-        let headers = self.headers.read().unwrap();
+        let headers = self.headers.read().unwrap_or_else(|e| e.into_inner());
         headers.contains_key(&name.to_lowercase())
     }
 
@@ -104,7 +104,7 @@ impl HeaderManager {
     /// - `Some(value)`: 被移除的头部值
     /// - `None`: 头部不存在
     pub fn remove(&self, name: &str) -> Option<String> {
-        let mut headers = self.headers.write().unwrap();
+        let mut headers = self.headers.write().unwrap_or_else(|e| e.into_inner());
         headers.remove(&name.to_lowercase())
     }
 
@@ -113,19 +113,19 @@ impl HeaderManager {
     /// # 返回
     /// 包含所有头部的 HashMap
     pub fn all(&self) -> HashMap<String, String> {
-        let headers = self.headers.read().unwrap();
+        let headers = self.headers.read().unwrap_or_else(|e| e.into_inner());
         headers.clone()
     }
 
     /// 清空所有头部
     pub fn clear(&self) {
-        let mut headers = self.headers.write().unwrap();
+        let mut headers = self.headers.write().unwrap_or_else(|e| e.into_inner());
         headers.clear();
     }
 
     /// 获取头部数量
     pub fn len(&self) -> usize {
-        let headers = self.headers.read().unwrap();
+        let headers = self.headers.read().unwrap_or_else(|e| e.into_inner());
         headers.len()
     }
 
@@ -144,7 +144,7 @@ impl HeaderManager {
     /// 注意：非法头部（如鉴权头、Content-Type 含非法字符）会立即报错，
     /// 而非静默丢弃，避免用户设置的头部意外丢失。
     pub fn to_header_map(&self) -> XhCurlResult<reqwest::header::HeaderMap> {
-        let headers = self.headers.read().unwrap();
+        let headers = self.headers.read().unwrap_or_else(|e| e.into_inner());
         let mut map = reqwest::header::HeaderMap::new();
 
         for (name, value) in headers.iter() {
