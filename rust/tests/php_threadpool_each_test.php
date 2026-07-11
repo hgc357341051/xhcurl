@@ -62,12 +62,17 @@ check("threadpool executeEach 所有请求成功", $allSuccess);
 
 echo "\n=== 空请求列表 ===\n";
 
-// 2. 空请求列表返回 0
+// 2. 空请求列表抛异常（与 execute() 一致，第六轮 spec P2-3）
 $emptyPool = new XHThreadPool(2);
-$emptyCount = $emptyPool->executeEach(function($result) {
-    // 不应执行
-});
-check("threadpool executeEach 空列表返回 0", $emptyCount === 0);
+$emptyEachThrew = false;
+try {
+    $emptyPool->executeEach(function($result) {
+        // 不应执行
+    });
+} catch (\Throwable $e) {
+    $emptyEachThrew = strpos($e->getMessage(), '没有待执行请求') !== false;
+}
+check("threadpool executeEach 空列表抛异常", $emptyEachThrew);
 
 echo "\n=== 单个请求 ===\n";
 

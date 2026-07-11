@@ -73,6 +73,10 @@ thiserror = "1"
 # 透传自 reqwest → url 的传递依赖，显式声明以便直接使用
 form_urlencoded = "1"
 
+# libc（用于 xhrun 超时时 killpg 杀整个进程组，仅 Unix 平台实际调用）
+# Windows 平台通过 cfg(unix) 守卫不调用相关函数
+libc = "0.2"
+
 [dev-dependencies]
 # 测试框架
 tokio-test = "0.4"

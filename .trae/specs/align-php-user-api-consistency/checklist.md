@@ -1,0 +1,20 @@
+- [x] P1-1: `cookies()` 数组整数键改为抛异常（与 `headers()` 一致）
+- [x] P1-2: `maxConcurrency(0)` 文档对齐实现（"使用默认 CPU 核心数"，非"无限制"）
+- [x] P1-3: `XHThreadPool::__construct` 负值改为抛异常（与 `maxConcurrency` setter 一致）
+- [x] P1-4: 补全 6 个 getter：`getBasicAuth`/`getBearerToken`/`getFollowRedirects`/`getMaxRedirects`/`getEncoding`/`getRange`
+- [x] P1-5: `xhrun` 失败路径补 `error_type` 字段（timeout/output_too_large/exit_error）
+- [x] P2-1: `bearerToken('')` 空值校验（与 `basicAuth` 一致）
+- [x] P2-2: `xhrun` 超时 kill 进程组（Unix 平台，防 shell 模式孙进程泄漏）
+- [x] P2-3: `executeEach` 空请求列表与 `execute` 行为对齐（抛异常，非返回 Ok(0)）
+- [x] P2-4: `classify_error_type` 优先级顺序注释 + 单元测试覆盖组合场景
+- [x] P2-5: `format_request_error_message` 错误分类完善（不再仅特判 timeout）
+- [x] P2-6: README `error_type` 措辞修正（删除"或为空字符串"）
+- [x] P2-7: README "HTTP 0xx" 说法修正（删除该误导性注释）
+- [x] 新测试文件 `rust/tests/php_align_php_user_api_test.php` 覆盖所有新增行为
+- [x] 现有测试文件中受 BREAKING 影响的用例已更新断言
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-targets --features php -- -D warnings` 通过
+- [x] `cargo test --lib --features php` 通过（99 个单元测试通过）
+- [x] 扩展编译成功（`cargo build --release --features php`）
+- [x] 全部 PHP 测试文件串行运行全通过（15 个文件 / 396 用例 / 0 失败）
+- [x] 合理性评估报告输出（每项 P1/P2 修复前/修复后/PHP 用户受益 + 破坏性变更清单与迁移建议）

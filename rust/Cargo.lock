@@ -2303,6 +2303,7 @@ dependencies = [
  "crossbeam-channel",
  "ext-php-rs",
  "form_urlencoded",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

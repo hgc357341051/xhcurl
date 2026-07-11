@@ -482,6 +482,60 @@ impl PhpXhRequest {
         }
     }
 
+    /// 获取 HTTP 基本认证凭据
+    /// 返回 "user:pass" 格式字符串或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getBasicAuth(): ?string
+    pub fn get_basic_auth(&self) -> Option<String> {
+        self.request.get_auth().map(|s| s.to_string())
+    }
+
+    /// 获取 Bearer Token
+    /// 返回 token 字符串或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getBearerToken(): ?string
+    pub fn get_bearer_token(&self) -> Option<String> {
+        self.request.get_bearer_token().map(|s| s.to_string())
+    }
+
+    /// 获取是否跟随重定向
+    /// 返回 bool 或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getFollowRedirects(): ?bool
+    pub fn get_follow_redirects(&self) -> Option<bool> {
+        self.request.get_follow_redirects()
+    }
+
+    /// 获取最大重定向次数
+    /// 返回 int 或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getMaxRedirects(): ?int
+    pub fn get_max_redirects(&self) -> Option<i64> {
+        self.request.get_max_redirects().map(|v| v as i64)
+    }
+
+    /// 获取 Accept-Encoding
+    /// 返回 "gzip, deflate" 等字符串或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getEncoding(): ?string
+    pub fn get_encoding(&self) -> Option<String> {
+        self.request.get_encoding().map(|s| s.to_string())
+    }
+
+    /// 获取 Range 请求范围
+    /// 返回 "0-1023" 等格式字符串或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getRange(): ?string
+    pub fn get_range(&self) -> Option<String> {
+        self.request.get_range().map(|s| s.to_string())
+    }
+
     /// 设置 HTTP 方法
     ///
     /// # PHP 签名
@@ -915,14 +969,20 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_XOAUTH2_BEARER。
     /// 自动设置 Authorization: Bearer {token}
     ///
+    /// 空字符串抛异常（与 `basicAuth` 空值校验一致）——空 token 必然导致 401，
+    /// 提前抛异常更友好。
+    ///
     /// # PHP 签名
     /// public XHRequest::bearerToken(string $token): $self_
     pub fn bearer_token(
         self_: &mut ZendClassObject<PhpXhRequest>,
         token: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if token.is_empty() {
+            return Err("bearerToken 不能为空字符串".to_string());
+        }
         self_.request = self_.request.clone().bearer_token(token);
-        self_
+        Ok(self_)
     }
 
     /// 设置 Cookie
@@ -932,7 +992,8 @@ impl PhpXhRequest {
     /// - 字符串："name1=value1; name2=value2"（向后兼容）
     /// - 数组：['name1' => 'value1', 'name2' => 'value2'] → 自动拼接为上述格式
     ///
-    /// 数组形式会跳过整数键（仅处理字符串键的 name=value 对）。
+    /// 数组形式遇到整数键（列表数组）抛异常，与 `headers()` 行为一致
+    /// （cookie 需 name=value，整数键无意义；传错形式时显式报错而非静默丢项）。
     ///
     /// # PHP 签名
     /// public XHRequest::cookies(string|array $cookies): $self_
@@ -946,9 +1007,12 @@ impl PhpXhRequest {
             // 数组/对象/资源抛异常（避免 cookie 项静默丢失）。
             let mut parts: Vec<String> = Vec::new();
             for_each_kv(arr, |key, val| {
-                // 跳过整数键（cookie 需 name=value，整数键无意义）
+                // 整数键（列表数组）不支持，与 headers() 行为一致：抛异常
                 if key.is_long() {
-                    return Ok(());
+                    return Err(
+                        "cookies() 不支持列表数组（整数键），请使用关联数组 ['name' => 'value'] 形式"
+                            .to_string(),
+                    );
                 }
                 let k = key.to_string();
                 // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
@@ -1527,7 +1591,7 @@ impl PhpXhMulti {
     ///
     /// 当 $onChunk 或 $onHeaders 非 null 时，内部启用流式回调。
     /// 不传这两个参数时行为与之前完全一致（向后兼容）。
-    /// 返回值：处理的结果总数（等于请求数；空请求列表返回 0）
+    /// 返回值：处理的结果总数（等于请求数）
     #[php(name = "executeEach")]
     pub fn execute_each(
         &mut self,
@@ -1535,9 +1599,9 @@ impl PhpXhMulti {
         on_chunk: Option<&Zval>,
         on_headers: Option<&Zval>,
     ) -> Result<i64, String> {
-        // 空请求列表：不 spawn，提前返回
+        // 空请求列表：与 execute() 行为对齐，抛异常（不再返回 Ok(0)）
         if self.requests.is_empty() {
-            return Ok(0);
+            return Err("XHMulti 没有待执行请求，请先调用 add() 添加请求".to_string());
         }
 
         // 提前校验回调，避免 spawn 后才发现回调无效
@@ -1852,22 +1916,30 @@ impl PhpXhThreadPool {
     /// # PHP 签名
     /// public XHThreadPool::__construct(int $workers = 0)
     ///
-    /// 负值跳过（使用默认值 0），与 `setConfig` 的"负值跳过"行为一致。
-    pub fn __construct(workers: Option<i64>) -> Self {
-        Self {
+    /// `workers` 为 0 或不传时使用默认值（CPU 核心数，由
+    /// `ThreadPoolConfig::default().worker_count` 提供）。
+    /// 负值抛异常（与 `maxConcurrency` setter 一致），错误信息提示
+    /// "workers 不能为负值，0 = 使用默认（CPU 核心数）"。
+    pub fn __construct(workers: Option<i64>) -> Result<Self, String> {
+        let max_concurrency = match workers {
+            Some(n) if n < 0 => {
+                return Err(
+                    "XHThreadPool workers 不能为负值，0 = 使用默认（CPU 核心数）".to_string(),
+                );
+            }
+            Some(n) => n as usize,
+            None => 0,
+        };
+        Ok(Self {
             pool: None,
             requests: Vec::new(),
-            // 负值或 None：使用默认值 0（避免 i64→usize 转换产生巨大数值）
-            max_concurrency: match workers {
-                Some(n) if n >= 0 => n as usize,
-                _ => 0,
-            },
+            max_concurrency,
             max_response_size: 0,
             timeout: 0,
             // pool 尚未创建，配置指纹初始化为 0
             pool_max_concurrency: 0,
             pool_max_response_size: 0,
-        }
+        })
     }
 
     /// 添加请求到线程池
@@ -1907,14 +1979,15 @@ impl PhpXhThreadPool {
     /// # PHP 签名
     /// public XHThreadPool::maxConcurrency(int $max): $this
     ///
-    /// 负值抛出异常（不静默跳过）；0 = 无限制。
+    /// 负值抛出异常（不静默跳过）；0 = 使用默认（CPU 核心数，
+    /// 由 `ThreadPoolConfig::default().worker_count` 提供，**非"无限制"**）。
     pub fn max_concurrency(
         self_: &mut ZendClassObject<PhpXhThreadPool>,
         max: i64,
     ) -> Result<&mut ZendClassObject<PhpXhThreadPool>, String> {
         // 负值抛异常，避免 i64→usize 转换产生巨大数值
         if max < 0 {
-            return Err("maxConcurrency 不能为负值，0 = 无限制".to_string());
+            return Err("maxConcurrency 不能为负值，0 = 使用默认（CPU 核心数）".to_string());
         }
         self_.max_concurrency = max as usize;
         Ok(self_)
@@ -2098,7 +2171,7 @@ impl PhpXhThreadPool {
     ///
     /// 当 $onChunk 或 $onHeaders 非 null 时，内部启用流式回调。
     /// 不传这两个参数时行为与之前完全一致（向后兼容）。
-    /// 返回值：处理的结果总数（等于成功提交的请求数；空请求列表返回 0）
+    /// 返回值：处理的结果总数（等于成功提交的请求数；空请求列表抛异常，与 execute() 一致）
     #[php(name = "executeEach")]
     pub fn execute_each(
         &mut self,
@@ -2112,11 +2185,13 @@ impl PhpXhThreadPool {
             return Err("XHThreadPool 仅在 CLI 模式下可用".to_string());
         }
 
-        let requests = std::mem::take(&mut self.requests);
-        // 空请求列表：不启动线程池，提前返回
-        if requests.is_empty() {
-            return Ok(0);
+        // 空请求列表：与 execute() 行为对齐，抛异常（不再返回 Ok(0)）
+        // 必须在 std::mem::take 之前检查，避免 take 后抛异常导致 requests 丢失
+        if self.requests.is_empty() {
+            return Err("XHThreadPool 没有待执行请求，请先调用 add() 添加请求".to_string());
         }
+
+        let requests = std::mem::take(&mut self.requests);
 
         // 提前校验回调，避免 spawn 后才发现回调无效
         let callback_callable =
@@ -2474,13 +2549,28 @@ where
 ///
 /// 此函数检测 reqwest 的 `is_timeout()`，对超时错误补充 "timed out" 关键词，
 /// 使 `classify_error_type` 能正确归类为 "timeout"。
+///
+/// P2-5: 除超时外，其他错误类型也通过 `classify_error_type` 分类后补充可识别前缀
+/// （DNS / SSL / 连接），使错误消息与 `error_type` 字段语义对齐，便于 PHP 端排查。
+/// 原始消息保留在括号内，确保 `strpos` 等子串断言仍可通过。`unknown` 与非
+/// `Request` 错误保持原消息不变（如参数校验错误 `InvalidArgument`）。
 fn format_request_error_message(e: &crate::error::XhCurlError) -> String {
+    // 超时：reqwest 的 is_timeout() 基于错误类型而非字符串匹配，最可靠。
+    // 保留此特判以确保消息含 "timed out" 关键词（classify_error_type 依赖此关键词）。
     if let crate::error::XhCurlError::Request(r) = e {
         if r.is_timeout() {
             return "网络请求失败: 请求超时 (timed out)".to_string();
         }
     }
-    e.to_string()
+    // 其他错误：分类后补充前缀，原始消息保留在括号内
+    let msg = e.to_string();
+    match classify_error_type(&msg) {
+        "dns" => format!("网络请求失败: DNS 解析失败 ({})", msg),
+        "ssl" => format!("网络请求失败: SSL/TLS 错误 ({})", msg),
+        "connection" => format!("网络请求失败: 连接错误 ({})", msg),
+        // timeout 已在上方 is_timeout() 特判处理；unknown 保持原消息不变
+        _ => msg,
+    }
 }
 
 /// 根据错误消息分类错误类型。
@@ -2488,12 +2578,18 @@ fn format_request_error_message(e: &crate::error::XhCurlError) -> String {
 /// 用于在失败结果中标注 `error_type` 字段，便于 PHP 端按错误类型做差异化处理
 /// （如超时重试、DNS 故障告警、SSL 证书问题提示等）。
 ///
-/// 分类依据错误消息中的关键字（不区分大小写）：
-/// - `dns` / `resolve` / `name resolution` → "dns"
-/// - `timeout` / `timed out` / `elapsed` → "timeout"
-/// - `ssl` / `tls` / `certificate` / `cert` → "ssl"
-/// - `connect` / `connection` / `refused` / `reset` → "connection"
-/// - 其余 → "unknown"
+/// 分类依据错误消息中的关键字（不区分大小写），按以下**优先级从高到低**匹配
+/// （先匹配先返回，顺序敏感）：
+/// 1. `dns` / `resolve` / `name resolution` → "dns"
+/// 2. `timeout` / `timed out` / `elapsed` → "timeout"
+/// 3. `ssl` / `tls` / `certificate` / `cert` → "ssl"
+/// 4. `connect` / `connection` / `refused` / `reset` / `sending request` / `error sending` → "connection"
+/// 5. 其余 → "unknown"
+///
+/// # 顺序敏感性
+/// 匹配按上述顺序短路返回。例如 "dns lookup timeout" 同时含 dns 与 timeout 关键词，
+/// 因 dns 优先级更高而归类为 "dns"（而非 "timeout"）。新增错误类型时需谨慎放置
+/// 顺序：更具体的类别应排在更宽泛的类别之前，避免被宽泛关键词提前命中。
 fn classify_error_type(error: &str) -> &'static str {
     let lower = error.to_lowercase();
     if lower.contains("dns") || lower.contains("resolve") || lower.contains("name resolution") {
@@ -3157,6 +3253,15 @@ pub fn xhrun(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
+    // P2-2: Unix 平台让子进程成为新进程组 leader（process_group(0) 等价 setpgid(0,0)），
+    // 以便超时时通过 killpg(pgid, SIGKILL) 杀整个进程组（含 shell 派生的孙进程，
+    // 如 `sleep 60 & sleep 120` 的后台 sleep）。Windows 平台无进程组概念，保持原行为。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     // ===== 5. 启动进程 =====
     let start = Instant::now();
     let mut child = match cmd.spawn() {
@@ -3224,6 +3329,16 @@ pub fn xhrun(
                             }
                             _ => {
                                 // 子进程仍在运行，强制终止并回收
+                                // P2-2: Unix 平台杀整个进程组（pid 即 pgid，因 spawn 前
+                                // process_group(0) 使子进程成为新进程组 leader），含 shell
+                                // 派生的孙进程（如 `sleep 60 & sleep 120` 的后台 sleep）；
+                                // Windows 无进程组概念，退回 child.kill() 仅杀直接子进程。
+                                #[cfg(unix)]
+                                {
+                                    unsafe {
+                                        libc::killpg(pid as i32, libc::SIGKILL);
+                                    }
+                                }
                                 let _ = child.kill();
                                 let _ = child.wait();
                                 timed_out = true;
@@ -3238,6 +3353,12 @@ pub fn xhrun(
             }
             Err(_) => {
                 // try_wait 出错（如 EINTR）：确保子进程被终止和回收，避免僵尸进程
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::killpg(pid as i32, libc::SIGKILL);
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 exit_code = -1;
@@ -3314,13 +3435,20 @@ pub fn xhrun(
     if timed_out {
         let _ = result.insert("error", format!("命令执行超时（{} 秒）", timeout_secs));
         let _ = result.insert("command", command);
+        // P1-5: 失败路径补 error_type 枚举（与 execute()/XHMulti/XHThreadPool 对齐）
+        let _ = result.insert("error_type", "timeout");
     } else if truncated {
         let _ = result.insert(
             "error",
             format!("输出超过最大限制 {} 字节，已截断", max_output),
         );
         let _ = result.insert("command", command);
+        let _ = result.insert("error_type", "output_too_large");
+    } else if exit_code != 0 {
+        // 退出码非 0（非超时/截断）→ exit_error
+        let _ = result.insert("error_type", "exit_error");
     }
+    // 成功路径不插入 error_type（与 execute() 一致）
 
     Ok(result)
 }
@@ -3432,7 +3560,7 @@ fn spawn_output_reader<R: std::io::Read + Send + 'static>(
 
 #[cfg(all(test, feature = "php"))]
 mod tests {
-    use super::{shell_quote_unix, shell_quote_windows};
+    use super::{classify_error_type, shell_quote_unix, shell_quote_windows};
 
     #[test]
     fn test_shell_quote_unix_simple() {
@@ -3469,6 +3597,49 @@ mod tests {
         // & 和 | 应被 ^ 前缀抑制
         assert!(q.contains("^&"));
         assert!(q.contains("^|"));
+    }
+
+    // ===== classify_error_type 优先级顺序测试（P2-4）=====
+    // 验证错误分类按 dns → timeout → ssl → connection → unknown 优先级短路返回，
+    // 同含多类关键词时高优先级类别胜出。
+
+    #[test]
+    fn test_classify_dns_priority_over_timeout() {
+        // "dns lookup timeout" 同时含 dns 与 timeout 关键词，
+        // dns 优先级更高 → 归类为 "dns"
+        assert_eq!(classify_error_type("dns lookup timeout"), "dns");
+        // 大小写不敏感
+        assert_eq!(classify_error_type("DNS resolution timed out"), "dns");
+        assert_eq!(classify_error_type("name resolution failed"), "dns");
+    }
+
+    #[test]
+    fn test_classify_ssl_priority_over_connection() {
+        // "ssl connection error" 同时含 ssl 与 connection 关键词，
+        // ssl 优先级更高 → 归类为 "ssl"
+        assert_eq!(classify_error_type("ssl connection error"), "ssl");
+        assert_eq!(classify_error_type("TLS certificate verify failed"), "ssl");
+        assert_eq!(classify_error_type("bad cert"), "ssl");
+    }
+
+    #[test]
+    fn test_classify_unknown_fallback() {
+        // 无任何已知关键词 → "unknown"
+        assert_eq!(classify_error_type("some weird error"), "unknown");
+        assert_eq!(classify_error_type(""), "unknown");
+        assert_eq!(classify_error_type("internal server error"), "unknown");
+    }
+
+    #[test]
+    fn test_classify_connection_keywords() {
+        // 各 connection 关键词均归类为 "connection"
+        assert_eq!(classify_error_type("connection refused"), "connection");
+        assert_eq!(classify_error_type("connect failed"), "connection");
+        assert_eq!(
+            classify_error_type("connection reset by peer"),
+            "connection"
+        );
+        assert_eq!(classify_error_type("error sending request"), "connection");
     }
 }
 

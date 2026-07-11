@@ -589,12 +589,12 @@ XHCurl::setConfig([
 | `remote_addr` | 可能为空或缺失 | 未建立连接时无远程地址 |
 | `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
-| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功路径不含此字段（或为空字符串） |
+| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功路径不含此字段 |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
 | `user_data` | 设置了 `setUserData()`/`userData()` 时存在 | 与成功路径一致 |
 
 > **判断成败只看 `success`**：不要用 `status === 0` 判断失败——某些边缘场景下成功路径的
-> 状态码也可能为 0（如 HTTP 0xx），且失败路径 `status` 恒为 0 是约定哨兵值，并非 HTTP 规范。
+> 状态码也可能为 0，且失败路径 `status` 恒为 0 是约定哨兵值，并非 HTTP 规范。
 > 失败时优先读取 `error` 字段获取原因；若需程序化区分错误类型（如超时重试、SSL 失败告警），
 > 读取 `error_type` 枚举值，而非解析 `error` 字符串。
 
@@ -731,7 +731,7 @@ $multi->executeEach(
 |------|------|
 | `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
-| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制，负值抛异常） |
+| `maxConcurrency(int $max): $this` | 最大并发数（0 = 使用默认（CPU 核心数），负值抛异常） |
 | `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB，负值抛异常） |
 | `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时，负值抛异常） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
@@ -915,6 +915,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `timed_out` | bool | 是否因超时被终止 |
 | `truncated` | bool | 输出是否因超过 max_output 被截断 |
 | `error` | string | 错误信息（启动失败、超限等，可选） |
+| `error_type` | string | 错误类型枚举（失败时，可选；`timeout`/`output_too_large`/`exit_error`，详见下文） |
 | `command` | string | 失败时的命令名（白名单/黑名单拒绝、超时、截断等错误路径返回，可选） |
 
 ### 示例

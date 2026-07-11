@@ -617,6 +617,16 @@ impl XhRequest {
         self.encoding.as_deref()
     }
 
+    /// 获取是否跟随重定向
+    pub fn get_follow_redirects(&self) -> Option<bool> {
+        self.follow_redirects
+    }
+
+    /// 获取最大重定向次数
+    pub fn get_max_redirects(&self) -> Option<u32> {
+        self.max_redirects
+    }
+
     /// 获取连接超时
     pub fn get_connect_timeout(&self) -> Option<u64> {
         self.connect_timeout

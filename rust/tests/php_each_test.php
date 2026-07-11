@@ -341,15 +341,15 @@ function test_multi_negative_response_size_clamped(): bool
     }
 }
 
-function test_threadpool_negative_workers_clamped(): bool
+function test_threadpool_negative_workers_throws(): bool
 {
-    $pool = new XHThreadPool(-4);
-    // 负值被 clamp，仅验证构造不崩溃：空请求 execute 现抛异常（Task 8）
+    // 第六轮 spec：构造函数负值改为抛异常（与 maxConcurrency setter 一致）
     try {
-        $pool->execute();
+        new XHThreadPool(-4);
         return false; // 应抛异常
     } catch (Throwable $e) {
-        return strpos($e->getMessage(), '没有待执行请求') !== false;
+        return strpos($e->getMessage(), 'workers') !== false
+            || strpos($e->getMessage(), '负值') !== false;
     }
 }
 
@@ -381,7 +381,7 @@ check("负数 connect_timeout 被 clamp", test_negative_connect_timeout_clamped(
 check("负数 max_redirects 被 clamp", test_negative_max_redirects_clamped());
 check("XHMulti 负数 maxConcurrency 被 clamp", test_multi_negative_concurrency_clamped());
 check("XHMulti 负数 maxResponseSize 被 clamp", test_multi_negative_response_size_clamped());
-check("XHThreadPool 负数 workers 被 clamp", test_threadpool_negative_workers_clamped());
+check("XHThreadPool 负数 workers 抛异常", test_threadpool_negative_workers_throws());
 check("setConfig 负值被跳过", test_set_config_negative_skipped());
 
 // =========== 配置一致性与提前检查测试 ===========
