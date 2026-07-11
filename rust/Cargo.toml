@@ -69,6 +69,10 @@ serde_json = "1"
 # 错误处理库（库代码使用 thiserror，应用代码使用 anyhow）
 thiserror = "1"
 
+# URL 编码（用于 cookies 数组形式的 value 编码，防止 Cookie 头注入）
+# 透传自 reqwest → url 的传递依赖，显式声明以便直接使用
+form_urlencoded = "1"
+
 [dev-dependencies]
 # 测试框架
 tokio-test = "0.4"
