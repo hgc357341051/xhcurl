@@ -218,14 +218,30 @@ jobs:
 
       # -----------------------------------------------------------------
       # 步骤 8.5: 运行 PHP 测试套件
-      # 遍历 rust/tests/php_*.php 逐一执行，任一失败则 CI 失败
+      # 启动 mock HTTP 服务器（/get、/post、/hang 端点），再遍历执行
+      # rust/tests/php_*.php，任一失败则 CI 失败
       # -----------------------------------------------------------------
       - name: Run PHP tests
         run: |
+          # 启动 mock HTTP 服务器（端口 18399：/get、/post；端口 18400：/hang）
+          php -S 127.0.0.1:18399 rust/tests/mock_server.php > /tmp/mock_18399.log 2>&1 &
+          MOCK_PID_1=$!
+          php -S 127.0.0.1:18400 rust/tests/mock_server.php > /tmp/mock_18400.log 2>&1 &
+          MOCK_PID_2=$!
+          # 等待服务器就绪
+          sleep 1
+
+          # 运行所有 PHP 测试
+          EXIT_CODE=0
           for f in rust/tests/php_*.php; do
             echo "Running $f..."
-            php -d extension=xhcurl "$f" || { echo "::error::PHP test $f failed"; exit 1; }
+            php -d extension=xhcurl "$f" || { echo "::error::PHP test $f failed"; EXIT_CODE=1; }
           done
+
+          # 清理 mock 服务器
+          kill $MOCK_PID_1 $MOCK_PID_2 2>/dev/null || true
+
+          exit $EXIT_CODE
 
       # -----------------------------------------------------------------
       # 步骤 9: 上传编译产物

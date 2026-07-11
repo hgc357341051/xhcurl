@@ -241,8 +241,12 @@ impl PhpXhCurl {
             }
 
             // 代理地址
+            // 接受 string（设置代理）或 null（清除代理），与 getConfig() 返回 null 对称，
+            // 确保 getConfig() → setConfig($orig) 往返不报类型错误。
             if let Some(proxy) = config.get("proxy") {
-                if let Some(v) = proxy.string() {
+                if proxy.is_null() {
+                    c.proxy = None;
+                } else if let Some(v) = proxy.string() {
                     c.proxy = Some(v);
                 } else {
                     type_mismatches.push("proxy");
