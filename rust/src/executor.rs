@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::multi::StreamEvent;
-use crate::request::XhRequest;
+use crate::request::{HttpMethod, XhRequest};
 use crate::response::XhResponse;
 
 /// 执行单个 HTTP 请求（核心公共逻辑）。
@@ -155,53 +155,61 @@ async fn execute_request_inner(
     let mut body_size: usize = 0;
     let mut size_exceeded = false;
 
+    // HEAD 请求按 RFC 7234 §4.3.2 不应返回响应体；部分服务器/代理仍可能
+    // 在 HEAD 响应中附带 body（或 keep-alive 帧残留数据），直接读取可能
+    // 导致挂起或解析错乱。此处显式跳过 body 读取，body_data 为空、body_size=0。
+    // 仍发送 Headers 与 Complete 事件，保持流式回调语义完整。
+    let skip_body = request.get_method() == HttpMethod::Head;
+
     let mut stream = response;
-    while let Some(chunk) = stream.chunk().await? {
-        let chunk_len = chunk.len();
+    if !skip_body {
+        while let Some(chunk) = stream.chunk().await? {
+            let chunk_len = chunk.len();
 
-        // 使用 checked_add 防止整数溢出
-        let new_size = body_size
-            .checked_add(chunk_len)
-            .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
+            // 使用 checked_add 防止整数溢出
+            let new_size = body_size
+                .checked_add(chunk_len)
+                .ok_or_else(|| XhCurlError::Memory("响应体大小溢出".to_string()))?;
 
-        // max_response_size == 0 表示无限制（与 GlobalConfig.max_response_size 注释一致）
-        // 仅当 max_response_size > 0 时执行大小限制检查
-        if max_response_size > 0 && new_size > max_response_size {
-            // 超过限制：写入不超过 max_response_size 的部分后停止读取
-            let remaining = max_response_size - body_size;
-            if remaining > 0 {
-                body_data.extend_from_slice(&chunk[..remaining]);
-                // 发送最后一块的流式事件
-                if let Some(tx) = &stream_tx {
-                    let _ = tx
-                        .send((
-                            request_id.clone(),
-                            StreamEvent::Chunk {
-                                data: chunk[..remaining].to_vec(),
-                            },
-                        ))
-                        .await;
+            // max_response_size == 0 表示无限制（与 GlobalConfig.max_response_size 注释一致）
+            // 仅当 max_response_size > 0 时执行大小限制检查
+            if max_response_size > 0 && new_size > max_response_size {
+                // 超过限制：写入不超过 max_response_size 的部分后停止读取
+                let remaining = max_response_size - body_size;
+                if remaining > 0 {
+                    body_data.extend_from_slice(&chunk[..remaining]);
+                    // 发送最后一块的流式事件
+                    if let Some(tx) = &stream_tx {
+                        let _ = tx
+                            .send((
+                                request_id.clone(),
+                                StreamEvent::Chunk {
+                                    data: chunk[..remaining].to_vec(),
+                                },
+                            ))
+                            .await;
+                    }
                 }
+                body_size = max_response_size;
+                size_exceeded = true;
+                break;
             }
-            body_size = max_response_size;
-            size_exceeded = true;
-            break;
-        }
 
-        // 未超限：写入完整 chunk
-        // 发送逐块流式事件（真正的流式语义，而非累积后一次性发送）
-        if let Some(tx) = &stream_tx {
-            let _ = tx
-                .send((
-                    request_id.clone(),
-                    StreamEvent::Chunk {
-                        data: chunk.to_vec(),
-                    },
-                ))
-                .await;
+            // 未超限：写入完整 chunk
+            // 发送逐块流式事件（真正的流式语义，而非累积后一次性发送）
+            if let Some(tx) = &stream_tx {
+                let _ = tx
+                    .send((
+                        request_id.clone(),
+                        StreamEvent::Chunk {
+                            data: chunk.to_vec(),
+                        },
+                    ))
+                    .await;
+            }
+            body_data.extend_from_slice(&chunk);
+            body_size = new_size;
         }
-        body_data.extend_from_slice(&chunk);
-        body_size = new_size;
     }
 
     // 计算耗时

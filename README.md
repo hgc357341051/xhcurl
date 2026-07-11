@@ -423,6 +423,9 @@ XHCurl::setConfig([
 > **配置变更生效**：`setConfig()` 会清空请求级 Client 缓存，确保后续构建的 Client
 > 反映最新全局配置（UA/keepalive/连接池/TLS 等）。`fiber_max_concurrency` 仅影响
 > 下次 `gather()`/`each()` 调用的 Semaphore 容量。
+> **全局变更立即生效**：修改 `proxy`/`verify_ssl`/`user_agent`/`http2_enabled`/
+> `tcp_keepalive`/`max_connections` 等影响 Client 构建的配置后，对**无请求级覆盖**
+> 的请求立即生效——全局 Client 基于配置指纹比对自动重建，无需重启进程。
 
 ### XHRequest - 请求构建器
 
@@ -469,6 +472,7 @@ XHCurl::setConfig([
 | 方法 | 对应 curl | 说明 |
 |------|-----------|------|
 | `header(string $name, string $value)` | - | 设置请求头 |
+| `headers(array $headers): $this` | - | 批量设置请求头，先校验全部再存储；任一 header 名/值非法时整体抛异常（fail-fast） |
 | `cookies(string\|array $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，字符串形式向后兼容直接设置原始 cookie 字符串 |
 | `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
 | `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
@@ -490,6 +494,7 @@ XHCurl::setConfig([
 | `timeout(int $seconds)` | 请求超时（秒） |
 | `timeoutMs(int $ms): $this` | 请求超时（毫秒精度）。`timeout()` 保持秒级不变（向后兼容）；同时设置时优先级：`timeoutMs` > `timeout`（以毫秒级为准） |
 | `connectTimeout(int $seconds)` | 连接超时（秒） |
+| `connectTimeoutMs(int $ms): $this` | 连接超时（毫秒精度），与 `connectTimeout(int $seconds)` 对称。0 或负值忽略 |
 | `userAgent(string $ua)` | User-Agent |
 | `proxy(?string $proxy): $this` | 代理地址（支持 http/https/socks5）；传 `null` 清除请求级代理覆盖（与 `setConfig(['proxy' => null])` 对称） |
 | `followRedirects(bool $follow)` | 跟随重定向 |
@@ -518,11 +523,15 @@ XHCurl::setConfig([
 > - `setUserData()`/`userData()` 序列化失败
 > - `method()` 无效 HTTP 方法名
 > - `cookies()` 参数类型错误（非字符串非数组）
+> - `header()`/`headers()`：非法 header 名/值（含控制字符、NUL）调用时立即抛异常（fail-fast）
+> - `form()`：含数组/对象/资源值时抛异常（提示用 `multipart()` 或 `json()`）
+> - `basicAuth()`：空字符串或无冒号分隔符时抛异常（提示格式 `user:pass`）
 >
 > **请求级失败（返回 `success=false` 数组）**——属于"网络/服务端层面失败"，不抛异常：
 > - HTTP 请求失败（超时、DNS、SSL、连接拒绝）
 > - 返回非 2xx 状态码（如果配置了）
 > - 响应体超限
+> - `cookies()`/`encoding()`/`range()`/`userAgent()`：含非 ASCII 字节时在 `execute()` 阶段返回 `success=false` 结果（`error` 字段含字段名和原始值）
 >
 > 所有 API（`execute()`/`XHMulti::execute()`/`XHThreadPool::execute()`/
 > `await()`/`gather()`/`each()`）在请求级失败时**统一返回 `success=false` 的结果数组**，
@@ -596,6 +605,10 @@ $results = $multi->execute(); // 返回结果数组
 
 > 结果按**完成顺序**排列（非提交顺序）。用结果的 `id` 字段关联业务上下文，
 > 而非依赖数组索引。
+>
+> **空请求抛异常**：请求列表为空时 `execute()` 抛异常（而非返回空数组），请先调用 `add()`。
+>
+> **execute() 消费请求列表**：执行后已添加的请求会被清空，重用同一对象需重新 `add()`。
 
 #### `executeEach` 响应体分块级流式回调
 
@@ -658,6 +671,10 @@ $pool->add($request1);
 $pool->add($request2);
 $results = $pool->execute();
 ```
+
+> **空请求抛异常**：请求列表为空时 `execute()` 抛异常（而非返回空数组），请先调用 `add()`。
+>
+> **execute() 消费请求列表**：执行后已添加的请求会被清空，重用同一对象需重新 `add()`。
 
 ### 流式回调类型
 

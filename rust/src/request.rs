@@ -29,8 +29,10 @@ struct OverrideKey {
     max_redirects: Option<u32>,
     verify_ssl: Option<bool>,
     proxy: Option<String>,
-    /// 仅 >0 的连接超时才实际覆盖（0 表示用全局默认），故此处过滤。
+    /// 仅 > 0 的连接超时才实际覆盖（0 表示用全局默认），故此处过滤。
     connect_timeout: Option<u64>,
+    /// 连接超时（毫秒），优先级高于 connect_timeout（秒）。
+    connect_timeout_ms: Option<u64>,
 }
 
 impl OverrideKey {
@@ -41,6 +43,7 @@ impl OverrideKey {
             verify_ssl: r.verify_ssl,
             proxy: r.proxy.clone(),
             connect_timeout: r.connect_timeout.filter(|&s| s > 0),
+            connect_timeout_ms: r.connect_timeout_ms,
         }
     }
 }
@@ -225,6 +228,10 @@ pub struct XhRequest {
     /// 连接超时（秒，0 = 使用全局默认）
     connect_timeout: Option<u64>,
 
+    /// 连接超时（毫秒，0 = 使用全局默认）
+    /// 优先级高于 connect_timeout（秒），用于需要亚秒级精度的场景。
+    connect_timeout_ms: Option<u64>,
+
     /// 请求超时（秒，0 = 使用全局默认）
     request_timeout: Option<u64>,
 
@@ -295,6 +302,7 @@ impl XhRequest {
             headers: HeaderManager::new(),
             body: BodyType::None,
             connect_timeout: None,
+            connect_timeout_ms: None,
             request_timeout: None,
             request_timeout_ms: None,
             follow_redirects: None,
@@ -427,6 +435,13 @@ impl XhRequest {
         self
     }
 
+    /// 设置连接超时（毫秒）
+    /// 优先级高于 connect_timeout（秒），用于需要亚秒级精度的场景。
+    pub fn connect_timeout_ms(mut self, ms: u64) -> Self {
+        self.connect_timeout_ms = Some(ms);
+        self
+    }
+
     /// 设置请求超时（秒）
     pub fn request_timeout(mut self, secs: u64) -> Self {
         self.request_timeout = Some(secs);
@@ -498,9 +513,18 @@ impl XhRequest {
 
     /// 设置 HTTP 基本认证凭据（CURLOPT_USERPWD）
     /// 格式: "username:password"
-    pub fn basic_auth(mut self, credentials: impl Into<String>) -> Self {
-        self.auth = Some(credentials.into());
-        self
+    ///
+    /// 空字符串或不含冒号 ':' 分隔符的凭据视为格式错误，返回 Err，
+    /// 避免后续 to_reqwest 拆分凭据时静默退化为「用户名+空密码」导致认证失败难排查。
+    pub fn basic_auth(mut self, credentials: impl Into<String>) -> XhCurlResult<Self> {
+        let auth = credentials.into();
+        if auth.is_empty() || !auth.contains(':') {
+            return Err(XhCurlError::InvalidArgument(
+                "basicAuth 凭据格式错误，应为 'user:pass' 格式".to_string(),
+            ));
+        }
+        self.auth = Some(auth);
+        Ok(self)
     }
 
     /// 设置 Bearer Token（CURLOPT_XOAUTH2_BEARER）
@@ -618,6 +642,32 @@ impl XhRequest {
         self.proxy.as_deref()
     }
 
+    /// 校验 header 值仅含可见 ASCII（拒绝非 ASCII 字节与控制字符）。
+    ///
+    /// `HeaderValue::from_str` 在 http 1.x 按 RFC 7230 接受 obs-text
+    ///（0x80-0xFF，即非 ASCII UTF-8 字节），仅拒绝控制字符。对于
+    /// cookies/encoding/range/user_agent 等字段，原始非 ASCII 值（如中文、
+    /// emoji）常被服务端/代理误处理，需显式拒绝并提示 urlencode。
+    /// 此函数在 `HeaderValue::from_str` 之前先做 `is_ascii()` 检查，
+    /// 拒绝非 ASCII 值；再由 `HeaderValue::from_str` 拒绝控制字符。
+    fn validate_ascii_header_value(
+        field_label: &str,
+        value: &str,
+    ) -> XhCurlResult<reqwest::header::HeaderValue> {
+        if !value.is_ascii() {
+            return Err(XhCurlError::InvalidArgument(format!(
+                "无效的 {} 值（含非 ASCII 字节），请对中文值做 urlencode：{}",
+                field_label, value
+            )));
+        }
+        reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            XhCurlError::InvalidArgument(format!(
+                "无效的 {} 值（含控制字符）：{}",
+                field_label, value
+            ))
+        })
+    }
+
     /// 构建为 reqwest 请求构建器
     /// 将 XhRequest 转换为 reqwest::RequestBuilder
     ///
@@ -667,17 +717,17 @@ impl XhRequest {
         let mut header_map = self.headers.to_header_map()?;
 
         // Accept-Encoding（CURLOPT_ENCODING）
+        // 非法值（含非 ASCII 字节或控制字符）必须报错而非静默丢弃，避免用户设置的编码被忽略
         if let Some(encoding) = &self.encoding {
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(encoding) {
-                header_map.insert(reqwest::header::ACCEPT_ENCODING, v);
-            }
+            let v = Self::validate_ascii_header_value("encoding", encoding)?;
+            header_map.insert(reqwest::header::ACCEPT_ENCODING, v);
         }
 
         // Range（CURLOPT_RANGE）
+        // 非法值（含非 ASCII 字节或控制字符）必须报错而非静默丢弃
         if let Some(range) = &self.range {
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(range) {
-                header_map.insert(reqwest::header::RANGE, v);
-            }
+            let v = Self::validate_ascii_header_value("range", range)?;
+            header_map.insert(reqwest::header::RANGE, v);
         }
 
         builder = builder.headers(header_map);
@@ -727,10 +777,10 @@ impl XhRequest {
         }
 
         // Cookie（CURLOPT_COOKIE）
+        // 非法值（含非 ASCII 字节或控制字符）必须报错而非静默丢弃，避免用户设置的 cookie 被忽略
         if let Some(cookies) = &self.cookies {
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(cookies) {
-                builder = builder.header(reqwest::header::COOKIE, v);
-            }
+            let v = Self::validate_ascii_header_value("cookies", cookies)?;
+            builder = builder.header(reqwest::header::COOKIE, v);
         }
 
         // 设置超时（覆盖客户端默认值）
@@ -743,10 +793,10 @@ impl XhRequest {
 
         // 请求级 User-Agent 覆盖（CURLOPT_USERAGENT）
         // reqwest 共享 Client 只能设置全局 UA，此处通过请求头覆盖
+        // 非法值（含非 ASCII 字节或控制字符）必须报错而非静默丢弃，避免 UA 被忽略
         if let Some(ua) = &self.user_agent {
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
-                builder = builder.header(reqwest::header::USER_AGENT, v);
-            }
+            let v = Self::validate_ascii_header_value("user_agent", ua)?;
+            builder = builder.header(reqwest::header::USER_AGENT, v);
         }
 
         Ok(builder)
@@ -762,6 +812,7 @@ impl XhRequest {
             || self.verify_ssl.is_some()
             || self.proxy.is_some()
             || self.connect_timeout.is_some()
+            || self.connect_timeout_ms.is_some()
     }
 
     /// 构建请求级客户端（应用请求级 Client 配置覆盖）。
@@ -790,8 +841,11 @@ impl XhRequest {
         // 等全部继承，再逐项覆盖请求级配置。
         let mut builder = crate::curl::XhCurlManager::global().create_client_builder()?;
 
-        // 请求级连接超时（覆盖全局默认，0 = 使用全局默认，故仅 > 0 时覆盖）
-        if let Some(secs) = self.connect_timeout {
+        // 请求级连接超时（覆盖全局默认）
+        // connect_timeout_ms（毫秒）优先级高于 connect_timeout（秒）
+        if let Some(ms) = self.connect_timeout_ms {
+            builder = builder.connect_timeout(Duration::from_millis(ms));
+        } else if let Some(secs) = self.connect_timeout {
             if secs > 0 {
                 builder = builder.connect_timeout(Duration::from_secs(secs));
             }

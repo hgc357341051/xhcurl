@@ -16,7 +16,7 @@
 // |   修改后返回同一对象，实现 PHP 端 $this 链式调用。                      |
 // +----------------------------------------------------------------------+
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::convert::IntoZvalDyn;
@@ -25,7 +25,7 @@ use ext_php_rs::types::{ArrayKey, ZendCallable, ZendClassObject, ZendHashTable, 
 use ext_php_rs::zend::php_sapi_name;
 use tokio::sync::mpsc;
 
-use crate::curl::XhCurlManager;
+use crate::curl::{GlobalConfig, XhCurlManager};
 use crate::error::MAX_REQUESTS_PER_BATCH;
 use crate::multi::{StreamEvent, XhMulti, STREAM_CHANNEL_CAPACITY};
 use crate::request::{clear_request_client_cache, HttpMethod, XhRequest};
@@ -55,27 +55,51 @@ pub(crate) fn sapi_is_cli() -> bool {
 ///
 /// reqwest Client 内部维护连接池（TCP keep-alive、TLS 会话缓存），
 /// 全局复用可避免每次请求重新建连，显著提升批量请求性能。
-/// 使用 OnceLock 保证线程安全的延迟初始化（仅创建一次）。
+///
+/// # 配置变更自动重建
+/// 与上一版用 `OnceLock<Result<Client, String>>` 永不重建不同，此处改为
+/// `OnceLock<RwLock<Option<(Client, GlobalConfig)>>>`：每次调用比对当前
+/// 全局配置快照与创建 Client 时的快照，不一致则重建 Client。这样 `setConfig`
+/// 修改 proxy/verify_ssl 等影响 Client 构建的配置后，下次调用即生效，
+/// 无需显式触发重建。请求级覆盖缓存（`clear_request_client_cache`）仍由
+/// `setConfig` 主动清空。
 ///
 /// # 代理配置失败处理
-/// 若全局代理地址无效（`create_client` 返回错误），返回 `Err`，由调用方传播为 PHP 异常。
-/// 理由：
-/// 1. 代理通常是安全/隐私相关配置，静默降级到无代理会让用户误以为
-///    请求走了代理，实际暴露真实 IP，这比直接报错更危险。
+/// 若全局代理地址无效（`create_client` 返回错误），返回 `Err`，由调用方传播为
+/// PHP 异常（不缓存错误，修正配置后可重试）。理由：
+/// 1. 代理通常是安全/隐私相关配置，静默降级到无代理会让用户误以为请求走了代理，
+///    实际暴露真实 IP，比直接报错更危险。
 /// 2. panic 会杀死 PHP 进程（FPM worker 崩溃重启），改为返回错误让用户可 try/catch。
 /// 3. 与 `create_client_builder` 的设计一致：代理无效必须明确报错。
 /// 4. 错误以 PHP 异常形式抛出，用户修正配置后可重试。
-pub(crate) fn global_client() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    let result = CLIENT.get_or_init(|| {
-        XhCurlManager::global().create_client().map_err(|e| {
-            format!(
-                "全局 reqwest 客户端初始化失败：{}（请检查 proxy/SSL 等全局配置）",
-                e
-            )
-        })
-    });
-    result.as_ref().map_err(|e| e.clone())
+pub(crate) fn global_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<RwLock<Option<(reqwest::Client, GlobalConfig)>>> = OnceLock::new();
+    let lock = CLIENT.get_or_init(|| RwLock::new(None));
+
+    let current_config = XhCurlManager::global().config();
+
+    // 快速路径：读锁比对配置指纹，命中则返回克隆（reqwest::Client 内部 Arc，clone 廉价）
+    {
+        let read = lock.read().unwrap_or_else(|e| e.into_inner());
+        if let Some((client, stored_config)) = read.as_ref() {
+            if *stored_config == current_config {
+                return Ok(client.clone());
+            }
+        }
+    }
+
+    // 慢速路径：首次创建或配置变更后重建
+    let new_client = XhCurlManager::global().create_client().map_err(|e| {
+        format!(
+            "全局 reqwest 客户端初始化失败：{}（请检查 proxy/SSL 等全局配置）",
+            e
+        )
+    })?;
+    {
+        let mut write = lock.write().unwrap_or_else(|e| e.into_inner());
+        *write = Some((new_client.clone(), current_config));
+    }
+    Ok(new_client)
 }
 
 /// 获取全局共享的 tokio 运行时。
@@ -309,8 +333,8 @@ impl PhpXhCurl {
 
         // 全局配置变更后，请求级 Client 缓存（按 OverrideKey 缓存）中已有的 Client
         // 是基于旧全局配置构建的（UA/keepalive/连接池/TLS 等），需清空以使后续构建
-        // 的 Client 反映新配置。global_client（无覆盖时的全局单例）走 OnceLock 不会
-        // 重建，但请求级 Client 缓存必须主动失效。
+        // 的 Client 反映新配置。global_client（无覆盖时的全局单例）通过配置指纹比对
+        // 在下次调用时自动重建，无需此处显式触发；但请求级 Client 缓存必须主动失效。
         clear_request_client_cache();
 
         if !type_mismatches.is_empty() {
@@ -532,13 +556,47 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::header(string $name, string $value): $self_
+    ///
+    /// fail-fast 校验：名称或值非法时立即抛异常，而非延迟到 execute() 的
+    /// to_header_map() 才报错，使错误更早暴露、错误信息更聚焦。
     pub fn header(
         self_: &mut ZendClassObject<PhpXhRequest>,
         name: String,
         value: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        validate_header(&name, &value)?;
         self_.request = self_.request.clone().header(&name, &value);
-        self_
+        Ok(self_)
+    }
+
+    /// 批量设置请求头
+    ///
+    /// # PHP 签名
+    /// public XHRequest::headers(array $headers): $self_
+    ///
+    /// 先校验全部 header 再存储（任一非法值整体抛异常），避免部分存储后
+    /// 抛异常导致请求状态不一致。校验逻辑与 `header()` 共用 `validate_header`。
+    #[php(name = "headers")]
+    pub fn headers<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        headers: &ZendHashTable,
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        // 先收集并校验全部键值对，全部通过后再存储
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for_each_kv(headers, |key, val| {
+            let name = key.to_string();
+            let value = val
+                .string()
+                .ok_or_else(|| format!("header '{}' 的值不是字符串", name))?;
+            validate_header(&name, &value)?;
+            pairs.push((name, value));
+            Ok(())
+        })?;
+        // 全部校验通过，逐个存入 HeaderManager
+        for (name, value) in pairs {
+            self_.request = self_.request.clone().header(&name, &value);
+        }
+        Ok(self_)
     }
 
     /// 设置 JSON 请求体
@@ -564,13 +622,15 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::form(array $data): $self_
+    ///
+    /// 非标量值（数组/对象/资源）时抛异常，避免表单项静默丢失。
     pub fn form<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
-        let form = php_array_to_form(data);
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let form = php_array_to_form(data)?;
         self_.request = self_.request.clone().body_form(form);
-        self_
+        Ok(self_)
     }
 
     /// 设置原始请求体（二进制安全）
@@ -646,6 +706,24 @@ impl PhpXhRequest {
         // 负值跳过（保留原值）
         if seconds >= 0 {
             self_.request = self_.request.clone().connect_timeout(seconds as u64);
+        }
+        self_
+    }
+
+    /// 设置连接超时（毫秒）
+    /// 优先级高于 `connectTimeout()`（秒），支持亚秒级精度。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::connectTimeoutMs(int $ms): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `connectTimeout()` 的"负值跳过"行为一致。
+    pub fn connect_timeout_ms(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        ms: i64,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
+        if ms >= 0 {
+            self_.request = self_.request.clone().connect_timeout_ms(ms as u64);
         }
         self_
     }
@@ -806,14 +884,21 @@ impl PhpXhRequest {
     /// 对应 curl 的 CURLOPT_USERPWD。
     /// 格式: "username:password"
     ///
+    /// 空字符串或不含冒号 ':' 分隔符的凭据视为格式错误，立即抛异常，
+    /// 避免后续 to_reqwest 拆分凭据时静默退化为「用户名+空密码」导致认证失败难排查。
+    ///
     /// # PHP 签名
     /// public XHRequest::basicAuth(string $credentials): $self_
     pub fn basic_auth(
         self_: &mut ZendClassObject<PhpXhRequest>,
         credentials: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().basic_auth(credentials);
-        self_
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        self_.request = self_
+            .request
+            .clone()
+            .basic_auth(credentials)
+            .map_err(|e| e.to_string())?;
+        Ok(self_)
     }
 
     /// 设置 Bearer Token 认证
@@ -1049,7 +1134,7 @@ impl PhpXhRequest {
     ///     echo $resp['elapsed_ms'];  // 耗时
     /// }
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
-        let client = global_client()?.clone();
+        let client = global_client()?;
         let request = self.request.clone();
         let max_response_size = XhCurlManager::global().config().max_response_size;
 
@@ -1212,9 +1297,14 @@ impl PhpXhMulti {
     /// # PHP 签名
     /// public XHMulti::execute(): array
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
+        // 空请求列表：抛异常而非返回空数组，避免静默失败
+        if self.requests.is_empty() {
+            return Err("XHMulti 没有待执行请求，请先调用 add() 添加请求".to_string());
+        }
+
         // 复用全局运行时与客户端（避免每次创建/销毁的开销）
         // 运行时类型由 SAPI 决定：CLI 多线程并行，FPM 单线程并发
-        let client = global_client()?.clone();
+        let client = global_client()?;
         let max_concurrency = self.max_concurrency;
         let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
@@ -1297,7 +1387,7 @@ impl PhpXhMulti {
         let streaming_enabled = on_chunk_callable.is_some() || on_headers_callable.is_some();
 
         // 复用 execute 的全局运行时与客户端配置
-        let client = global_client()?.clone();
+        let client = global_client()?;
         let max_concurrency = self.max_concurrency;
         let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
@@ -1614,13 +1704,18 @@ impl PhpXhThreadPool {
             return Err("XHThreadPool 仅在 CLI 模式下可用".to_string());
         }
 
-        let requests = std::mem::take(&mut self.requests);
+        // 空请求列表：抛异常而非返回空数组，避免静默失败
+        if self.requests.is_empty() {
+            return Err("XHThreadPool 没有待执行请求，请先调用 add() 添加请求".to_string());
+        }
+
+        // 先获取全局客户端，再 take requests/pool，避免 client 失败导致
+        // requests/pool 已被 take 丢失（与 XHMulti::execute 顺序一致）
+        let client = global_client()?;
         let max_concurrency = self.max_concurrency;
+        let requests = std::mem::take(&mut self.requests);
         // 取出现有线程池以便复用（同对象多次 execute 复用工作线程）
         let mut pool = self.pool.take();
-
-        // 预取全局客户端（首次创建线程池时需要 clone，复用时不需要）
-        let client = global_client()?.clone();
 
         // 复用全局运行时与客户端；通过 take/存回 模式避免借用 self
         let (returned_pool, result) = global_runtime()?.block_on(async move {
@@ -1710,7 +1805,7 @@ impl PhpXhThreadPool {
         let mut pool = self.pool.take();
 
         // 预取全局客户端（首次创建线程池时需要 clone）
-        let client = global_client()?.clone();
+        let client = global_client()?;
 
         // 复用 execute 的「ThreadPool 创建 + submit」模式，
         // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
@@ -2302,11 +2397,14 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
 
 /// 将 PHP 数组转换为表单键值对
 /// 用于 application/x-www-form-urlencoded 请求
-fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
+///
+/// 非标量值（数组/对象/资源）返回 Err 而非静默跳过，避免表单项丢失无信号。
+/// 此类场景应使用 multipart() 上传文件或 json() 发送嵌套数据。
+fn php_array_to_form(ht: &ZendHashTable) -> Result<Vec<(String, String)>, String> {
     let mut form = Vec::new();
 
     // 使用安全迭代器（手动控制迭代次数，防止 Iter 提前终止）
-    let _ = for_each_kv(ht, |key, val| {
+    for_each_kv(ht, |key, val| {
         let key_str = key.to_string();
         // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
         // Zval::string() 遇到非 UTF-8 字节会返回 None 导致表单项被静默丢弃，
@@ -2323,13 +2421,34 @@ fn php_array_to_form(ht: &ZendHashTable) -> Vec<(String, String)> {
         } else if let Some(b) = val.bool() {
             if b { "1" } else { "0" }.to_string()
         } else {
-            return Ok(());
+            return Err(format!(
+                "form() 不支持数组/对象/资源值（字段 '{}'），请用 multipart() 上传文件或用 json() 发送嵌套数据",
+                key_str
+            ));
         };
         form.push((key_str, val_str));
         Ok(())
-    });
+    })?;
 
-    form
+    Ok(form)
+}
+
+/// 校验 HTTP 请求头名称与值的合法性（fail-fast）。
+///
+/// 供 `header()` / `headers()` 在 PHP 边界调用时即校验，使非法值在调用处
+/// 立即抛异常，而非延迟到 `execute()` 的 `to_header_map()` 才报错。
+/// 校验逻辑与 `header.rs::to_header_map()` 一致（HeaderName/HeaderValue 解析），
+/// 但错误信息面向 PHP 用户（含 header 名与处置建议）。
+fn validate_header(name: &str, value: &str) -> Result<(), String> {
+    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("无效的请求头名 '{}': 含非法字符", name))?;
+    reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+        format!(
+            "无效的请求头值（header '{}': 含非法字节），请确保值为可见 ASCII",
+            name
+        )
+    })?;
+    Ok(())
 }
 
 // +----------------------------------------------------------------------+

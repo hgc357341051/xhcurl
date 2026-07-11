@@ -175,7 +175,7 @@ pub fn fiber_await(request: &XhRequest) -> Result<ZBox<ZendHashTable>, String> {
     // 2. 获取 tokio 运行时 handle，spawn HTTP 任务到工作线程
     //    HTTP 请求完全在 tokio 工作线程上执行，不触碰 PHP API
     let runtime = crate::php_ext::global_runtime()?;
-    let client = crate::php_ext::global_client()?.clone();
+    let client = crate::php_ext::global_client()?;
     let request_clone = request.clone();
     let result_tx = SCHEDULER.with(|s| {
         s.borrow()
@@ -252,7 +252,7 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
     //    并发上限取「请求数」与全局 fiber_max_concurrency 的较小值
     //    （0 表示不限制；默认 64，可通过 setConfig 调整）
     let runtime = crate::php_ext::global_runtime()?;
-    let client = crate::php_ext::global_client()?.clone();
+    let client = crate::php_ext::global_client()?;
     let cap = crate::curl::XhCurlManager::global()
         .config()
         .fiber_max_concurrency;
@@ -365,7 +365,7 @@ pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, Stri
     //    并发上限取「请求数」与全局 fiber_max_concurrency 的较小值
     //    （0 表示不限制；默认 64，可通过 setConfig 调整）
     let runtime = crate::php_ext::global_runtime()?;
-    let client = crate::php_ext::global_client()?.clone();
+    let client = crate::php_ext::global_client()?;
     let cap = crate::curl::XhCurlManager::global()
         .config()
         .fiber_max_concurrency;

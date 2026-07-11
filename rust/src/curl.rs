@@ -13,7 +13,10 @@ use crate::error::{XhCurlError, XhCurlResult, DEFAULT_MAX_RESPONSE_SIZE};
 /// 全局配置结构体
 /// 对应 C 版本的 xhcurl_globals 结构体
 /// 存储所有全局可配置参数
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` 用于 `global_client()` 的配置指纹比对：
+/// 全局配置变更后比对不一致即重建 Client，使 setConfig 即时生效。
+#[derive(Debug, Clone, PartialEq)]
 pub struct GlobalConfig {
     /// 全局默认连接超时（秒）
     /// 0 表示无超时

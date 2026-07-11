@@ -319,24 +319,38 @@ function test_multi_negative_concurrency_clamped(): bool
 {
     $multi = new XHMulti();
     $multi->maxConcurrency(-10);
-    // 仅验证不崩溃且不产生巨大数值：执行空请求集合应正常返回
-    $results = $multi->execute();
-    return is_array($results) && count($results) === 0;
+    // 负值被 clamp，仅验证 setter 不崩溃：空请求 execute 现抛异常（Task 8）
+    try {
+        $multi->execute();
+        return false; // 应抛异常
+    } catch (Throwable $e) {
+        return strpos($e->getMessage(), '没有待执行请求') !== false;
+    }
 }
 
 function test_multi_negative_response_size_clamped(): bool
 {
     $multi = new XHMulti();
     $multi->maxResponseSize(-100);
-    $results = $multi->execute();
-    return is_array($results) && count($results) === 0;
+    // 负值被 clamp，仅验证 setter 不崩溃：空请求 execute 现抛异常（Task 8）
+    try {
+        $multi->execute();
+        return false; // 应抛异常
+    } catch (Throwable $e) {
+        return strpos($e->getMessage(), '没有待执行请求') !== false;
+    }
 }
 
 function test_threadpool_negative_workers_clamped(): bool
 {
     $pool = new XHThreadPool(-4);
-    $results = $pool->execute();
-    return is_array($results) && count($results) === 0;
+    // 负值被 clamp，仅验证构造不崩溃：空请求 execute 现抛异常（Task 8）
+    try {
+        $pool->execute();
+        return false; // 应抛异常
+    } catch (Throwable $e) {
+        return strpos($e->getMessage(), '没有待执行请求') !== false;
+    }
 }
 
 function test_set_config_negative_skipped(): bool
