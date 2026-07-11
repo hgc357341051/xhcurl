@@ -172,15 +172,27 @@ try {
 }
 check("XHThreadPool 链式调用不抛异常", $chainOk);
 
-// 负值跳过（不修改原值）
+// 负值抛异常（第五轮 spec：负值从"静默跳过"改为"抛异常"）
 $pool3 = new XHThreadPool(2);
 $pool3->maxConcurrency(5);
-$pool3->maxConcurrency(-1);  // 负值应跳过
-check("XHThreadPool maxConcurrency 负值跳过", $pool3->getMaxConcurrency() === 5);
+$caughtNeg = false;
+try {
+    $pool3->maxConcurrency(-1);  // 负值应抛异常
+} catch (\Throwable $e) {
+    $caughtNeg = true;
+}
+check("XHThreadPool maxConcurrency 负值抛异常", $caughtNeg);
+check("XHThreadPool maxConcurrency 负值不修改原值", $pool3->getMaxConcurrency() === 5);
 
 $pool3->timeout(30);
-$pool3->timeout(-1);
-check("XHThreadPool timeout 负值跳过", $pool3->getTimeout() === 30);
+$caughtNegT = false;
+try {
+    $pool3->timeout(-1);
+} catch (\Throwable $e) {
+    $caughtNegT = true;
+}
+check("XHThreadPool timeout 负值抛异常", $caughtNegT);
+check("XHThreadPool timeout 负值不修改原值", $pool3->getTimeout() === 30);
 
 // 0 值表示"无超时/使用默认"
 $pool4 = new XHThreadPool(2);

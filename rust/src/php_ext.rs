@@ -1381,18 +1381,19 @@ impl PhpXhMulti {
     /// 设置最大并发数
     ///
     /// # PHP 签名
-    /// public XHMulti::maxConcurrency(int $max): $self_
+    /// public XHMulti::maxConcurrency(int $max): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 无限制。
     pub fn max_concurrency(
         self_: &mut ZendClassObject<PhpXhMulti>,
         max: i64,
-    ) -> &mut ZendClassObject<PhpXhMulti> {
-        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
-        if max >= 0 {
-            self_.max_concurrency = max as usize;
+    ) -> Result<&mut ZendClassObject<PhpXhMulti>, String> {
+        // 负值抛异常，避免 i64→usize 转换产生巨大数值
+        if max < 0 {
+            return Err("maxConcurrency 不能为负值，0 = 无限制".to_string());
         }
-        self_
+        self_.max_concurrency = max as usize;
+        Ok(self_)
     }
 
     /// 设置单个响应的最大响应体大小（字节）
@@ -1400,18 +1401,19 @@ impl PhpXhMulti {
     /// 0 = 使用全局配置（默认 10MB）。
     ///
     /// # PHP 签名
-    /// public XHMulti::maxResponseSize(int $size): $self_
+    /// public XHMulti::maxResponseSize(int $size): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认。
     pub fn max_response_size(
         self_: &mut ZendClassObject<PhpXhMulti>,
         size: i64,
-    ) -> &mut ZendClassObject<PhpXhMulti> {
-        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
-        if size >= 0 {
-            self_.max_response_size = size as usize;
+    ) -> Result<&mut ZendClassObject<PhpXhMulti>, String> {
+        // 负值抛异常，避免 i64→usize 转换产生巨大数值
+        if size < 0 {
+            return Err("maxResponseSize 不能为负值，0 = 使用全局默认".to_string());
         }
-        self_
+        self_.max_response_size = size as usize;
+        Ok(self_)
     }
 
     /// 设置批量级超时（秒）
@@ -1421,18 +1423,19 @@ impl PhpXhMulti {
     /// 单请求超时由 XHRequest::timeout() 单独控制。
     ///
     /// # PHP 签名
-    /// public XHMulti::timeout(int $secs): $self_
+    /// public XHMulti::timeout(int $secs): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 无超时。
     pub fn timeout(
         self_: &mut ZendClassObject<PhpXhMulti>,
         secs: i64,
-    ) -> &mut ZendClassObject<PhpXhMulti> {
-        // 负值跳过（保留原值）
-        if secs >= 0 {
-            self_.timeout = secs as u64;
+    ) -> Result<&mut ZendClassObject<PhpXhMulti>, String> {
+        // 负值抛异常
+        if secs < 0 {
+            return Err("timeout 不能为负值，0 = 无超时".to_string());
         }
-        self_
+        self_.timeout = secs as u64;
+        Ok(self_)
     }
 
     /// 获取最大并发数
@@ -1833,6 +1836,12 @@ pub struct PhpXhThreadPool {
 
     /// 批量级超时（秒，0 = 无超时）
     timeout: u64,
+
+    /// pool 创建时的 max_concurrency（用于检测配置变更触发重建）
+    pool_max_concurrency: usize,
+
+    /// pool 创建时的 max_response_size（用于检测配置变更触发重建）
+    pool_max_response_size: usize,
 }
 
 /// PHP XHThreadPool 类的方法实现
@@ -1855,6 +1864,9 @@ impl PhpXhThreadPool {
             },
             max_response_size: 0,
             timeout: 0,
+            // pool 尚未创建，配置指纹初始化为 0
+            pool_max_concurrency: 0,
+            pool_max_response_size: 0,
         }
     }
 
@@ -1893,18 +1905,19 @@ impl PhpXhThreadPool {
     /// 设置最大并发数（工作线程数量）
     ///
     /// # PHP 签名
-    /// public XHThreadPool::maxConcurrency(int $max): $self_
+    /// public XHThreadPool::maxConcurrency(int $max): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 无限制。
     pub fn max_concurrency(
         self_: &mut ZendClassObject<PhpXhThreadPool>,
         max: i64,
-    ) -> &mut ZendClassObject<PhpXhThreadPool> {
-        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
-        if max >= 0 {
-            self_.max_concurrency = max as usize;
+    ) -> Result<&mut ZendClassObject<PhpXhThreadPool>, String> {
+        // 负值抛异常，避免 i64→usize 转换产生巨大数值
+        if max < 0 {
+            return Err("maxConcurrency 不能为负值，0 = 无限制".to_string());
         }
-        self_
+        self_.max_concurrency = max as usize;
+        Ok(self_)
     }
 
     /// 设置单个响应的最大响应体大小（字节）
@@ -1912,18 +1925,19 @@ impl PhpXhThreadPool {
     /// 0 = 使用全局配置（默认 10MB）。
     ///
     /// # PHP 签名
-    /// public XHThreadPool::maxResponseSize(int $size): $self_
+    /// public XHThreadPool::maxResponseSize(int $size): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认。
     pub fn max_response_size(
         self_: &mut ZendClassObject<PhpXhThreadPool>,
         size: i64,
-    ) -> &mut ZendClassObject<PhpXhThreadPool> {
-        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
-        if size >= 0 {
-            self_.max_response_size = size as usize;
+    ) -> Result<&mut ZendClassObject<PhpXhThreadPool>, String> {
+        // 负值抛异常，避免 i64→usize 转换产生巨大数值
+        if size < 0 {
+            return Err("maxResponseSize 不能为负值，0 = 使用全局默认".to_string());
         }
-        self_
+        self_.max_response_size = size as usize;
+        Ok(self_)
     }
 
     /// 设置批量级超时（秒）
@@ -1933,18 +1947,19 @@ impl PhpXhThreadPool {
     /// 单请求超时由 XHRequest::timeout() 单独控制。
     ///
     /// # PHP 签名
-    /// public XHThreadPool::timeout(int $secs): $self_
+    /// public XHThreadPool::timeout(int $secs): $this
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 无超时。
     pub fn timeout(
         self_: &mut ZendClassObject<PhpXhThreadPool>,
         secs: i64,
-    ) -> &mut ZendClassObject<PhpXhThreadPool> {
-        // 负值跳过（保留原值）
-        if secs >= 0 {
-            self_.timeout = secs as u64;
+    ) -> Result<&mut ZendClassObject<PhpXhThreadPool>, String> {
+        // 负值抛异常
+        if secs < 0 {
+            return Err("timeout 不能为负值，0 = 无超时".to_string());
         }
-        self_
+        self_.timeout = secs as u64;
+        Ok(self_)
     }
 
     /// 获取最大并发数
@@ -2002,11 +2017,20 @@ impl PhpXhThreadPool {
         let requests = std::mem::take(&mut self.requests);
         // 取出现有线程池以便复用（同对象多次 execute 复用工作线程）
         let mut pool = self.pool.take();
+        // pool 创建时的配置指纹（用于检测配置变更触发重建）
+        let pool_max_concurrency = self.pool_max_concurrency;
+        let pool_max_response_size = self.pool_max_response_size;
 
         // 复用全局运行时与客户端；通过 take/存回 模式避免借用 self
         let (returned_pool, result) = global_runtime()?.block_on(async move {
-            // 首次调用时创建线程池，后续复用
-            if pool.is_none() {
+            // 检测配置变更：pool 存在但与创建时配置不一致 → drop 旧 pool 重建
+            // （用户在两次 execute 间修改 maxConcurrency/maxResponseSize 时生效）
+            let config_changed = pool.is_some()
+                && (max_concurrency != pool_max_concurrency
+                    || max_response_size != pool_max_response_size);
+            if pool.is_none() || config_changed {
+                // config_changed 时旧 pool 在下方 `pool = Some(...)` 赋值时被 drop
+                // （其 Drop 实现 abort dispatcher + workers），用新配置重建
                 let mut config = ThreadPoolConfig::default();
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
@@ -2048,6 +2072,9 @@ impl PhpXhThreadPool {
 
         // block_on 已 ? 解包 String 错误，此处 returned_pool 是 Option<XhThreadPool>
         self.pool = returned_pool;
+        // 更新配置指纹（记录 pool 当前配置，用于下次检测变更）
+        self.pool_max_concurrency = max_concurrency;
+        self.pool_max_response_size = max_response_size;
         let results = result.map_err(|e| e.to_string())?;
 
         // 转换为 PHP 数组
@@ -2114,13 +2141,14 @@ impl PhpXhThreadPool {
 
         let max_concurrency = self.max_concurrency;
         let max_response_size = self.max_response_size;
-        // timeout 字段已存储，但 execute_each 的回调收集循环结构复杂
-        // （select! 同时等待 result_rx 与 stream_rx，且需在超时时正确处理 pool 存回/中止），
-        // 暂不强制生效；批量级超时仅在 execute() 中强制生效。
+        // 批量级超时：与 execute() 一致，超时后中止剩余任务并返回错误
         // 单请求超时仍由 XHRequest::timeout() 控制。
-        let _timeout = self.timeout;
+        let timeout = self.timeout;
         // 取出现有线程池以便复用（同对象多次调用复用工作线程）
         let mut pool = self.pool.take();
+        // pool 创建时的配置指纹（用于检测配置变更触发重建）
+        let pool_max_concurrency = self.pool_max_concurrency;
+        let pool_max_response_size = self.pool_max_response_size;
 
         // 预取全局客户端（首次创建线程池时需要 clone）
         let client = global_client()?;
@@ -2129,8 +2157,14 @@ impl PhpXhThreadPool {
         // 但收集循环改为：recv 一个 result → result_to_php_array → 调回调 → 不累积
         // 通过 take/存回 模式避免借用 self；回调异常时仍需存回 pool，故用显式错误捕获
         let (returned_pool, count) = global_runtime()?.block_on(async move {
-            // 首次调用时创建线程池，后续复用
-            if pool.is_none() {
+            // 检测配置变更：pool 存在但与创建时配置不一致 → drop 旧 pool 重建
+            // （用户在两次调用间修改 maxConcurrency/maxResponseSize 时生效）
+            let config_changed = pool.is_some()
+                && (max_concurrency != pool_max_concurrency
+                    || max_response_size != pool_max_response_size);
+            if pool.is_none() || config_changed {
+                // config_changed 时旧 pool 在下方 `pool = Some(...)` 赋值时被 drop
+                // （其 Drop 实现 abort dispatcher + workers），用新配置重建
                 let mut config = ThreadPoolConfig::default();
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
@@ -2207,6 +2241,14 @@ impl PhpXhThreadPool {
             // 使用者通过回调返回 false 请求中止剩余任务（非异常，返回已处理数）
             let mut user_aborted = false;
 
+            // 批量级超时：计算 deadline，超时后中止剩余任务（与 execute/XhMulti::execute_each 一致）
+            // 0 = 无超时（deadline 为 None，收集循环不超时）
+            let deadline = if timeout > 0 {
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout))
+            } else {
+                None
+            };
+
             // 只要结果未收齐就继续等待
             if streaming_enabled {
                 let stream_rx = stream_rx.as_mut().unwrap();
@@ -2258,12 +2300,53 @@ impl PhpXhThreadPool {
                             }
                             // None: stream channel 关闭（所有 worker 完成），继续等待结果
                         }
+                        _ = async {
+                            // 批量级超时：deadline 到达时触发；无超时时永不触发（pending）
+                            match &deadline {
+                                Some(dl) => {
+                                    tokio::time::sleep_until(tokio::time::Instant::from_std(*dl)).await;
+                                }
+                                None => {
+                                    std::future::pending::<()>().await;
+                                }
+                            }
+                        } => {
+                            // 批量超时：不存回 pool（drop 中止剩余 worker），返回已处理数
+                            callback_err = Some(format!(
+                                "批量执行超时（{} 秒），已完成 {}/{}",
+                                timeout, count, submitted
+                            ));
+                            break;
+                        }
                     }
                 }
             } else {
                 // 原始逻辑（未启用流式，向后兼容）
                 while (count as usize) < submitted {
-                    match result_rx.recv().await {
+                    // 批量级超时：用 tokio::time::timeout 包裹 recv，超时则中止
+                    let recv_result = if let Some(dl) = deadline {
+                        let remaining = dl.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            callback_err = Some(format!(
+                                "批量执行超时（{} 秒），已完成 {}/{}",
+                                timeout, count, submitted
+                            ));
+                            break;
+                        }
+                        match tokio::time::timeout(remaining, result_rx.recv()).await {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                callback_err = Some(format!(
+                                    "批量执行超时（{} 秒），已完成 {}/{}",
+                                    timeout, count, submitted
+                                ));
+                                break;
+                            }
+                        }
+                    } else {
+                        result_rx.recv().await
+                    };
+                    match recv_result {
                         Some(ResultMessage::Completed(result)) => {
                             // 转换为 PHP 数组（复用 result_to_php_array，字段与 execute 一致）
                             let result_array = result_to_php_array(&result);
@@ -2343,6 +2426,9 @@ impl PhpXhThreadPool {
 
         // 存回线程池以便下次 execute 复用
         self.pool = returned_pool;
+        // 更新配置指纹（记录 pool 当前配置，用于下次检测变更）
+        self.pool_max_concurrency = max_concurrency;
+        self.pool_max_response_size = max_response_size;
         count
     }
 }

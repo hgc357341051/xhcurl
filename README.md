@@ -542,6 +542,7 @@ XHCurl::setConfig([
 > - `multipart()`：字段缺少 `name` 或 `name` 为空抛异常；非数组元素抛异常
 > - `form()`：含数组/对象/资源值时抛异常（提示用 `multipart()` 或 `json()`）
 > - `basicAuth()`：空字符串或无冒号分隔符时抛异常（提示格式 `user:pass`）
+> - `maxConcurrency()`/`maxResponseSize()`/`timeout()`（XHMulti/XHThreadPool）：负值抛异常（0 = 无限制/使用默认，合法）
 >
 > **请求级失败（返回 `success=false` 数组）**——属于"网络/服务端层面失败"，不抛异常：
 > - HTTP 请求失败（超时、DNS、SSL、连接拒绝）
@@ -649,9 +650,9 @@ try {
 |------|------|
 | `__construct()` | 创建批量执行器 |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
-| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制） |
-| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
-| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
+| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制，负值抛异常） |
+| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB，负值抛异常） |
+| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时，负值抛异常） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行，详见下文 |
 | `count(): int` | 返回待执行请求数 |
@@ -730,9 +731,9 @@ $multi->executeEach(
 |------|------|
 | `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
-| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制） |
-| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
-| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
+| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制，负值抛异常） |
+| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB，负值抛异常） |
+| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时，负值抛异常） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行（签名与 `XHMulti::executeEach` 一致，仅 CLI 可用） |
 | `count(): int` | 返回待执行请求数 |
@@ -740,6 +741,13 @@ $multi->executeEach(
 | `getMaxConcurrency(): int` | 获取配置的最大并发数（未配置返回 0） |
 | `getMaxResponseSize(): int` | 获取配置的最大响应体大小（未配置返回 0） |
 | `getTimeout(): int` | 获取配置的批量级超时秒数（未配置返回 0） |
+
+> **配置变更生效**：在两次 `execute()`/`executeEach()` 之间修改 `maxConcurrency()`/`maxResponseSize()` 
+> 会自动重建线程池以应用新配置（旧 pool 的连接复用被丢弃，但行为正确可预期）。
+> 未修改配置时 pool 复用（无重建开销）。
+>
+> **executeEach 也强制 timeout**：`timeout()` 在 `execute()` 和 `executeEach()` 上均生效。
+> 超时后中止剩余任务并返回错误（含已处理数）。
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
