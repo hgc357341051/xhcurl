@@ -463,16 +463,19 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::method(string $method): $self_
     ///
-    /// 无效方法名时跳过设置（保留原值），链式调用不中断。
+    /// 无效方法名时抛出异常（不静默跳过）。如需非标准方法请使用 `customMethod()`。
     pub fn method(
         self_: &mut ZendClassObject<PhpXhRequest>,
         method: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 无效方法名时跳过设置，保持链式调用不中断
-        if let Ok(m) = HttpMethod::from_str(&method) {
-            self_.request = self_.request.clone().method(m);
-        }
-        self_
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        let m = HttpMethod::from_str(&method).map_err(|_| {
+            format!(
+                "无效的 HTTP 方法: '{}'（如需非标准方法请使用 customMethod()）",
+                method
+            )
+        })?;
+        self_.request = self_.request.clone().method(m);
+        Ok(self_)
     }
 
     /// 设置为 GET 方法
@@ -543,18 +546,18 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::json(array $data): $self_
     ///
-    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
+    /// 序列化或设置失败时抛出异常（不静默跳过），避免数据丢失无信号。
     pub fn json<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
-        // 序列化或设置失败时跳过，保持链式调用不中断
-        if let Ok(json_str) = php_array_to_json(data) {
-            if let Ok(req) = self_.request.clone().body_json_str(&json_str) {
-                self_.request = req;
-            }
-        }
-        self_
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let json_str = php_array_to_json(data).map_err(|e| format!("JSON 序列化失败: {}", e))?;
+        self_.request = self_
+            .request
+            .clone()
+            .body_json_str(&json_str)
+            .map_err(|e| format!("设置 JSON body 失败: {}", e))?;
+        Ok(self_)
     }
 
     /// 设置表单数据
@@ -611,6 +614,24 @@ impl PhpXhRequest {
         self_
     }
 
+    /// 设置请求超时（毫秒）
+    /// 优先级高于 `timeout()`（秒），支持亚秒级精度。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::timeoutMs(int $ms): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `timeout()` 的"负值跳过"行为一致。
+    pub fn timeout_ms(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        ms: i64,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
+        if ms >= 0 {
+            self_.request = self_.request.clone().request_timeout_ms(ms as u64);
+        }
+        self_
+    }
+
     /// 设置连接超时（秒）
     /// 与 timeout 不同，此方法仅控制连接阶段的超时
     ///
@@ -654,20 +675,30 @@ impl PhpXhRequest {
     }
 
     /// 设置代理地址
-    /// 支持 HTTP/HTTPS/SOCKS5 代理
+    /// 支持 HTTP/HTTPS/SOCKS5 代理。传 null 清除请求级代理覆盖（恢复全局默认）。
     ///
     /// # PHP 签名
-    /// public XHRequest::proxy(string $proxy): $self_
+    /// public XHRequest::proxy(?string $proxy): $self_
     ///
     /// # 示例
     /// $req->proxy("http://127.0.0.1:7890");
     /// $req->proxy("socks5://127.0.0.1:1080");
-    pub fn proxy(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        proxy: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().proxy(proxy);
-        self_
+    /// $req->proxy(null);  // 清除请求级代理覆盖
+    pub fn proxy<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        proxy: Option<&Zval>,
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        match proxy {
+            Some(zv) if !zv.is_null() => {
+                let proxy_str = zv.string().ok_or("proxy 参数必须是字符串")?;
+                self_.request = self_.request.clone().proxy(proxy_str);
+            }
+            _ => {
+                // null 清除请求级代理覆盖
+                self_.request = self_.request.clone().clear_proxy();
+            }
+        }
+        Ok(self_)
     }
 
     /// 设置是否跟随重定向
@@ -710,16 +741,15 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::setUserData(mixed $data): $self_
     ///
-    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
+    /// 序列化失败时抛出异常（不静默跳过），避免数据丢失无信号。
     pub fn set_user_data<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
-        // 序列化失败时跳过，保持链式调用不中断
-        if let Ok(json_str) = php_array_to_json(data) {
-            self_.request = self_.request.clone().user_data(json_str);
-        }
-        self_
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let json_str =
+            php_array_to_json(data).map_err(|e| format!("userData 序列化失败: {}", e))?;
+        self_.request = self_.request.clone().user_data(json_str);
+        Ok(self_)
     }
 
     /// 设置用户自定义数据（`set_user_data` 的无前缀别名，向后兼容）
@@ -727,19 +757,18 @@ impl PhpXhRequest {
     /// 与 `setUserData()` 等价。ext-php-rs 自动将 Rust snake_case `user_data`
     /// 映射为 PHP `userData()`。
     ///
-    /// JSON 序列化失败时跳过设置（保留原值），链式调用不中断。
+    /// 序列化失败时抛出异常（不静默跳过），避免数据丢失无信号。
     ///
     /// # PHP 签名
     /// public XHRequest::userData(array $data): $self_
     pub fn user_data<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
         data: &ZendHashTable,
-    ) -> &'a mut ZendClassObject<PhpXhRequest> {
-        // 序列化失败时跳过，保持链式调用不中断
-        if let Ok(json_str) = php_array_to_json(data) {
-            self_.request = self_.request.clone().user_data(json_str);
-        }
-        self_
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let json_str =
+            php_array_to_json(data).map_err(|e| format!("userData 序列化失败: {}", e))?;
+        self_.request = self_.request.clone().user_data(json_str);
+        Ok(self_)
     }
 
     /// 设置请求 ID（用于批量请求时标识结果）
@@ -802,19 +831,45 @@ impl PhpXhRequest {
         self_
     }
 
-    /// 设置 Cookie 字符串
+    /// 设置 Cookie
     ///
     /// 对应 curl 的 CURLOPT_COOKIE。
-    /// 格式: "name1=value1; name2=value2"
+    /// 支持两种形式：
+    /// - 字符串："name1=value1; name2=value2"（向后兼容）
+    /// - 数组：['name1' => 'value1', 'name2' => 'value2'] → 自动拼接为上述格式
+    ///
+    /// 数组形式会跳过整数键（仅处理字符串键的 name=value 对）。
     ///
     /// # PHP 签名
-    /// public XHRequest::cookies(string $cookies): $self_
-    pub fn cookies(
-        self_: &mut ZendClassObject<PhpXhRequest>,
-        cookies: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().cookies(cookies);
-        self_
+    /// public XHRequest::cookies(string|array $cookies): $self_
+    pub fn cookies<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        cookies: &Zval,
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let cookie_str = if let Some(arr) = cookies.array() {
+            // 数组形式：['name' => 'value', ...] → "name=value; name2=value2"
+            let mut parts: Vec<String> = Vec::new();
+            for_each_kv(arr, |key, val| {
+                // 跳过整数键（cookie 需 name=value，整数键无意义）
+                if key.is_long() {
+                    return Ok(());
+                }
+                let k = key.to_string();
+                if let Some(v) = val.string() {
+                    parts.push(format!("{}={}", k, v));
+                }
+                Ok(())
+            })
+            .map_err(|e| format!("cookies 数组处理失败: {}", e))?;
+            parts.join("; ")
+        } else if let Some(s) = cookies.string() {
+            // 字符串形式（向后兼容）
+            s
+        } else {
+            return Err("cookies 参数必须是字符串或数组".to_string());
+        };
+        self_.request = self_.request.clone().cookies(cookie_str);
+        Ok(self_)
     }
 
     /// 设置 Accept-Encoding
@@ -887,10 +942,10 @@ impl PhpXhRequest {
         for _ in 0..len {
             match iter.next() {
                 Some((_key, val)) => {
-                    // 字段非数组时跳过整个设置，保持链式调用不中断
+                    // 字段非数组时跳过该字段，继续处理其余字段
                     let field_ht = match val.array() {
                         Some(ht) => ht,
-                        None => return self_,
+                        None => continue,
                     };
                     let mut name = String::new();
                     let mut value: Vec<u8> = Vec::new();
@@ -1023,10 +1078,12 @@ impl PhpXhRequest {
                 }
                 Err(e) => {
                     // 失败：构造 success=false 结果数组（与 result_to_php_array 失败路径一致）
+                    // 使用 format_request_error_message 而非 e.to_string()，
+                    // 使超时错误包含 "timed out" 关键词，便于 classify_error_type 正确分类
                     let result = crate::multi::RequestResult::error(
                         id,
                         user_data,
-                        e.to_string(),
+                        format_request_error_message(&e),
                         std::time::Duration::from_secs(0),
                     );
                     crate::php_ext::result_to_php_array(&result)
@@ -1899,6 +1956,60 @@ where
     Ok(())
 }
 
+/// 格式化请求错误消息，使超时错误包含可识别的关键词。
+///
+/// reqwest 的超时错误 Display 仅显示 "error sending request for url (...)"，
+/// 与连接拒绝错误的消息完全一致，不含 "timeout"/"timed out" 关键词，
+/// 导致 `classify_error_type` 无法将其识别为超时（归类为 connection/unknown）。
+///
+/// 此函数检测 reqwest 的 `is_timeout()`，对超时错误补充 "timed out" 关键词，
+/// 使 `classify_error_type` 能正确归类为 "timeout"。
+fn format_request_error_message(e: &crate::error::XhCurlError) -> String {
+    if let crate::error::XhCurlError::Request(r) = e {
+        if r.is_timeout() {
+            return "网络请求失败: 请求超时 (timed out)".to_string();
+        }
+    }
+    e.to_string()
+}
+
+/// 根据错误消息分类错误类型。
+///
+/// 用于在失败结果中标注 `error_type` 字段，便于 PHP 端按错误类型做差异化处理
+/// （如超时重试、DNS 故障告警、SSL 证书问题提示等）。
+///
+/// 分类依据错误消息中的关键字（不区分大小写）：
+/// - `dns` / `resolve` / `name resolution` → "dns"
+/// - `timeout` / `timed out` / `elapsed` → "timeout"
+/// - `ssl` / `tls` / `certificate` / `cert` → "ssl"
+/// - `connect` / `connection` / `refused` / `reset` → "connection"
+/// - 其余 → "unknown"
+fn classify_error_type(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.contains("dns") || lower.contains("resolve") || lower.contains("name resolution") {
+        "dns"
+    } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("elapsed")
+    {
+        "timeout"
+    } else if lower.contains("ssl")
+        || lower.contains("tls")
+        || lower.contains("certificate")
+        || lower.contains("cert")
+    {
+        "ssl"
+    } else if lower.contains("connect")
+        || lower.contains("connection")
+        || lower.contains("refused")
+        || lower.contains("reset")
+        || lower.contains("sending request")
+        || lower.contains("error sending")
+    {
+        "connection"
+    } else {
+        "unknown"
+    }
+}
+
 /// 将单个 `RequestResult` 转换为 PHP 关联数组。
 ///
 /// 公共字段集（与单请求 `execute()` 返回字段保持一致 + 批量特有的 id/user_data）：
@@ -1936,6 +2047,12 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         let _ = response_ht.insert("url", String::new());
         if let Some(err) = &result.error {
             let _ = response_ht.insert("error", err.clone());
+            // 根据错误消息分类错误类型，便于 PHP 端按类型做差异化处理
+            let error_type = classify_error_type(err);
+            let _ = response_ht.insert("error_type", error_type);
+        } else {
+            // 无明确错误消息时仍标注 error_type，保持失败路径字段集一致
+            let _ = response_ht.insert("error_type", "unknown");
         }
     }
     response_ht

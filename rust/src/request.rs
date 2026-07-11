@@ -228,6 +228,10 @@ pub struct XhRequest {
     /// 请求超时（秒，0 = 使用全局默认）
     request_timeout: Option<u64>,
 
+    /// 请求超时（毫秒，0 = 使用全局默认）
+    /// 优先级高于 request_timeout（秒），用于需要亚秒级精度的场景。
+    request_timeout_ms: Option<u64>,
+
     /// 是否跟随重定向（None = 使用全局默认）
     follow_redirects: Option<bool>,
 
@@ -292,6 +296,7 @@ impl XhRequest {
             body: BodyType::None,
             connect_timeout: None,
             request_timeout: None,
+            request_timeout_ms: None,
             follow_redirects: None,
             max_redirects: None,
             verify_ssl: None,
@@ -425,6 +430,19 @@ impl XhRequest {
     /// 设置请求超时（秒）
     pub fn request_timeout(mut self, secs: u64) -> Self {
         self.request_timeout = Some(secs);
+        self
+    }
+
+    /// 设置请求超时（毫秒）
+    /// 优先级高于 request_timeout（秒），用于需要亚秒级精度的场景。
+    pub fn request_timeout_ms(mut self, ms: u64) -> Self {
+        self.request_timeout_ms = Some(ms);
+        self
+    }
+
+    /// 清除请求级代理覆盖（恢复使用全局默认）
+    pub fn clear_proxy(mut self) -> Self {
+        self.proxy = None;
         self
     }
 
@@ -716,7 +734,10 @@ impl XhRequest {
         }
 
         // 设置超时（覆盖客户端默认值）
-        if let Some(timeout) = self.request_timeout {
+        // request_timeout_ms（毫秒）优先级高于 request_timeout（秒）
+        if let Some(ms) = self.request_timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        } else if let Some(timeout) = self.request_timeout {
             builder = builder.timeout(Duration::from_secs(timeout));
         }
 

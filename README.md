@@ -439,7 +439,7 @@ XHCurl::setConfig([
 | 方法 | 说明 |
 |------|------|
 | `get()` / `post()` / `put()` / `delete()` / `patch()` / `head()` / `options()` | 设置标准 HTTP 方法 |
-| `method(string $method)` | 通过字符串设置方法 |
+| `method(string $method)` | 通过字符串设置方法；无效方法名（如 `'PUTT'` 拼写错误）抛异常。标准方法：GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS；非标准方法请用 `customMethod()` |
 | `customMethod(string $method)` | 自定义方法（CURLOPT_CUSTOMREQUEST，如 PROPFIND/TRACE） |
 
 #### 请求体
@@ -469,7 +469,7 @@ XHCurl::setConfig([
 | 方法 | 对应 curl | 说明 |
 |------|-----------|------|
 | `header(string $name, string $value)` | - | 设置请求头 |
-| `cookies(string $cookies)` | CURLOPT_COOKIE | Cookie 字符串 |
+| `cookies(string\|array $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，字符串形式向后兼容直接设置原始 cookie 字符串 |
 | `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
 | `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
 | `encoding(string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`） |
@@ -488,9 +488,10 @@ XHCurl::setConfig([
 | 方法 | 说明 |
 |------|------|
 | `timeout(int $seconds)` | 请求超时（秒） |
+| `timeoutMs(int $ms): $this` | 请求超时（毫秒精度）。`timeout()` 保持秒级不变（向后兼容）；同时设置时优先级：`timeoutMs` > `timeout`（以毫秒级为准） |
 | `connectTimeout(int $seconds)` | 连接超时（秒） |
 | `userAgent(string $ua)` | User-Agent |
-| `proxy(string $proxy)` | 代理地址（支持 http/https/socks5） |
+| `proxy(?string $proxy): $this` | 代理地址（支持 http/https/socks5）；传 `null` 清除请求级代理覆盖（与 `setConfig(['proxy' => null])` 对称） |
 | `followRedirects(bool $follow)` | 跟随重定向 |
 | `maxRedirects(int $max)` | 最大重定向次数 |
 | `range(string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`） |
@@ -508,9 +509,24 @@ XHCurl::setConfig([
 `execute()`（XHRequest）/ `XHMulti::execute()` / `XHThreadPool::execute()` /
 `XHCurl::await()` / `XHCurl::gather()` **全部以关联数组形式返回结果**，字段完全一致：
 
-> **错误处理统一**：所有 API（`execute()`/`XHMulti::execute()`/`XHThreadPool::execute()`/
-> `await()`/`gather()`/`each()`）在请求失败时**统一返回 `success=false` 的结果数组**，
-> 不抛 PHP 异常。请始终用 `if ($result['success'])` 判断成败，从 `$result['error']` 读取原因。
+> **错误处理分两类**：XHCurl 区分**配置类错误**与**请求级失败**，处理方式不同。
+>
+> **配置类错误（抛 PHP 异常）**——属于"调用方用法错误"，应通过 `try`/`catch` 捕获：
+> - 无效代理配置（`global_client()` 初始化失败）
+> - 运行时初始化失败
+> - `json()` 序列化失败（含无法序列化的内容如资源）
+> - `setUserData()`/`userData()` 序列化失败
+> - `method()` 无效 HTTP 方法名
+> - `cookies()` 参数类型错误（非字符串非数组）
+>
+> **请求级失败（返回 `success=false` 数组）**——属于"网络/服务端层面失败"，不抛异常：
+> - HTTP 请求失败（超时、DNS、SSL、连接拒绝）
+> - 返回非 2xx 状态码（如果配置了）
+> - 响应体超限
+>
+> 所有 API（`execute()`/`XHMulti::execute()`/`XHThreadPool::execute()`/
+> `await()`/`gather()`/`each()`）在请求级失败时**统一返回 `success=false` 的结果数组**，
+> 不抛 PHP 异常。请用 `try`/`catch` 捕获配置类异常，用 `if ($result['success'])` 判断请求级失败，从 `$result['error']` 读取原因。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -525,6 +541,7 @@ XHCurl::setConfig([
 | `remote_addr` | string | 远程服务器地址（可选） |
 | `version` | string | HTTP 协议版本（可选，如 `HTTP/1.1`） |
 | `error` | string | 错误信息（失败时，可选） |
+| `error_type` | string | 错误类型枚举（失败时，可选；详见下文「失败路径字段说明」） |
 | `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()`/`userData()` 时） |
 
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
@@ -546,12 +563,14 @@ XHCurl::setConfig([
 | `remote_addr` | 可能为空或缺失 | 未建立连接时无远程地址 |
 | `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
+| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功路径不含此字段（或为空字符串） |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
 | `user_data` | 设置了 `setUserData()`/`userData()` 时存在 | 与成功路径一致 |
 
 > **判断成败只看 `success`**：不要用 `status === 0` 判断失败——某些边缘场景下成功路径的
 > 状态码也可能为 0（如 HTTP 0xx），且失败路径 `status` 恒为 0 是约定哨兵值，并非 HTTP 规范。
-> 失败时优先读取 `error` 字段获取原因。
+> 失败时优先读取 `error` 字段获取原因；若需程序化区分错误类型（如超时重试、SSL 失败告警），
+> 读取 `error_type` 枚举值，而非解析 `error` 字符串。
 
 ### XHMulti - 批量异步执行器
 
@@ -663,7 +682,7 @@ XHCurl 的三种执行模式均支持**请求级流式回调**——每完成一
 2. **`XHMulti::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int`** —— 实例方法，先 `add()` 再执行，CLI + FPM
 3. **`XHThreadPool::executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int`** —— 实例方法，先 `add()` 再执行，仅 CLI
 
-三者主回调签名一致：`function(array $result): void`，`$result` 字段由共享的 `result_to_php_array` 生成（`id`/`success`/`status`/`body`/`headers`/`elapsed_ms`/`body_size`/`url`/`error?`/`user_data?`，详见「结果数组字段」）。
+三者主回调签名一致：`function(array $result): void`，`$result` 字段由共享的 `result_to_php_array` 生成（`id`/`success`/`status`/`body`/`headers`/`elapsed_ms`/`body_size`/`url`/`error?`/`error_type?`/`user_data?`，详见「结果数组字段」）。
 
 #### 统一行为契约
 
@@ -862,7 +881,7 @@ $r = xhrun('pwd', [], ['cwd' => '/tmp']);
 | CURLOPT_SSL_VERIFYPEER | `verifySsl()` | ✅ |
 | CURLOPT_ENCODING | `encoding()` | ✅ |
 | CURLOPT_RANGE | `range()` | ✅ |
-| CURLOPT_TIMEOUT | `timeout()` | ✅ |
+| CURLOPT_TIMEOUT | `timeout()` / `timeoutMs()` | ✅ |
 | CURLOPT_CONNECTTIMEOUT | `connectTimeout()` | ✅ |
 | CURLOPT_USERAGENT | `userAgent()` | ✅ |
 | CURLOPT_PROXY | `proxy()` | ✅ |
