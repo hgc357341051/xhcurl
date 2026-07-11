@@ -627,6 +627,18 @@ impl XhRequest {
         self.request_timeout
     }
 
+    /// 获取连接超时（毫秒）
+    /// 对应 connectTimeoutMs() 设置的值；未设置时返回 None。
+    pub fn get_connect_timeout_ms(&self) -> Option<u64> {
+        self.connect_timeout_ms
+    }
+
+    /// 获取请求超时（毫秒）
+    /// 对应 timeoutMs() 设置的值；未设置时返回 None。
+    pub fn get_request_timeout_ms(&self) -> Option<u64> {
+        self.request_timeout_ms
+    }
+
     /// 获取是否验证 SSL
     pub fn get_verify_ssl(&self) -> Option<bool> {
         self.verify_ssl

@@ -970,7 +970,10 @@ impl PhpXhRequest {
                         k
                     ));
                 };
-                parts.push(format!("{}={}", k, v));
+                // 对 value 做 URL 编码，防止含 ;/= 的 value 破坏 Cookie 格式或注入伪造 cookie
+                // 与 PHP setcookie() 默认行为对齐。key 不编码（cookie name 通常为字母数字）。
+                let encoded_v: String = form_urlencoded::byte_serialize(v.as_bytes()).collect();
+                parts.push(format!("{}={}", k, encoded_v));
                 Ok(())
             })
             .map_err(|e| format!("cookies 数组处理失败: {}", e))?;
@@ -1173,6 +1176,20 @@ impl PhpXhRequest {
     /// 注意：connectTimeoutMs() 设置的毫秒值不在此返回（优先级更高但单位不同）。
     pub fn get_connect_timeout(&self) -> Option<i64> {
         self.request.get_connect_timeout().map(|v| v as i64)
+    }
+
+    /// 获取请求超时（毫秒）
+    /// 对应 timeoutMs() 设置的值；未设置时返回 null。
+    /// 注意：timeout() 设置的秒值不在此返回（单位不同）。
+    pub fn get_timeout_ms(&self) -> Option<i64> {
+        self.request.get_request_timeout_ms().map(|v| v as i64)
+    }
+
+    /// 获取连接超时（毫秒）
+    /// 对应 connectTimeoutMs() 设置的值；未设置时返回 null。
+    /// 注意：connectTimeout() 设置的秒值不在此返回（单位不同）。
+    pub fn get_connect_timeout_ms(&self) -> Option<i64> {
+        self.request.get_connect_timeout_ms().map(|v| v as i64)
     }
 
     /// 获取所有请求头（关联数组）
@@ -1416,6 +1433,36 @@ impl PhpXhMulti {
             self_.timeout = secs as u64;
         }
         self_
+    }
+
+    /// 获取最大并发数
+    ///
+    /// # PHP 签名
+    /// public XHMulti::getMaxConcurrency(): int
+    ///
+    /// 返回 `maxConcurrency()` 设置的值；未设置返回 0。
+    pub fn get_max_concurrency(&self) -> i64 {
+        self.max_concurrency as i64
+    }
+
+    /// 获取最大响应体大小（字节）
+    ///
+    /// # PHP 签名
+    /// public XHMulti::getMaxResponseSize(): int
+    ///
+    /// 返回 `maxResponseSize()` 设置的值；未设置返回 0（表示使用全局配置）。
+    pub fn get_max_response_size(&self) -> i64 {
+        self.max_response_size as i64
+    }
+
+    /// 获取批量级超时（秒）
+    ///
+    /// # PHP 签名
+    /// public XHMulti::getTimeout(): int
+    ///
+    /// 返回 `timeout()` 设置的值；未设置返回 0（表示无超时）。
+    pub fn get_timeout(&self) -> i64 {
+        self.timeout as i64
     }
 
     /// 执行所有请求
@@ -1780,6 +1827,12 @@ pub struct PhpXhThreadPool {
 
     /// 最大并发数（工作线程数量）
     max_concurrency: usize,
+
+    /// 最大响应体大小（字节，0 = 使用全局配置）
+    max_response_size: usize,
+
+    /// 批量级超时（秒，0 = 无超时）
+    timeout: u64,
 }
 
 /// PHP XHThreadPool 类的方法实现
@@ -1800,6 +1853,8 @@ impl PhpXhThreadPool {
                 Some(n) if n >= 0 => n as usize,
                 _ => 0,
             },
+            max_response_size: 0,
+            timeout: 0,
         }
     }
 
@@ -1835,6 +1890,93 @@ impl PhpXhThreadPool {
         self.requests.is_empty()
     }
 
+    /// 设置最大并发数（工作线程数量）
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::maxConcurrency(int $max): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    pub fn max_concurrency(
+        self_: &mut ZendClassObject<PhpXhThreadPool>,
+        max: i64,
+    ) -> &mut ZendClassObject<PhpXhThreadPool> {
+        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
+        if max >= 0 {
+            self_.max_concurrency = max as usize;
+        }
+        self_
+    }
+
+    /// 设置单个响应的最大响应体大小（字节）
+    /// 防止恶意服务器返回超大响应导致内存溢出。
+    /// 0 = 使用全局配置（默认 10MB）。
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::maxResponseSize(int $size): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    pub fn max_response_size(
+        self_: &mut ZendClassObject<PhpXhThreadPool>,
+        size: i64,
+    ) -> &mut ZendClassObject<PhpXhThreadPool> {
+        // 负值跳过（保留原值），避免 i64→usize 转换产生巨大数值
+        if size >= 0 {
+            self_.max_response_size = size as usize;
+        }
+        self_
+    }
+
+    /// 设置批量级超时（秒）
+    /// 超时后 abort 未完成的任务并返回错误。
+    /// 0 = 无超时（默认）。
+    /// 注意：此超时是整个批量请求的总时限，
+    /// 单请求超时由 XHRequest::timeout() 单独控制。
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::timeout(int $secs): $self_
+    ///
+    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    pub fn timeout(
+        self_: &mut ZendClassObject<PhpXhThreadPool>,
+        secs: i64,
+    ) -> &mut ZendClassObject<PhpXhThreadPool> {
+        // 负值跳过（保留原值）
+        if secs >= 0 {
+            self_.timeout = secs as u64;
+        }
+        self_
+    }
+
+    /// 获取最大并发数
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::getMaxConcurrency(): int
+    ///
+    /// 返回 `maxConcurrency()` 设置的值；未设置返回 0。
+    pub fn get_max_concurrency(&self) -> i64 {
+        self.max_concurrency as i64
+    }
+
+    /// 获取最大响应体大小（字节）
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::getMaxResponseSize(): int
+    ///
+    /// 返回 `maxResponseSize()` 设置的值；未设置返回 0（表示使用全局配置）。
+    pub fn get_max_response_size(&self) -> i64 {
+        self.max_response_size as i64
+    }
+
+    /// 获取批量级超时（秒）
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::getTimeout(): int
+    ///
+    /// 返回 `timeout()` 设置的值；未设置返回 0（表示无超时）。
+    pub fn get_timeout(&self) -> i64 {
+        self.timeout as i64
+    }
+
     /// 执行所有请求
     ///
     /// # PHP 签名
@@ -1855,6 +1997,8 @@ impl PhpXhThreadPool {
         // requests/pool 已被 take 丢失（与 XHMulti::execute 顺序一致）
         let client = global_client()?;
         let max_concurrency = self.max_concurrency;
+        let max_response_size = self.max_response_size;
+        let timeout = self.timeout;
         let requests = std::mem::take(&mut self.requests);
         // 取出现有线程池以便复用（同对象多次 execute 复用工作线程）
         let mut pool = self.pool.take();
@@ -1867,12 +2011,38 @@ impl PhpXhThreadPool {
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
                 }
+                if max_response_size > 0 {
+                    config.max_response_size = max_response_size;
+                }
                 pool = Some(XhThreadPool::new(config, client));
             }
             let p = pool
                 .as_mut()
                 .ok_or_else(|| "内部错误：线程池未初始化".to_string())?;
-            let res = p.execute_all(requests).await;
+            // 批量级超时：用 tokio::time::timeout 包裹 execute_all
+            // 超时后 execute_all future 被 drop（中止未完成任务），返回 ThreadPool 错误
+            // 0 = 无超时（直接 await）
+            let res = if timeout > 0 {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout),
+                    p.execute_all(requests),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        return Ok::<_, String>((
+                            pool,
+                            Err(crate::error::XhCurlError::ThreadPool(format!(
+                                "批量执行超时（{} 秒），已中止未完成任务",
+                                timeout
+                            ))),
+                        ));
+                    }
+                }
+            } else {
+                p.execute_all(requests).await
+            };
             Ok::<_, String>((pool, res))
         })?;
 
@@ -1943,6 +2113,12 @@ impl PhpXhThreadPool {
         let streaming_enabled = on_chunk_callable.is_some() || on_headers_callable.is_some();
 
         let max_concurrency = self.max_concurrency;
+        let max_response_size = self.max_response_size;
+        // timeout 字段已存储，但 execute_each 的回调收集循环结构复杂
+        // （select! 同时等待 result_rx 与 stream_rx，且需在超时时正确处理 pool 存回/中止），
+        // 暂不强制生效；批量级超时仅在 execute() 中强制生效。
+        // 单请求超时仍由 XHRequest::timeout() 控制。
+        let _timeout = self.timeout;
         // 取出现有线程池以便复用（同对象多次调用复用工作线程）
         let mut pool = self.pool.take();
 
@@ -1958,6 +2134,9 @@ impl PhpXhThreadPool {
                 let mut config = ThreadPoolConfig::default();
                 if max_concurrency > 0 {
                     config.worker_count = max_concurrency;
+                }
+                if max_response_size > 0 {
+                    config.max_response_size = max_response_size;
                 }
                 pool = Some(XhThreadPool::new(config, client));
             }

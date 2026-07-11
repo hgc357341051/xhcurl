@@ -2302,6 +2302,7 @@ version = "1.0.8"
 dependencies = [
  "crossbeam-channel",
  "ext-php-rs",
+ "form_urlencoded",
  "reqwest",
  "serde",
  "serde_json",

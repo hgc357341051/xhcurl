@@ -473,7 +473,7 @@ XHCurl::setConfig([
 |------|-----------|------|
 | `header(string $name, string $value)` | - | 设置请求头 |
 | `headers(array $headers): $this` | - | 批量设置请求头，先校验全部再存储；任一 header 名/值非法时整体抛异常（fail-fast） |
-| `cookies(string\|array $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，字符串形式向后兼容直接设置原始 cookie 字符串 |
+| `cookies(string\|array $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，value 会做 URL 编码（与 PHP `setcookie()` 默认行为一致，防止含 `;`/`=` 的 value 破坏 Cookie 格式或注入伪造 cookie；key 不编码），字符串形式向后兼容直接设置原始 cookie 字符串 |
 | `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
 | `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
 | `encoding(string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`） |
@@ -505,6 +505,8 @@ XHCurl::setConfig([
 | `getUrl()` / `getMethod()` | 获取 URL / 方法 |
 | `getTimeout()` | `(): ?int` 获取请求级超时（秒），未设置返回 null |
 | `getConnectTimeout()` | `(): ?int` 获取连接超时（秒），未设置返回 null |
+| `getTimeoutMs()` | `(): ?int` 获取请求级超时（毫秒），未设置返回 null |
+| `getConnectTimeoutMs()` | `(): ?int` 获取连接超时（毫秒），未设置返回 null |
 | `getHeaders()` | `(): array` 获取已设置的请求头（键名小写） |
 | `getCookies()` | `(): ?string` 获取 cookie 字符串，未设置返回 null |
 | `getProxy()` | `(): ?string` 获取请求级代理，未设置返回 null |
@@ -595,6 +597,50 @@ XHCurl::setConfig([
 > 失败时优先读取 `error` 字段获取原因；若需程序化区分错误类型（如超时重试、SSL 失败告警），
 > 读取 `error_type` 枚举值，而非解析 `error` 字符串。
 
+#### 错误处理示例
+
+```php
+<?php
+// 完整的错误处理模式：try/catch 捕获配置类异常 + if success 判断请求级失败
+
+try {
+    $result = XHCurl::createRequest('https://api.example.com/users')
+        ->get()
+        ->timeout(10)
+        ->execute();
+    
+    if (!$result['success']) {
+        // 请求级失败：网络/服务端层面错误，不抛异常
+        $errorType = $result['error_type'] ?? 'unknown';
+        switch ($errorType) {
+            case 'timeout':
+                echo "请求超时，建议重试\n";
+                break;
+            case 'dns':
+                echo "DNS 解析失败，检查网络或 DNS 配置\n";
+                break;
+            case 'ssl':
+                echo "SSL 证书验证失败\n";
+                break;
+            case 'connection':
+                echo "连接被拒绝或重置\n";
+                break;
+            default:
+                echo "未知错误: " . ($result['error'] ?? '无错误信息') . "\n";
+        }
+        return;
+    }
+    
+    // 请求成功
+    echo "状态码: {$result['status']}\n";
+    echo "响应: {$result['body']}\n";
+    
+} catch (\Throwable $e) {
+    // 配置类异常：调用方用法错误（无效代理、序列化失败、非法参数等）
+    echo "配置错误: " . $e->getMessage() . "\n";
+}
+```
+
 ### XHMulti - 批量异步执行器
 
 基于 tokio 的 M:N 异步并发（CLI 多线程并行，FPM 协作式并发）。
@@ -610,6 +656,9 @@ XHCurl::setConfig([
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行，详见下文 |
 | `count(): int` | 返回待执行请求数 |
 | `isEmpty(): bool` | 是否有待执行请求 |
+| `getMaxConcurrency(): int` | 获取配置的最大并发数（未配置返回 0） |
+| `getMaxResponseSize(): int` | 获取配置的最大响应体大小（未配置返回 0） |
+| `getTimeout(): int` | 获取配置的批量级超时秒数（未配置返回 0） |
 
 ```php
 $multi = new XHMulti();
@@ -681,15 +730,23 @@ $multi->executeEach(
 |------|------|
 | `__construct(int $workers = 0)` | 创建线程池（0 = 默认工作线程数） |
 | `add(XHRequest $req): $this` | 添加请求（带数量上限检查） |
+| `maxConcurrency(int $max): $this` | 最大并发数（0 = 无限制） |
+| `maxResponseSize(int $size): $this` | 单响应最大字节数（0 = 用全局默认 10MB） |
+| `timeout(int $seconds): $this` | 设置整体执行超时（秒，0 = 无超时） |
 | `execute(): array` | 执行所有请求，返回结果数组（按完成顺序） |
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行（签名与 `XHMulti::executeEach` 一致，仅 CLI 可用） |
 | `count(): int` | 返回待执行请求数 |
 | `isEmpty(): bool` | 是否有待执行请求 |
+| `getMaxConcurrency(): int` | 获取配置的最大并发数（未配置返回 0） |
+| `getMaxResponseSize(): int` | 获取配置的最大响应体大小（未配置返回 0） |
+| `getTimeout(): int` | 获取配置的批量级超时秒数（未配置返回 0） |
 
 ```php
 $pool = new XHThreadPool(8);  // 8 个工作线程
 $pool->add($request1);
 $pool->add($request2);
+$pool->maxConcurrency(4);     // 限制并发为 4
+$pool->timeout(30);            // 整体超时 30 秒
 $results = $pool->execute();
 ```
 
@@ -933,6 +990,29 @@ $r = xhrun('pwd', [], ['cwd' => '/tmp']);
 | CURLOPT_SSLKEY | - | ❌ 暂未实现 |
 | CURLOPT_COOKIEFILE | - | ❌ 暂未实现 |
 | CURLOPT_COOKIEJAR | - | ❌ 暂未实现 |
+
+---
+
+## 迁移注意事项
+
+从 PHP curl / Guzzle 迁移到 XHCurl 时，注意以下行为差异：
+
+### timeout 0 值语义
+- **curl**：`CURLOPT_TIMEOUT, 0` 在某些版本表示"无超时"，另一些版本表示"立即超时"（行为不一致）
+- **XHCurl**：`timeout(0)`/`timeoutMs(0)`/`connectTimeout(0)`/`connectTimeoutMs(0)` 统一表示"跳过设置（使用全局默认值）"，而非立即超时
+
+### 响应头键名小写
+- **curl**：`curl_getinfo()` 或 `$curlinfo` 保留原始大小写
+- **XHCurl**：`result['headers']` 和 `getHeaders()` 返回的响应头键名**统一为小写**（遵循 HTTP/2 规范，HTTP/1.x 亦如此）。如需访问 `Content-Type`，请用小写键 `content-type`
+
+### cookies 数组形式自动 URL 编码
+- **curl**：`CURLOPT_COOKIE` 接受原始字符串，不做任何编码
+- **XHCurl**：`cookies(['name' => 'value'])` 数组形式会对 value 做 URL 编码（与 PHP `setcookie()` 行为一致），防止含 `;`/`=` 的 value 破坏 Cookie 格式或注入伪造 cookie。字符串形式 `cookies('name=value')` 不做编码（向后兼容，直接设置原始字符串）
+- **迁移建议**：从 curl 的 `CURLOPT_COOKIE` 字符串形式迁移时，若 cookie value 含特殊字符，建议改用数组形式以获得自动编码保护
+
+### 批量配置与单请求配置分离
+- **Guzzle**：`TransferOption::TIMEOUT` 同时控制单请求和批量
+- **XHCurl**：单请求超时用 `XHRequest::timeout()`，批量级总超时用 `XHMulti::timeout()`/`XHThreadPool::timeout()`（两者独立）
 
 ---
 

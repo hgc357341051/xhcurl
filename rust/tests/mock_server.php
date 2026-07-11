@@ -51,6 +51,16 @@ if ($path === '/hang') {
     return;
 }
 
+if ($path === '/cookies') {
+    // 回显请求的 Cookie 头（用于测试 cookies() 方法实际发送的内容）
+    header('Content-Type: application/json');
+    echo json_encode([
+        'cookie_header' => $_SERVER['HTTP_COOKIE'] ?? '',
+        'headers' => getallheaders(),
+    ]);
+    return;
+}
+
 if ($path === '/stream') {
     // 流式测试端点：分多次输出大响应体，触发 onChunk 多次回调
     // 参数：
