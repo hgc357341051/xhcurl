@@ -6,7 +6,7 @@
 ## [Unreleased]
 
 
-## [1.0.8] - 2026-07-11
+## [1.0.7] - 2026-07-11
 
 本版本为三种执行模式（协程 `each` / `XHMulti::executeEach` / `XHThreadPool::executeEach`）的
 流式回调补齐了**响应体分块级流式**（`onChunk`/`onHeaders`）、**行为契约对齐**和**返回值控制中止**三大能力，
