@@ -8,32 +8,46 @@
 
 ## [1.0.8] - 2026-07-11
 
-本版本新增**响应体分块流式回调**（`onChunk`/`onHeaders`），使 PHP 用户能在 HTTP 请求过程中
-实时处理响应体数据块和响应头，无需等待整个请求完成。适用于大文件流式下载、SSE、NDJSON 流式解析。
+本版本为三种执行模式（协程 `each` / `XHMulti::executeEach` / `XHThreadPool::executeEach`）的
+流式回调补齐了**响应体分块级流式**（`onChunk`/`onHeaders`）、**行为契约对齐**和**返回值控制中止**三大能力，
+让 PHP 使用者能根据业务情况显式控制回调处理流程。
 
 ### 新增
-- **`XHMulti::executeEach` 支持 `onChunk`/`onHeaders`**：新增两个可选参数
-  `?callable $onChunk = null` 和 `?callable $onHeaders = null`（向后兼容，已有代码不受影响）。
+- **`onChunk`/`onHeaders` 响应体分块级流式回调**：`XHMulti::executeEach` 和 `XHThreadPool::executeEach`
+  新增两个可选参数 `?callable $onChunk = null` 和 `?callable $onHeaders = null`（向后兼容）。
   - `$onChunk(string $requestId, string $chunk): void` —— 每收到一块响应体时触发（二进制安全）
   - `$onHeaders(string $requestId, int $status, array $headers): void` —— 收到响应头时触发
   - 所有 chunk 拼接后等于完整响应体（与 `$result['body']` 一致）
-- **`XHThreadPool::executeEach` 同步支持 `onChunk`/`onHeaders`**：签名与 `XHMulti::executeEach` 一致。
+- **回调返回值控制中止**：`$onResult` 回调返回 `false`（严格 `=== false`）时中止剩余任务，
+  方法返回已处理数（`int`，**不视为错误**）。返回 `true`/`null`/`void`/其他值继续处理。
+  抛异常仍中止（向后兼容）。让使用者能显式决定遇到业务异常时继续还是中断，无需用异常控制流程。
 - **核心层流式能力暴露**：`StreamEvent`（Headers/Chunk/Complete/Error）通过线程安全 mpsc channel
   从 tokio 工作线程传递到 PHP 线程，PHP 回调仅在 `block_on` 当前线程调用，确保线程安全。
 - **`mock_server.php` 新增 `/stream` 端点**：分块输出大响应体（`flush()` 确保分段发送），
   供 `onChunk` 多次触发验证。参数：`n`（段数）、`size`（每段字节数）。
-- **`php_streaming_test.php` 新增**：28 项测试覆盖 onChunk/onHeaders 触发、chunk 拼接完整性、
-  XHMulti 和 XHThreadPool 两条路径、向后兼容回归、回调异常中止。
+- **测试新增**：`php_streaming_test.php`（28 项）、`php_callback_abort_test.php`（11 项）、
+  `php_return_value_abort_test.php`（15 项），覆盖流式分块、行为契约一致性、返回值控制中止。
+
+### 修复
+- **`XHThreadPool::executeEach` 回调异常不中止剩余任务**：原仅 `break` 退出循环，pool 被存回复用，
+  已提交的请求继续在 worker 上执行。修复为回调异常时不存回 pool（让 pool 被 drop，`Drop` 实现 abort
+  dispatcher + workers），与协程 `each`（`SchedulerGuard::drop`）和 `XhMulti::executeEach`（`abort_tasks()`）
+  行为一致。
 
 ### 增强
 - **流式事件 drain 机制**：主收集循环结束后 `try_recv` 排空 stream channel 残留事件，
   确保用户回调收到完整的分块数据（避免尾部 chunk 丢失）。
 - **null 参数处理**：`Option<&Zval>` 参数正确处理 PHP `null`（视为未传），用户可显式传 `null`
   跳过 `onChunk` 只用 `onHeaders`。
+- **`invoke_streaming_callback` 返回 `Result<bool, String>`**：`Ok(true)` 继续、`Ok(false)` 使用者请求中止、
+  `Err(msg)` 异常中止，复用于 `XhMulti` 和 `XHThreadPool` 两条路径。
+- **`fiber_each` 检查回调返回值**：协程 `each()` 的回调返回 `is_false()` 时提前退出循环返回 `Ok(count)`。
 
 ### 文档
 - README 核心特性表新增"流式回调"行。
 - 新增"流式回调类型"小节，明确区分请求级（`onResult`）与响应体分块级（`onChunk`/`onHeaders`）。
+- 新增"请求级流式回调行为契约"小节，明确三种模式都支持请求级流式回调 + 统一行为契约 + 三者对比表。
+- 新增"回调返回值控制中止"子小节，说明 `false` 中止、其他值继续、抛异常仍中止 + 业务场景示例。
 - 更新 `executeEach` 签名表（XHMulti + XHThreadPool）。
 - 补充 `onChunk`/`onHeaders` 使用示例。
 - `each()` 章节澄清协程仅支持请求级流式。
