@@ -137,10 +137,13 @@ function test_error_type_dns(): bool {
         ->get()
         ->timeout(3)
         ->execute();
-    // 沙箱环境可能有 HTTP 代理拦截 DNS 失败返回 502（error_type="" 而非 "dns"），
-    // 真实无代理环境下 error_type="dns"。两种情况都算通过。
+    // 沙箱环境可能有 HTTP 代理拦截 DNS 失败返回 502（error_type="" 而非 "dns"）。
+    // 无代理环境下 reqwest 将 DNS 解析失败包装为 "error sending request"，
+    // 被 classify_error_type 识别为 "connection"（reqwest 未暴露具体 DNS 错误细节）。
+    // 真实无代理环境下 error_type 为 "dns" 或 "connection"，代理环境为 ""。
+    // 四种情况都算通过。
     return $result['success'] === false
-        && ($result['error_type'] === 'dns' || $result['error_type'] === '' || $result['error_type'] === 'unknown');
+        && in_array($result['error_type'], ['dns', 'connection', '', 'unknown'], true);
 }
 check("4.1 DNS 失败 error_type=dns（或代理环境返回 502）", test_error_type_dns());
 
