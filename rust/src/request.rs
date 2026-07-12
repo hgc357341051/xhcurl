@@ -288,6 +288,11 @@ pub struct XhRequest {
 
     /// Referer header 覆盖（None=使用全局/默认，Some=请求级覆盖）
     referer: Option<String>,
+
+    /// URL 查询参数列表
+    /// 通过 query() 增量追加，在 to_reqwest() 中与已有 URL 查询参数合并（非覆盖）。
+    /// 值在合并时由 url::Url::query_pairs_mut() 自动 URL 编码。
+    query_params: Vec<(String, String)>,
 }
 
 impl XhRequest {
@@ -322,6 +327,7 @@ impl XhRequest {
             custom_method: None,
             range: None,
             referer: None,
+            query_params: Vec::new(),
         }
     }
 
@@ -620,11 +626,23 @@ impl XhRequest {
         self
     }
 
+    /// 增量追加 URL 查询参数，与已有 URL 查询参数合并（非覆盖）。
+    /// 多次调用累加参数。值在 to_reqwest() 中自动 URL 编码。
+    pub fn query(mut self, params: Vec<(String, String)>) -> Self {
+        self.query_params.extend(params);
+        self
+    }
+
     // ===== Getter 方法 =====
 
     /// 获取请求 URL
     pub fn get_url(&self) -> &str {
         &self.url
+    }
+
+    /// 返回 query() 设置的查询参数列表。
+    pub fn get_query_params(&self) -> &[(String, String)] {
+        &self.query_params
     }
 
     /// 获取 HTTP 方法
@@ -796,23 +814,39 @@ impl XhRequest {
             client.clone()
         };
 
+        // 合并 query() 设置的查询参数（与已有 URL 查询参数合并，非覆盖）
+        // base URL 已通过上方 Url::parse 校验为合法，此处解析必然成功；
+        // query_pairs_mut().append_pair() 会对 value 做 URL 编码。
+        let mut final_url = self.url.clone();
+        if !self.query_params.is_empty() {
+            let mut url = reqwest::Url::parse(&final_url)
+                .map_err(|e| XhCurlError::Generic(format!("URL 解析失败: {}", e)))?;
+            {
+                let mut query_mut = url.query_pairs_mut();
+                for (k, v) in &self.query_params {
+                    query_mut.append_pair(k, v);
+                }
+            }
+            final_url = url.to_string();
+        }
+
         // 根据方法创建请求构建器
         // 自定义方法优先（CURLOPT_CUSTOMREQUEST）
         let mut builder = if let Some(custom) = &self.custom_method {
             client.request(
                 reqwest::Method::from_bytes(custom.as_bytes())
                     .map_err(|e| XhCurlError::Generic(format!("无效的 HTTP 方法: {}", e)))?,
-                &self.url,
+                &final_url,
             )
         } else {
             match self.method {
-                HttpMethod::Get => client.get(&self.url),
-                HttpMethod::Post => client.post(&self.url),
-                HttpMethod::Put => client.put(&self.url),
-                HttpMethod::Delete => client.delete(&self.url),
-                HttpMethod::Patch => client.patch(&self.url),
-                HttpMethod::Head => client.head(&self.url),
-                HttpMethod::Options => client.request(reqwest::Method::OPTIONS, &self.url),
+                HttpMethod::Get => client.get(&final_url),
+                HttpMethod::Post => client.post(&final_url),
+                HttpMethod::Put => client.put(&final_url),
+                HttpMethod::Delete => client.delete(&final_url),
+                HttpMethod::Patch => client.patch(&final_url),
+                HttpMethod::Head => client.head(&final_url),
+                HttpMethod::Options => client.request(reqwest::Method::OPTIONS, &final_url),
             }
         };
 

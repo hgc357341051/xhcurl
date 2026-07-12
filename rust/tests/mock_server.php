@@ -109,6 +109,27 @@ if ($path === '/large') {
     return;
 }
 
+if ($path === '/echo-query') {
+    // 回显所有查询参数，用于测试 query() 方法是否正确合并查询参数
+    header('Content-Type: application/json');
+    echo json_encode(['query' => $_GET]);
+    return;
+}
+
+if ($path === '/echo-json') {
+    // 回显请求方法，用于测试 executeJson() 方法解析 JSON 响应
+    header('Content-Type: application/json');
+    echo json_encode(['received' => true, 'method' => $_SERVER['REQUEST_METHOD']]);
+    return;
+}
+
+if ($path === '/text') {
+    // 返回纯文本，用于测试 executeJson() 对非 JSON Content-Type 抛异常
+    header('Content-Type: text/plain');
+    echo 'plain text';
+    return;
+}
+
 // 默认：404
 http_response_code(404);
 echo json_encode(['error' => 'not found', 'path' => $path]);

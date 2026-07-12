@@ -1667,6 +1667,87 @@ impl PhpXhRequest {
         self.request.get_user_data().map(|s| s.to_string())
     }
 
+    /// 增量追加 URL 查询参数
+    ///
+    /// 数组键值自动转为字符串并追加到 URL 查询参数。与已有 URL 查询参数
+    /// 合并（非覆盖），多次调用累加参数。支持 int/float/bool/null 标量值
+    /// （自动转字符串：bool true→"1"、false→"0"、null→""）。
+    /// 空数组 query([]) 不抛异常，返回 $this（无操作）。
+    /// 非标量元素（嵌套数组/对象/资源）抛异常，避免参数静默丢失。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::query(array $params): $this
+    pub fn query<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        params: &ZendHashTable,
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        let mut idx: usize = 0;
+        for_each_kv(params, |key, val| {
+            idx += 1;
+            let key_str = key.to_string();
+            // 标量值转字符串；非标量（数组/对象/资源）抛异常
+            // 二进制安全读取：优先取原始字节再 lossy 转字符串（与 form()/cookies() 一致）
+            let val_str = if let Some(bytes) = val.binary::<u8>() {
+                String::from_utf8_lossy(&bytes).into_owned()
+            } else if let Some(s) = val.string() {
+                s
+            } else if let Some(l) = val.long() {
+                l.to_string()
+            } else if let Some(d) = val.double() {
+                d.to_string()
+            } else if let Some(b) = val.bool() {
+                if b { "1" } else { "0" }.to_string()
+            } else if val.is_null() {
+                String::new()
+            } else {
+                return Err(format!(
+                    "query 数组第 {} 个元素值必须是标量类型（字段 '{}'）",
+                    idx, key_str
+                ));
+            };
+            query_params.push((key_str, val_str));
+            Ok(())
+        })?;
+        self_.request = self_.request.clone().query(query_params);
+        Ok(self_)
+    }
+
+    /// 设置 Accept header（header('Accept', $type) 的语义化别名）
+    ///
+    /// 空字符串抛异常（fail-fast，与 userAgent('') 一致）。多次调用覆盖。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::accept(string $type): $this
+    pub fn accept(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        type_: String,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if type_.is_empty() {
+            return Err("accept 不能为空字符串".to_string());
+        }
+        self_.request = self_.request.clone().header("Accept", &type_);
+        Ok(self_)
+    }
+
+    /// 设置 Content-Type header（header('Content-Type', $type) 的语义化别名）
+    ///
+    /// 空字符串抛异常（fail-fast）。多次调用覆盖。
+    /// 与 json()/form()/multipart() 的自动 Content-Type 设置不冲突（后调用者覆盖）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::contentType(string $type): $this
+    pub fn content_type(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        type_: String,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if type_.is_empty() {
+            return Err("contentType 不能为空字符串".to_string());
+        }
+        self_.request = self_.request.clone().header("Content-Type", &type_);
+        Ok(self_)
+    }
+
     /// 同步执行单个 HTTP 请求，一次性返回完整响应
     ///
     /// 适用于用户已知响应数据不大的场景，无需创建 XHMulti/XHThreadPool，
@@ -1741,6 +1822,72 @@ impl PhpXhRequest {
         });
 
         Ok(result_array)
+    }
+
+    /// 执行请求并将响应体解析为 PHP 值（JSON 解码）
+    ///
+    /// 内部调用 execute() 获取完整响应，然后：
+    ///   1. 校验 success（false 抛异常，含 HTTP 状态码与 error 字段）
+    ///   2. 校验 Content-Type 含 application/json（大小写不敏感，否则抛异常）
+    ///   3. 将 body 解析为 JSON 并递归转为 PHP 值（数组/标量/null）
+    ///
+    /// 解析失败抛异常（含 serde 错误信息），成功返回解析后的 PHP 值。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::executeJson(): array|string|int|float|bool|null
+    pub fn execute_json(&mut self) -> Result<Zval, String> {
+        let result = self.execute()?;
+
+        // 1. 校验 success（网络/HTTP 错误统一抛异常）
+        let success = result
+            .get("success")
+            .and_then(|v| v.bool())
+            .ok_or_else(|| "executeJson: 响应缺少 success 字段".to_string())?;
+        if !success {
+            let status = result.get("status").and_then(|v| v.long()).unwrap_or(0);
+            let error = result
+                .get("error")
+                .and_then(|v| v.string())
+                .unwrap_or_default();
+            return Err(format!(
+                "executeJson: 请求失败（HTTP {}）: {}",
+                status, error
+            ));
+        }
+
+        // 2. 校验 Content-Type 含 application/json（大小写不敏感）
+        //    HeaderManager 已将 header 名存为小写，此处仍按大小写不敏感查找以防外部来源
+        let headers_ht = result
+            .get("headers")
+            .and_then(|v| v.array())
+            .ok_or_else(|| "executeJson: 响应缺少 headers 字段".to_string())?;
+        let mut content_type = String::new();
+        for_each_kv(headers_ht, |key, val| {
+            if key.to_string().eq_ignore_ascii_case("content-type") {
+                if let Some(s) = val.string() {
+                    content_type = s;
+                }
+            }
+            Ok(())
+        })?;
+        if !content_type.to_lowercase().contains("application/json") {
+            return Err(format!(
+                "executeJson: 响应 Content-Type 不是 application/json（实际: '{}'）",
+                content_type
+            ));
+        }
+
+        // 3. 提取 body（二进制安全读取，再转 UTF-8 字符串供 JSON 解析）
+        let body_bytes = result
+            .get("body")
+            .and_then(|v| v.binary::<u8>())
+            .ok_or_else(|| "executeJson: 响应缺少 body 字段".to_string())?;
+        let body_str = String::from_utf8(body_bytes)
+            .map_err(|e| format!("executeJson: 响应体不是有效的 UTF-8: {}", e))?;
+        let value: serde_json::Value = serde_json::from_str(&body_str)
+            .map_err(|e| format!("executeJson: JSON 解析失败: {}", e))?;
+
+        json_value_to_zval(&value)
     }
 }
 
@@ -3330,6 +3477,50 @@ fn zval_to_json(val: &Zval) -> Result<serde_json::Value, String> {
     } else {
         Ok(serde_json::Value::Null)
     }
+}
+
+/// 将 serde_json::Value 转换为 Zval（用于 executeJson 解析响应体）。
+///
+/// `zval_to_json` 的逆转换：null/bool/number/string → 对应标量 Zval，
+/// array → PHP 列表数组（整数键 0,1,2...），object → PHP 关联数组。
+/// 整数优先用 i64（保持精度），超出 i64 范围回退为 f64。
+fn json_value_to_zval(value: &serde_json::Value) -> Result<Zval, String> {
+    let mut zv = Zval::new();
+    match value {
+        serde_json::Value::Null => zv.set_null(),
+        serde_json::Value::Bool(b) => zv.set_bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                zv.set_long(i);
+            } else if let Some(f) = n.as_f64() {
+                zv.set_double(f);
+            } else {
+                return Err("executeJson: JSON 含无法表示的数字".to_string());
+            }
+        }
+        serde_json::Value::String(s) => zv
+            .set_string(s, false)
+            .map_err(|e| format!("executeJson: JSON 字符串转换失败: {}", e))?,
+        serde_json::Value::Array(arr) => {
+            let mut ht = ZendHashTable::new();
+            for (i, v) in arr.iter().enumerate() {
+                let item = json_value_to_zval(v)?;
+                ht.insert(i as i64, item)
+                    .map_err(|e| format!("executeJson: JSON 数组插入失败: {}", e))?;
+            }
+            zv.set_hashtable(ht);
+        }
+        serde_json::Value::Object(obj) => {
+            let mut ht = ZendHashTable::new();
+            for (k, v) in obj.iter() {
+                let item = json_value_to_zval(v)?;
+                ht.insert(k.as_str(), item)
+                    .map_err(|e| format!("executeJson: JSON 对象插入失败: {}", e))?;
+            }
+            zv.set_hashtable(ht);
+        }
+    }
+    Ok(zv)
 }
 
 /// 将 PHP 数组转换为表单键值对

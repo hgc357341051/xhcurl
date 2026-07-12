@@ -6,6 +6,34 @@
 ## [Unreleased]
 
 
+## [1.4.0] - 2026-07-12
+
+本版本为**次版本号升级**（非 BREAKING），聚焦**补齐现代 HTTP 客户端标准便捷方法**，
+提升 PHP 使用者日常开发体验。新增 4 个向后兼容方法，覆盖 URL 查询参数构建、
+Accept/Content-Type 设置、JSON 响应自动解析四类高频场景。
+
+### 新增
+- **`query(array $params): $this`**：增量追加 URL 查询参数，与已有 URL 查询参数合并（非覆盖）。
+  多次调用累加参数。支持 int/float/bool/null 标量值（自动转字符串：bool→1/0，null→空字符串）。
+  空数组 query([]) 不抛异常（无操作）。非标量元素（嵌套数组/对象）抛异常（fail-fast）。
+  补齐 Guzzle/Symfony HTTP Client/Axios 均有的 query 参数构建功能。
+- **`accept(string $type): $this`**：设置 Accept header（header('Accept', $type) 的语义化别名）。
+  空字符串抛异常（fail-fast，与 userAgent('') 一致）。多次调用覆盖。
+- **`contentType(string $type): $this`**：设置 Content-Type header（header('Content-Type', $type) 的语义化别名）。
+  空字符串抛异常（fail-fast）。多次调用覆盖。与 json()/form()/multipart() 的自动 Content-Type 设置不冲突。
+- **`executeJson(): mixed`**：执行请求并自动 json_decode 响应体（关联数组形式）。
+  Content-Type 不含 application/json 时抛异常（含实际类型）。JSON 解析失败抛异常（含错误信息）。
+  请求失败（success=false）抛异常（含 error 字段）。不影响 execute() 的返回数组结构。
+
+### 测试
+- 新增 `php_add_http_helpers_test.php`，覆盖：
+  query() 追加/合并/累加/标量转换/空数组/嵌套数组抛异常、
+  accept()/contentType() 设置 header 与空字符串抛异常与多次调用覆盖、
+  executeJson() 成功解析/非 JSON Content-Type 抛异常/请求失败抛异常。
+- mock_server 新增 /echo-query（回显查询参数）、/echo-json（固定 JSON 响应）、
+  /text（text/plain 响应）三个端点。
+
+
 ## [1.3.0] - 2026-07-12
 
 本版本为**次版本号升级**（非 BREAKING），聚焦**修正 P1 文档错误**

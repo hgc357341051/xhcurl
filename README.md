@@ -436,6 +436,15 @@ XHCurl::setConfig([
 | 方法 | 说明 |
 |------|------|
 | `execute()` | 同步执行当前请求，返回结果数组（字段见下文「结果数组字段」） |
+| `executeJson(): mixed` | 执行请求并自动 json_decode 响应体（关联数组形式）。Content-Type 不含 application/json 时抛异常（含实际类型）；JSON 解析失败抛异常（含错误信息）；请求失败（success=false）抛异常（含 error 字段）。不影响 execute() 的返回数组结构 |
+
+> **executeJson() 失败场景**：以下三种情况均抛 PHP 异常（fail-fast）：
+> - 响应 Content-Type 不含 `application/json`（含实际类型，便于排查）
+> - JSON 解析失败（含 json_last_error_msg() 错误信息）
+> - 请求失败（`success=false`，含 `error` 字段）
+>
+> 与 `execute()` 不同：`execute()` 在请求失败时返回 `success=false` 数组（不抛异常），
+> `executeJson()` 则将请求失败也转为异常，便于在调用处统一用 `try/catch` 处理。
 
 #### HTTP 方法
 
@@ -484,6 +493,8 @@ XHCurl::setConfig([
 | `bearerToken(?string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `encoding(?string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `referer(?string $referer)` | CURLOPT_REFERER | 设置 Referer header（CURLOPT_REFERER 等价），传 null 清除，空字符串抛异常 |
+| `accept(string $type): $this` | - | 设置 Accept header（`header('Accept', $type)` 的语义化别名）。空字符串抛异常（fail-fast，与 `userAgent('')` 一致）。多次调用覆盖 |
+| `contentType(string $type): $this` | - | 设置 Content-Type header（`header('Content-Type', $type)` 的语义化别名）。空字符串抛异常（fail-fast）。多次调用覆盖。与 `json()`/`form()`/`multipart()` 的自动 Content-Type 设置不冲突 |
 
 #### TLS/SSL
 
@@ -510,6 +521,7 @@ XHCurl::setConfig([
 | `setId(string $id)` / `id(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
 | `setUserData(array $data)` / `userData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
 | `url(string $url): $this` | 链式 setter，允许在构造后变更请求 URL |
+| `query(array $params): $this` | 增量追加 URL 查询参数，与已有 URL 查询参数合并（非覆盖）。多次调用累加。支持 int/float/bool/null 标量值（自动转字符串：bool→1/0，null→空字符串）。空数组不抛异常（无操作）。非标量元素（嵌套数组/对象）抛异常（fail-fast） |
 | `getUrl()` / `getMethod()` | 获取 URL / 方法；`getMethod()` 在设置了 `customMethod()` 时返回自定义方法名（与实际请求使用的方法一致） |
 | `getTimeout()` | `(): ?int` 获取请求级超时（秒），未设置返回 null |
 | `getConnectTimeout()` | `(): ?int` 获取连接超时（秒），未设置返回 null |
@@ -527,6 +539,11 @@ XHCurl::setConfig([
 | `getCustomMethod()` | `(): ?string` 获取 `customMethod()` 设置的自定义方法，未设置返回 null |
 | `getBody()` | `(): ?string` 返回请求体字符串：body() 设置的原始字节体、json() 序列化后的 JSON 字符串、form() 的 k=v&k=v 格式字符串。multipart() 返回 null（含二进制，无法安全序列化）。未设置请求体返回 null |
 | `getMultipart(): ?array` | 返回已设置的 multipart 字段数组（含 name/value/filename/content_type），未设置返回 null |
+
+> **query() 合并语义**：`query()` 采用**增量追加**而非覆盖语义——已有 URL 查询参数保留，
+> 新参数追加合并。多次调用 `query()` 累加参数。值支持 int/float/bool/null 标量类型
+> （自动转字符串：bool→`1`/`0`，null→空字符串）。空数组 `query([])` 为无操作（不抛异常）。
+> 非标量元素（嵌套数组/对象）抛异常（fail-fast）。补齐 Guzzle/Symfony HTTP Client/Axios 均有的 query 参数构建功能。
 
 > **timeout 类 0 值语义**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`
 > 传 `0` 表示跳过设置（使用全局默认值），而非"立即超时"；负值抛异常（见「迁移注意事项」的 BREAKING 变更）。
