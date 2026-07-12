@@ -186,163 +186,224 @@ impl PhpXhCurl {
         // 获取全局管理器单例
         let manager = XhCurlManager::global();
 
-        // 收集类型不匹配的配置项名，便于向用户反馈哪些配置未生效
+        // 收集类型不匹配与负值的配置项名，便于向用户反馈哪些配置未生效
         let mut type_mismatches: Vec<&str> = Vec::new();
+        let mut negative_errors: Vec<&str> = Vec::new();
 
         // 使用闭包修改配置，避免手动管理锁
+        // 采用两阶段（校验 → 应用）实现原子性：
+        // 1. 校验阶段：遍历所有配置项，校验类型与负值，收集所有错误，不写入 c
+        // 2. 应用阶段：仅当无任何错误时才写入所有配置项
+        // 任一错误则不应用任何配置，避免部分应用导致配置不一致
         manager.modify_config(|c| {
-            // 从 PHP 数组读取配置项
-            // 每个配置项都是可选的，只处理存在的键
+            // 校验阶段：提取并暂存每个配置项的待应用值，收集所有错误
+            let mut connect_timeout: Option<i64> = None;
+            let mut request_timeout: Option<i64> = None;
+            let mut max_response_size: Option<i64> = None;
+            let mut follow_redirects: Option<bool> = None;
+            let mut max_redirects: Option<i64> = None;
+            let mut verify_ssl: Option<bool> = None;
+            let mut user_agent: Option<String> = None;
+            // proxy: None=未传, Some(None)=传 null 清空代理, Some(Some(s))=设置代理
+            let mut proxy: Option<Option<String>> = None;
+            let mut http2_enabled: Option<bool> = None;
+            let mut tcp_keepalive: Option<bool> = None;
+            let mut tcp_keepalive_interval: Option<i64> = None;
+            let mut max_connections: Option<i64> = None;
+            let mut fiber_max_concurrency: Option<i64> = None;
 
-            // 连接超时（秒），负值跳过
-            if let Some(timeout) = config.get("connect_timeout") {
-                if let Some(v) = timeout.long() {
-                    if v >= 0 {
-                        c.connect_timeout = v as u64;
-                    }
-                } else {
-                    type_mismatches.push("connect_timeout");
+            // 连接超时（秒），负值非法
+            if let Some(zv) = config.get("connect_timeout") {
+                match zv.long() {
+                    Some(v) if v >= 0 => connect_timeout = Some(v),
+                    Some(_) => negative_errors.push("connect_timeout"),
+                    None => type_mismatches.push("connect_timeout"),
                 }
             }
 
-            // 请求超时（秒），负值跳过
-            if let Some(timeout) = config.get("request_timeout") {
-                if let Some(v) = timeout.long() {
-                    if v >= 0 {
-                        c.request_timeout = v as u64;
-                    }
-                } else {
-                    type_mismatches.push("request_timeout");
+            // 请求超时（秒），负值非法
+            if let Some(zv) = config.get("request_timeout") {
+                match zv.long() {
+                    Some(v) if v >= 0 => request_timeout = Some(v),
+                    Some(_) => negative_errors.push("request_timeout"),
+                    None => type_mismatches.push("request_timeout"),
                 }
             }
 
-            // 最大响应体大小（字节），防止内存溢出，负值跳过
-            if let Some(max_size) = config.get("max_response_size") {
-                if let Some(v) = max_size.long() {
-                    if v >= 0 {
-                        c.max_response_size = v as usize;
-                    }
-                } else {
-                    type_mismatches.push("max_response_size");
+            // 最大响应体大小（字节），防止内存溢出，负值非法
+            if let Some(zv) = config.get("max_response_size") {
+                match zv.long() {
+                    Some(v) if v >= 0 => max_response_size = Some(v),
+                    Some(_) => negative_errors.push("max_response_size"),
+                    None => type_mismatches.push("max_response_size"),
                 }
             }
 
             // 是否跟随重定向
-            if let Some(follow) = config.get("follow_redirects") {
-                if let Some(v) = follow.bool() {
-                    c.follow_redirects = v;
-                } else {
-                    type_mismatches.push("follow_redirects");
+            if let Some(zv) = config.get("follow_redirects") {
+                match zv.bool() {
+                    Some(v) => follow_redirects = Some(v),
+                    None => type_mismatches.push("follow_redirects"),
                 }
             }
 
-            // 最大重定向次数，负值跳过
-            if let Some(max_redirects) = config.get("max_redirects") {
-                if let Some(v) = max_redirects.long() {
-                    if v >= 0 {
-                        c.max_redirects = v as u32;
-                    }
-                } else {
-                    type_mismatches.push("max_redirects");
+            // 最大重定向次数，负值非法
+            if let Some(zv) = config.get("max_redirects") {
+                match zv.long() {
+                    Some(v) if v >= 0 => max_redirects = Some(v),
+                    Some(_) => negative_errors.push("max_redirects"),
+                    None => type_mismatches.push("max_redirects"),
                 }
             }
 
             // 是否验证 SSL 证书
-            if let Some(verify) = config.get("verify_ssl") {
-                if let Some(v) = verify.bool() {
-                    c.verify_ssl = v;
-                } else {
-                    type_mismatches.push("verify_ssl");
+            if let Some(zv) = config.get("verify_ssl") {
+                match zv.bool() {
+                    Some(v) => verify_ssl = Some(v),
+                    None => type_mismatches.push("verify_ssl"),
                 }
             }
 
             // 自定义 User-Agent
-            if let Some(ua) = config.get("user_agent") {
-                if let Some(v) = ua.string() {
-                    c.user_agent = v;
-                } else {
-                    type_mismatches.push("user_agent");
+            if let Some(zv) = config.get("user_agent") {
+                match zv.string() {
+                    Some(v) => user_agent = Some(v),
+                    None => type_mismatches.push("user_agent"),
                 }
             }
 
             // 代理地址
             // 接受 string（设置代理）或 null（清除代理），与 getConfig() 返回 null 对称，
             // 确保 getConfig() → setConfig($orig) 往返不报类型错误。
-            if let Some(proxy) = config.get("proxy") {
-                if proxy.is_null() {
-                    c.proxy = None;
-                } else if let Some(v) = proxy.string() {
-                    c.proxy = Some(v);
+            if let Some(zv) = config.get("proxy") {
+                if zv.is_null() {
+                    proxy = Some(None);
+                } else if let Some(v) = zv.string() {
+                    proxy = Some(Some(v));
                 } else {
                     type_mismatches.push("proxy");
                 }
             }
 
             // 是否启用 HTTP/2
-            if let Some(v) = config.get("http2_enabled") {
-                if let Some(b) = v.bool() {
-                    c.http2_enabled = b;
-                } else {
-                    type_mismatches.push("http2_enabled");
+            if let Some(zv) = config.get("http2_enabled") {
+                match zv.bool() {
+                    Some(b) => http2_enabled = Some(b),
+                    None => type_mismatches.push("http2_enabled"),
                 }
             }
 
             // 是否启用 TCP Keep-Alive
-            if let Some(v) = config.get("tcp_keepalive") {
-                if let Some(b) = v.bool() {
-                    c.tcp_keepalive = b;
-                } else {
-                    type_mismatches.push("tcp_keepalive");
+            if let Some(zv) = config.get("tcp_keepalive") {
+                match zv.bool() {
+                    Some(b) => tcp_keepalive = Some(b),
+                    None => type_mismatches.push("tcp_keepalive"),
                 }
             }
 
-            // TCP Keep-Alive 间隔（秒），负值跳过
-            if let Some(v) = config.get("tcp_keepalive_interval") {
-                if let Some(l) = v.long() {
-                    if l >= 0 {
-                        c.tcp_keepalive_interval = l as u64;
-                    }
-                } else {
-                    type_mismatches.push("tcp_keepalive_interval");
+            // TCP Keep-Alive 间隔（秒），负值非法
+            if let Some(zv) = config.get("tcp_keepalive_interval") {
+                match zv.long() {
+                    Some(l) if l >= 0 => tcp_keepalive_interval = Some(l),
+                    Some(_) => negative_errors.push("tcp_keepalive_interval"),
+                    None => type_mismatches.push("tcp_keepalive_interval"),
                 }
             }
 
-            // 默认并发连接数限制，负值跳过
-            if let Some(v) = config.get("max_connections") {
-                if let Some(l) = v.long() {
-                    if l >= 0 {
-                        c.max_connections = l as usize;
-                    }
-                } else {
-                    type_mismatches.push("max_connections");
+            // 默认并发连接数限制，负值非法
+            if let Some(zv) = config.get("max_connections") {
+                match zv.long() {
+                    Some(l) if l >= 0 => max_connections = Some(l),
+                    Some(_) => negative_errors.push("max_connections"),
+                    None => type_mismatches.push("max_connections"),
                 }
             }
 
-            // 协程 gather/each 并发上限，负值跳过
+            // 协程 gather/each 并发上限，负值非法
             // 0 = 不限制；默认 64
-            if let Some(v) = config.get("fiber_max_concurrency") {
-                if let Some(l) = v.long() {
-                    if l >= 0 {
-                        c.fiber_max_concurrency = l as usize;
-                    }
-                } else {
-                    type_mismatches.push("fiber_max_concurrency");
+            if let Some(zv) = config.get("fiber_max_concurrency") {
+                match zv.long() {
+                    Some(l) if l >= 0 => fiber_max_concurrency = Some(l),
+                    Some(_) => negative_errors.push("fiber_max_concurrency"),
+                    None => type_mismatches.push("fiber_max_concurrency"),
                 }
+            }
+
+            // 应用阶段：仅当无任何错误时才写入所有配置项（原子性）
+            if !type_mismatches.is_empty() || !negative_errors.is_empty() {
+                return;
+            }
+
+            if let Some(v) = connect_timeout {
+                c.connect_timeout = v as u64;
+            }
+            if let Some(v) = request_timeout {
+                c.request_timeout = v as u64;
+            }
+            if let Some(v) = max_response_size {
+                c.max_response_size = v as usize;
+            }
+            if let Some(v) = follow_redirects {
+                c.follow_redirects = v;
+            }
+            if let Some(v) = max_redirects {
+                c.max_redirects = v as u32;
+            }
+            if let Some(v) = verify_ssl {
+                c.verify_ssl = v;
+            }
+            if let Some(v) = user_agent {
+                c.user_agent = v;
+            }
+            if let Some(p) = proxy {
+                c.proxy = p;
+            }
+            if let Some(v) = http2_enabled {
+                c.http2_enabled = v;
+            }
+            if let Some(v) = tcp_keepalive {
+                c.tcp_keepalive = v;
+            }
+            if let Some(v) = tcp_keepalive_interval {
+                c.tcp_keepalive_interval = v as u64;
+            }
+            if let Some(v) = max_connections {
+                c.max_connections = v as usize;
+            }
+            if let Some(v) = fiber_max_concurrency {
+                c.fiber_max_concurrency = v as usize;
             }
         });
+
+        // 合并类型错误与负值错误，统一返回。
+        // 仅在配置实际变更（无错误）后才清空请求级 Client 缓存：
+        // 有错误时未应用任何配置，缓存仍基于旧配置有效，无需清空。
+        if !type_mismatches.is_empty() || !negative_errors.is_empty() {
+            let mut msg = String::new();
+            if !type_mismatches.is_empty() {
+                msg.push_str(&format!(
+                    "以下配置项的类型与期望不符: {}",
+                    type_mismatches.join(", ")
+                ));
+            }
+            if !negative_errors.is_empty() {
+                if !msg.is_empty() {
+                    msg.push_str("; ");
+                }
+                let neg_errs: Vec<String> = negative_errors
+                    .iter()
+                    .map(|f| format!("{} 不能为负值", f))
+                    .collect();
+                msg.push_str(&format!("以下配置项为负值: {}", neg_errs.join(", ")));
+            }
+            return Err(msg);
+        }
 
         // 全局配置变更后，请求级 Client 缓存（按 OverrideKey 缓存）中已有的 Client
         // 是基于旧全局配置构建的（UA/keepalive/连接池/TLS 等），需清空以使后续构建
         // 的 Client 反映新配置。global_client（无覆盖时的全局单例）通过配置指纹比对
         // 在下次调用时自动重建，无需此处显式触发；但请求级 Client 缓存必须主动失效。
         clear_request_client_cache();
-
-        if !type_mismatches.is_empty() {
-            return Err(format!(
-                "以下配置项的类型与期望不符，未生效: {}",
-                type_mismatches.join(", ")
-            ));
-        }
         Ok(())
     }
 
@@ -2312,9 +2373,8 @@ impl PhpXhThreadPool {
             return Err("XHThreadPool 没有待执行请求，请先调用 add() 添加请求".to_string());
         }
 
-        let requests = std::mem::take(&mut self.requests);
-
         // 提前校验回调，避免 spawn 后才发现回调无效
+        // 必须在 std::mem::take 之前校验，避免 take 后回调无效导致 requests 丢失
         let callback_callable =
             ZendCallable::new(callback).map_err(|e| format!("无效的回调: {}", e))?;
 
@@ -2334,6 +2394,10 @@ impl PhpXhThreadPool {
             _ => None,
         };
         let streaming_enabled = on_chunk_callable.is_some() || on_headers_callable.is_some();
+
+        // 所有校验通过后才 take requests，与 XHMulti::execute_each 顺序一致，
+        // 避免回调校验失败时 requests 已被 take 走导致资源丢失
+        let requests = std::mem::take(&mut self.requests);
 
         let max_concurrency = self.max_concurrency;
         let max_response_size = self.max_response_size;
@@ -2762,6 +2826,8 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
     if let Some(resp) = &result.response {
         // 有响应时，elapsed_ms/error 由 fill_response_fields 统一写入，避免双重插入
         fill_response_fields(&mut response_ht, resp);
+        // 成功路径无错误类型，插入空字符串保持字段集与失败路径一致
+        let _ = response_ht.insert("error_type", "");
     } else {
         // 无响应（请求失败）时，补充 status/body/headers/body_size/url 等，
         // 确保失败路径字段集与成功路径（fill_response_fields）完全一致
@@ -2772,15 +2838,16 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         let _ = response_ht.insert("body_size", 0_i64);
         let _ = response_ht.insert("headers", ZendHashTable::new());
         let _ = response_ht.insert("url", String::new());
-        if let Some(err) = &result.error {
-            let _ = response_ht.insert("error", err.clone());
-            // 根据错误消息分类错误类型，便于 PHP 端按类型做差异化处理
-            let error_type = classify_error_type(err);
-            let _ = response_ht.insert("error_type", error_type);
-        } else {
-            // 无明确错误消息时仍标注 error_type，保持失败路径字段集一致
-            let _ = response_ht.insert("error_type", "unknown");
-        }
+        // error 无条件插入（None 时为空字符串），与 fill_response_fields 处理一致
+        let err = result.error.as_deref().unwrap_or("");
+        let _ = response_ht.insert("error", err);
+        // 根据错误消息分类错误类型，便于 PHP 端按类型做差异化处理；
+        // 无明确错误消息时标注 unknown，保持字段集一致
+        let error_type = match &result.error {
+            Some(e) => classify_error_type(e),
+            None => "unknown",
+        };
+        let _ = response_ht.insert("error_type", error_type);
     }
     response_ht
 }
@@ -2901,6 +2968,10 @@ fn response_to_php_array(response: &XhResponse) -> ZBox<ZendHashTable> {
     let mut ht = ZendHashTable::new();
     let _ = ht.insert("success", response.is_success());
     fill_response_fields(&mut ht, response);
+    // 成功路径无错误类型，插入空字符串保持字段集与失败路径一致
+    // （与 result_to_php_array 成功路径处理对齐，确保 execute() 单请求
+    // 与 XHMulti/XHThreadPool/fiber 路径返回的字段集完全一致）
+    let _ = ht.insert("error_type", "");
     ht
 }
 
@@ -2950,10 +3021,10 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
     let version = response.version().unwrap_or("");
     let _ = ht.insert("version", version);
 
-    // 错误信息
-    if let Some(err) = response.error() {
-        let _ = ht.insert("error", err);
-    }
+    // 错误信息（None 时插入空字符串，与 remote_addr/version 处理一致，
+    // 保证字段稳定存在，避免 PHP 端 $resp['error'] 触发 Undefined index）
+    let err = response.error().unwrap_or("");
+    let _ = ht.insert("error", err);
 
     // 请求耗时（毫秒）
     let _ = ht.insert("elapsed_ms", response.elapsed().as_millis() as i64);

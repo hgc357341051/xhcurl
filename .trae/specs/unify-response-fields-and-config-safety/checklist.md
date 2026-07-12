@@ -1,0 +1,13 @@
+- [x] P1-1: `XHThreadPool::executeEach` 在回调校验后才 take requests（避免无效回调导致 requests 丢失）
+- [x] P2-1: `result_to_php_array` + `response_to_php_array` 成功路径插入 `error_type` 空字符串（字段集稳定）
+- [x] P2-2: `fill_response_fields` 中 `error` 无条件插入（None 时为空字符串）
+- [x] P2-3: `setConfig` 7 处数值配置负值抛异常（与请求级 setter 一致）**BREAKING**
+- [x] P3-1: `setConfig` 两阶段校验（先全量校验，后统一应用，避免部分应用）
+- [x] 新测试文件 `rust/tests/php_unify_response_fields_config_test.php` 覆盖所有新增行为（10 个用例）
+- [x] 现有测试中受 BREAKING 影响的用例已更新断言（php_each_test.php 的 setConfig 负值测试）
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-targets --features php -- -D warnings` 通过（0 warning）
+- [x] `cargo test --lib --features php` 通过（99 个单元测试通过）
+- [x] 扩展编译成功并同步到 PHP 扩展目录
+- [x] 全部 PHP 测试文件串行运行全通过（18 个文件 / 458 用例 / 0 失败）
+- [x] 合理性评估报告输出

@@ -367,26 +367,39 @@ function test_threadpool_negative_workers_throws(): bool
     }
 }
 
-function test_set_config_negative_skipped(): bool
+function test_set_config_negative_throws(): bool
 {
+    // P2-3 BREAKING: 负值现在抛异常（之前静默跳过）
+    // P3-1: 两阶段校验，类型/负值错误时不应用任何配置
     $orig = XHCurl::getConfig();
-    XHCurl::setConfig([
-        'connect_timeout' => -10,
-        'request_timeout' => -20,
-        'max_redirects' => -3,
-        'max_response_size' => -100,
-        'max_connections' => -5,
-    ]);
-    $cfg = XHCurl::getConfig();
-    // 负值应被跳过，值应保持为巨大负值不会转为巨大正数
-    $ok = $cfg['connect_timeout'] < PHP_INT_MAX
-        && $cfg['request_timeout'] < PHP_INT_MAX
-        && $cfg['max_redirects'] < PHP_INT_MAX
-        && $cfg['max_response_size'] < PHP_INT_MAX
-        && $cfg['max_connections'] < PHP_INT_MAX;
-    // 恢复原配置
-    XHCurl::setConfig($orig);
-    return $ok;
+    try {
+        XHCurl::setConfig([
+            'connect_timeout' => -10,
+            'request_timeout' => -20,
+            'max_redirects' => -3,
+            'max_response_size' => -100,
+            'max_connections' => -5,
+        ]);
+        return false; // 应抛异常
+    } catch (\Throwable $e) {
+        $msg = $e->getMessage();
+        // 错误信息应包含所有负值字段名
+        $hasAllFields = strpos($msg, 'connect_timeout') !== false
+            && strpos($msg, 'request_timeout') !== false
+            && strpos($msg, 'max_redirects') !== false
+            && strpos($msg, 'max_response_size') !== false
+            && strpos($msg, 'max_connections') !== false
+            && strpos($msg, '负值') !== false;
+        if (!$hasAllFields) return false;
+        // P3-1: 两阶段校验，负值错误时不应应用任何配置
+        $cfg = XHCurl::getConfig();
+        $unchanged = $cfg['connect_timeout'] === $orig['connect_timeout']
+            && $cfg['request_timeout'] === $orig['request_timeout']
+            && $cfg['max_redirects'] === $orig['max_redirects']
+            && $cfg['max_response_size'] === $orig['max_response_size']
+            && $cfg['max_connections'] === $orig['max_connections'];
+        return $unchanged;
+    }
 }
 
 echo "\n=== 负数校验测试 ===\n";
@@ -396,7 +409,7 @@ check("负数 max_redirects 抛异常", test_negative_max_redirects_throws());
 check("XHMulti 负数 maxConcurrency 被 clamp", test_multi_negative_concurrency_clamped());
 check("XHMulti 负数 maxResponseSize 被 clamp", test_multi_negative_response_size_clamped());
 check("XHThreadPool 负数 workers 抛异常", test_threadpool_negative_workers_throws());
-check("setConfig 负值被跳过", test_set_config_negative_skipped());
+check("setConfig 负值抛异常且不应用任何配置", test_set_config_negative_throws());
 
 // =========== 配置一致性与提前检查测试 ===========
 
