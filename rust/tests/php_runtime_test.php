@@ -100,13 +100,14 @@ check("xhrun 黑名单拒绝 success=false", $r['success'] === false);
 check("xhrun 黑名单拒绝 error 含黑名单", strpos($r['error'], '黑名单') !== false);
 
 // 13. xhrun 负数 timeout 应抛出异常（配置校验错误，不是返回失败结果）
+//     P3-1: 错误措辞从「不能为负数」改为「不能为负值」
 $negTimeoutError = null;
 try {
     xhrun('echo', ['test'], ['timeout' => -1]);
 } catch (\Throwable $e) {
     $negTimeoutError = $e->getMessage();
 }
-check("xhrun 负数 timeout 抛异常", $negTimeoutError !== null && strpos($negTimeoutError, '负数') !== false);
+check("xhrun 负数 timeout 抛异常", $negTimeoutError !== null && strpos($negTimeoutError, '负值') !== false);
 
 // 14. xhrun 不经 shell 的注入防护
 $r = xhrun('echo', ['foo; rm -rf /']);

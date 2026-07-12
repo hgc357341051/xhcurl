@@ -1413,7 +1413,7 @@ impl PhpXhRequest {
     /// 返回的数组包含全部字段：
     ///   - success: bool       是否成功（2xx 且无错误）
     ///   - status: int         HTTP 状态码（请求失败时为 0）
-    ///   - body: string        响应体（UTF-8 文本）
+    ///   - body: string        响应体（二进制安全，可能非 UTF-8）
     ///   - body_size: int      响应体大小（字节）
     ///   - headers: array      所有响应头（键值对）
     ///   - url: string         最终 URL（可能因重定向变化）
@@ -1436,6 +1436,9 @@ impl PhpXhRequest {
         let client = global_client()?;
         let request = self.request.clone();
         let max_response_size = XhCurlManager::global().config().max_response_size;
+
+        // 记录请求开始时间，失败路径也返回真实耗时（与成功路径一致）
+        let start = std::time::Instant::now();
 
         // 预取 id 和 user_data（request 会被 move 进 async 块）
         let id = request
@@ -1468,7 +1471,7 @@ impl PhpXhRequest {
                         id,
                         user_data,
                         format_request_error_message(&e),
-                        std::time::Duration::from_secs(0),
+                        start.elapsed(),
                     );
                     crate::php_ext::result_to_php_array(&result)
                 }
@@ -1548,6 +1551,16 @@ impl PhpXhMulti {
     /// public XHMulti::isEmpty(): bool
     pub fn is_empty(&self) -> bool {
         self.requests.is_empty()
+    }
+
+    /// 清空待执行请求列表
+    ///
+    /// 清除所有已 add() 的请求，允许复用同一 XHMulti 对象。
+    ///
+    /// # PHP 签名
+    /// public XHMulti::clear(): void
+    pub fn clear(&mut self) {
+        self.requests.clear();
     }
 
     /// 设置最大并发数
@@ -2928,15 +2941,14 @@ pub(crate) fn fill_response_fields(ht: &mut ZBox<ZendHashTable>, response: &XhRe
     }
     let _ = ht.insert("headers", headers_ht);
 
-    // 远程服务器地址
-    if let Some(addr) = response.remote_addr() {
-        let _ = ht.insert("remote_addr", addr);
-    }
+    // 远程服务器地址（None 时插入空字符串，保证字段稳定存在，
+    // 避免 PHP 端 $resp['remote_addr'] 触发 Undefined index）
+    let addr = response.remote_addr().unwrap_or("");
+    let _ = ht.insert("remote_addr", addr);
 
-    // HTTP 协议版本
-    if let Some(version) = response.version() {
-        let _ = ht.insert("version", version);
-    }
+    // HTTP 协议版本（None 时插入空字符串，保证字段稳定存在）
+    let version = response.version().unwrap_or("");
+    let _ = ht.insert("version", version);
 
     // 错误信息
     if let Some(err) = response.error() {
@@ -3240,7 +3252,7 @@ pub fn xhrun(
     // ===== 2. 解析 options =====
     let timeout_raw = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64);
     if timeout_raw < 0 {
-        return Err(format!("timeout 不能为负数，得到 {}", timeout_raw));
+        return Err(format!("timeout 不能为负值，得到 {}", timeout_raw));
     }
     let timeout_secs: u64 = timeout_raw as u64;
     // max_output = 0 表示无限制（与 timeout = 0 语义一致）
@@ -3272,11 +3284,11 @@ pub fn xhrun(
         .to_lowercase();
 
     if !allow_list.is_empty() && !allow_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
-        return Ok(failure_result(command, -1, "命令不在白名单中"));
+        return Ok(failure_result(command, -1, "命令不在白名单中", "denied"));
     }
 
     if deny_list.iter().any(|c| c.to_lowercase() == cmd_basename) {
-        return Ok(failure_result(command, -1, "命令在黑名单中"));
+        return Ok(failure_result(command, -1, "命令在黑名单中", "denied"));
     }
 
     // ===== 4. 构建命令 =====
@@ -3375,7 +3387,12 @@ pub fn xhrun(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Ok(failure_result(command, -1, &format!("启动命令失败: {}", e)));
+            return Ok(failure_result(
+                command,
+                -1,
+                &format!("启动命令失败: {}", e),
+                "spawn_failed",
+            ));
         }
     };
 
@@ -3555,6 +3572,8 @@ pub fn xhrun(
     } else if exit_code != 0 {
         // 退出码非 0（非超时/截断）→ exit_error
         let _ = result.insert("error_type", "exit_error");
+        let _ = result.insert("error", format!("命令退出码非 0: {}", exit_code));
+        let _ = result.insert("command", command);
     }
     // 成功路径不插入 error_type（与 execute() 一致）
 
@@ -3608,7 +3627,12 @@ fn opt_string_vec(options: Option<&ZendHashTable>, key: &str) -> Vec<String> {
 }
 
 /// 构建 xhrun 的失败结果数组（命令未执行的情况）。
-fn failure_result(command: &str, exit_code: i64, error: &str) -> ZBox<ZendHashTable> {
+fn failure_result(
+    command: &str,
+    exit_code: i64,
+    error: &str,
+    error_type: &str,
+) -> ZBox<ZendHashTable> {
     let mut result = ZendHashTable::new();
     let _ = result.insert("success", false);
     let _ = result.insert("exit_code", exit_code);
@@ -3621,6 +3645,7 @@ fn failure_result(command: &str, exit_code: i64, error: &str) -> ZBox<ZendHashTa
     // error 与 command 分离，避免 error 字段内命令名重复
     let _ = result.insert("error", error);
     let _ = result.insert("command", command);
+    let _ = result.insert("error_type", error_type);
     result
 }
 

@@ -1,0 +1,15 @@
+- [x] P2-1: `fill_response_fields` 中 `remote_addr`/`version` None 时插入空字符串（保证字段集稳定）
+- [x] P2-2: `failure_result` 补 `error_type` 字段（denied/spawn_failed）
+- [x] P2-3: xhrun `exit_error` 路径补 `command` 和 `error` 字段
+- [x] P2-4: `XHRequest::execute()` 失败路径记录真实 `elapsed_ms`
+- [x] P2-5: XHMulti 暴露 `clear()` 方法
+- [x] P3-1: xhrun 错误措辞统一为"不能为负值"
+- [x] P3-2: execute() 文档注释 body 标注"二进制安全，可能非 UTF-8"
+- [x] 新测试文件 `rust/tests/php_fix_response_field_stability_test.php` 覆盖所有新增行为（15 个用例）
+- [x] 现有测试中受影响的断言已更新（php_runtime_test.php 第 110 行适配 P3-1 措辞）
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-targets --features php -- -D warnings` 通过（0 warning）
+- [x] `cargo test --lib --features php` 通过（99 个单元测试通过）
+- [x] 扩展编译成功并同步到 PHP 扩展目录
+- [x] 全部 PHP 测试文件串行运行全通过（17 个文件 / 448 用例 / 0 失败）
+- [x] 合理性评估报告输出
