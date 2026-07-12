@@ -406,7 +406,7 @@ XHCurl::setConfig([
     'follow_redirects'       => true,    // 跟随重定向
     'max_redirects'          => 10,      // 最大重定向次数
     'verify_ssl'             => true,    // 验证 SSL 证书
-    'http2_enabled'            => true,   // 是否启用 HTTP/2 协商（false 时强制 HTTP/1.1）
+    'http2_enabled'           => true,    // 是否启用 HTTP/2 协商（false 时强制 HTTP/1.1）
     'user_agent'             => 'XHCurl',// User-Agent
     'proxy'                  => null,    // 代理地址
     'tcp_keepalive'          => true,    // TCP keep-alive（连接复用）
@@ -451,8 +451,12 @@ XHCurl::setConfig([
 |------|------|
 | `json(array $data)` | JSON 请求体（自动设置 Content-Type: application/json） |
 | `form(array $data)` | 表单请求体（application/x-www-form-urlencoded） |
-| `body(string $data)` | 原始请求体（**二进制安全**，可传任意字节） |
+| `body(string $data)` | 原始请求体（**二进制安全**，可传任意字节）。空字符串设置空 body（合法，如 POST 空 body）；非字符串抛异常 |
 | `multipart(array $fields)` | 文件上传（multipart/form-data，**字段值二进制安全**） |
+
+> **`getBody()` 返回范围**：仅返回通过 `body()` 设置的原始字节请求体；
+> `json()`/`form()`/`multipart()` 设置的请求体不在此返回（需自行序列化），
+> 未设置时返回 `null`。
 
 > **二进制安全说明**：`body()` 与 `multipart()` 的字段值通过二进制安全接口读取
 > PHP 字符串（PHP 字符串本质是字节序列），不会因含非 UTF-8 字节而丢失或损坏，

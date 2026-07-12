@@ -279,7 +279,11 @@ impl PhpXhCurl {
                 if zv.is_null() {
                     proxy = Some(None);
                 } else if let Some(v) = zv.string() {
-                    proxy = Some(Some(v));
+                    if v.is_empty() {
+                        type_mismatches.push("proxy");
+                    } else {
+                        proxy = Some(Some(v));
+                    }
                 } else {
                     type_mismatches.push("proxy");
                 }
@@ -390,11 +394,7 @@ impl PhpXhCurl {
                 if !msg.is_empty() {
                     msg.push_str("; ");
                 }
-                let neg_errs: Vec<String> = negative_errors
-                    .iter()
-                    .map(|f| format!("{} 不能为负值", f))
-                    .collect();
-                msg.push_str(&format!("以下配置项为负值: {}", neg_errs.join(", ")));
+                msg.push_str(&format!("以下配置项为负值: {}", negative_errors.join(", ")));
             }
             return Err(msg);
         }
@@ -924,6 +924,9 @@ impl PhpXhRequest {
         match proxy {
             Some(zv) if !zv.is_null() => {
                 let proxy_str = zv.string().ok_or("proxy 参数必须是字符串")?;
+                if proxy_str.is_empty() {
+                    return Err("proxy 不能为空字符串，传 null 清除代理覆盖".to_string());
+                }
                 self_.request = self_.request.clone().proxy(proxy_str);
             }
             _ => {
@@ -2887,6 +2890,9 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         let _ = response_ht.insert("body_size", 0_i64);
         let _ = response_ht.insert("headers", ZendHashTable::new());
         let _ = response_ht.insert("url", String::new());
+        // remote_addr/version 无条件插入空字符串（字段始终存在，与成功路径一致）
+        let _ = response_ht.insert("remote_addr", "");
+        let _ = response_ht.insert("version", "");
         // error 无条件插入（None 时为空字符串），与 fill_response_fields 处理一致
         let err = result.error.as_deref().unwrap_or("");
         let _ = response_ht.insert("error", err);
@@ -3343,12 +3349,17 @@ pub fn xhrun(
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
+    // 空字符串 command 校验（fail-fast，避免 spawn 失败的模糊错误）
+    if command.is_empty() {
+        return Err("command 不能为空字符串".to_string());
+    }
+
     // ===== 1. 解析参数数组 =====
     let arg_vec: Vec<String> = match args {
         Some(ht) => {
             let mut v = Vec::with_capacity(ht.len());
             let mut iter = ht.iter();
-            for _ in 0..ht.len() {
+            for idx in 0..ht.len() {
                 match iter.next() {
                     Some((_, val)) => {
                         if let Some(s) = val.string() {
@@ -3358,7 +3369,7 @@ pub fn xhrun(
                         } else if let Some(d) = val.double() {
                             v.push(d.to_string());
                         } else {
-                            return Err("args 数组元素必须是标量类型".to_string());
+                            return Err(format!("args 数组第 {} 个元素必须是标量类型", idx));
                         }
                     }
                     None => break,
@@ -3388,6 +3399,11 @@ pub fn xhrun(
         }
     };
     let cwd: Option<String> = opt_string(options, "cwd");
+    if let Some(ref d) = cwd {
+        if d.is_empty() {
+            return Err("cwd 不能为空字符串".to_string());
+        }
+    }
     let env_ht: Option<&ZendHashTable> = options
         .and_then(|ht| ht.get("env"))
         .and_then(<&ZendHashTable as ext_php_rs::convert::FromZval>::from_zval);
@@ -3743,8 +3759,18 @@ fn opt_string_vec(options: Option<&ZendHashTable>, key: &str) -> Vec<String> {
         Some(a) => {
             let mut v = Vec::with_capacity(a.len());
             let _ = for_each_kv(a, |_key, val| {
-                if let Some(s) = val.string() {
-                    v.push(s.to_string());
+                // 支持标量转换（int/float/bool → string），与 args 一致；
+                // 跳过空字符串元素（无意义的白名单/黑名单条目）
+                let s = val
+                    .string()
+                    .map(|s| s.to_string())
+                    .or_else(|| val.long().map(|l| l.to_string()))
+                    .or_else(|| val.double().map(|d| d.to_string()))
+                    .or_else(|| val.bool().map(|b| b.to_string()));
+                if let Some(s) = s {
+                    if !s.is_empty() {
+                        v.push(s);
+                    }
                 }
                 Ok(())
             });

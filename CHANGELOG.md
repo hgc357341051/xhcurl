@@ -6,6 +6,73 @@
 ## [Unreleased]
 
 
+## [1.1.0] - 2026-07-12
+
+本版本为**次版本号升级**（含 BREAKING 变更），聚焦**响应字段集最终统一**
+（失败路径补 `remote_addr`/`version`）、**fail-fast 校验扩展**
+（`proxy`/`command`/`cwd` 空字符串、`allow`/`deny` 标量转换）、
+**空请求行为统一**（`fiber_gather([])` 抛异常）与**错误信息优化**。
+
+### 修复
+- **失败路径补 `remote_addr`/`version` 字段**：`result_to_php_array` 失败路径
+  （无响应分支）原缺这两个字段，导致 PHP 端访问 `$result['remote_addr']` 或
+  `$result['version']` 触发 `Undefined index` 警告。现无条件插入空字符串，
+  成功/失败路径字段集完全一致（10 个字段全部存在）。
+  影响：`execute()`/`XHMulti`/`XHThreadPool`/`fiber_await`/`gather`/`each` 所有失败结果。
+- **`proxy('')` 空字符串抛异常**：请求级 `proxy()` setter 原接受空字符串，
+  延迟到 `execute()` 时 `reqwest::Proxy::all("")` 报错。现 setter 时校验
+  （与 `bearerToken`/`customMethod`/`setId` 一致），fail-fast。
+- **`setConfig(['proxy' => ''])` 空字符串校验**：全局 `setConfig` 原接受空代理，
+  延迟到下次请求时报错，违反两阶段原子校验。现校验阶段收集到 type_mismatches。
+- **`xhrun('')` 空 command 抛异常**：原 `xhrun('', [], [])` 走到 `Command::new("")`
+  → `spawn()` 失败，错误信息含 OS 错误细节不友好。现函数开头校验，返回
+  `"command 不能为空字符串"`。
+- **`xhrun cwd` 空字符串校验**：原 `cwd => ''` 传给 `current_dir("")`，
+  OS 行为未定义（Linux 下 `chdir("")` 报 `ENOENT`）。现校验空字符串抛异常。
+- **`fiber_gather([])` 空请求抛异常**：原返回空数组 `Ok(ZendHashTable::new())`，
+  与 `fiber_each([])`/`XHMulti::execute([])`/`XHThreadPool::execute([])` 抛异常
+  行为不一致。现抛 `"XHCurl::gather 没有待执行请求"` 异常，四种执行模式行为统一 **BREAKING**。
+
+### 改进
+- **`allow`/`deny` 数组支持标量转换**：原仅接受字符串元素，int/float/bool 元素
+  被静默跳过（与 `args` 行为不一致）。现支持标量转换（int/float/bool → string），
+  与 `args` 一致；空字符串元素被跳过（无意义的白名单/黑名单条目）。
+- **`args` 错误信息含索引**：原 `"args 数组元素必须是标量类型"` 不含具体位置，
+  现改为 `"args 数组第 N 个元素必须是标量类型"`，便于定位。
+- **`setConfig` 负值错误信息去冗余**：原输出 `"以下配置项为负值: connect_timeout 不能为负值"`
+  （"为负值"与"不能为负值"语义重复），现改为 `"以下配置项为负值: connect_timeout"`
+  （仅字段名列表，与类型错误格式一致）。
+
+### 文档
+- **README setConfig 示例对齐修正**：`'http2_enabled'` 行多余缩进已修正。
+- **README `body()` 行为说明**：补充空字符串行为（合法，POST 空 body）。
+- **README `getBody()` 返回范围说明**：明确仅返回 `body()` 设置的原始字节请求体，
+  `json()`/`form()`/`multipart()` 不在此返回。
+
+### 测试
+- 新增 `php_unify_field_and_safety_test.php`（16 项），覆盖：
+  失败路径含 `remote_addr`/`version` 空字符串、`proxy('')` 抛异常、
+  `setConfig(['proxy' => ''])` 校验失败、`xhrun('')` 空 command 抛异常、
+  `xhrun cwd` 空字符串抛异常、`fiber_gather([])` 空请求抛异常、
+  `allow`/`deny` 标量转换与空字符串跳过、`args` 错误信息含索引、
+  `setConfig` 负值错误信息无冗余。
+- 更新 `php_invalid_proxy_test.php`：原测试期望 `setConfig(['proxy' => ''])`
+  静默通过、在 `execute()` 时报错（v1.0.7 行为）。本版 `setConfig` 对空字符串
+  fail-fast 抛异常，测试相应拆分为两组：空字符串 → `setConfig` 立即抛异常；
+  非空但非法代理（`"://"`）→ `execute()` 抛异常（保留"不 panic"保证）。
+
+### 破坏性变更与迁移
+- **`XHCurl::gather([])` 现抛异常**：原返回空数组，现抛 `"XHCurl::gather 没有待执行请求"` 异常。
+  迁移：调用前 `if (count($requests) > 0)` 检查，或用 `try/catch` 捕获。
+  与 `each`/`execute`/`execute_each` 空请求行为一致。
+- **`setConfig(['proxy' => ''])` 现抛异常**：原静默接受空代理（跳过赋值），
+  延迟到下次 `execute()` 时 `global_client()` 报错；现 `setConfig` 校验阶段
+  将空字符串收集到 `type_mismatches`，与类型不匹配一致 fail-fast。
+  迁移：清除代理请用 `setConfig(['proxy' => null])`。
+- 其余变更（`proxy('')`/`xhrun('')`/`cwd` 校验、失败路径补字段）为字段集/校验时机的
+  向后兼容增强，不影响已通过 `isset()` 判断的代码。
+
+
 ## [1.0.9] - 2026-07-12
 
 本版本聚焦**API 对称性补齐**（XHThreadPool 新增 `clear()`/`isRunning()`）、
