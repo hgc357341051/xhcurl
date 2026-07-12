@@ -256,28 +256,6 @@ impl XhResponse {
     pub fn has_error(&self) -> bool {
         self.error.is_some()
     }
-
-    /// 将响应信息转换为 HashMap（用于 PHP 数组转换）
-    pub fn to_info_map(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        map.insert("status".to_string(), self.status.to_string());
-        map.insert("url".to_string(), self.final_url.clone());
-        map.insert("elapsed".to_string(), format!("{:?}", self.elapsed));
-        map.insert("body_size".to_string(), self.body_size.to_string());
-        map.insert("is_success".to_string(), self.is_success.to_string());
-
-        if let Some(addr) = &self.remote_addr {
-            map.insert("remote_addr".to_string(), addr.clone());
-        }
-        if let Some(version) = &self.version {
-            map.insert("version".to_string(), version.clone());
-        }
-        if let Some(error) = &self.error {
-            map.insert("error".to_string(), error.clone());
-        }
-
-        map
-    }
 }
 
 impl Clone for XhResponse {
@@ -376,21 +354,6 @@ mod tests {
         // 模拟 500 响应
         response.status = 500;
         assert!(response.is_server_error());
-    }
-
-    /// 测试信息 Map 转换
-    #[test]
-    fn test_to_info_map() {
-        let response = XhResponse::from_error(
-            "连接失败".to_string(),
-            "https://example.com".to_string(),
-            Duration::from_secs(5),
-        );
-
-        let map = response.to_info_map();
-        assert_eq!(map.get("status"), Some(&"0".to_string()));
-        assert_eq!(map.get("url"), Some(&"https://example.com".to_string()));
-        assert_eq!(map.get("error"), Some(&"连接失败".to_string()));
     }
 
     // ===== TDD 新增测试：from_parts 构造函数 + 状态码边界 =====

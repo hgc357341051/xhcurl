@@ -343,8 +343,8 @@ pub fn fiber_gather(requests: Vec<XhRequest>) -> Result<ZBox<ZendHashTable>, Str
 pub fn fiber_each(requests: Vec<XhRequest>, callback: &Zval) -> Result<i64, String> {
     let total = requests.len();
     if total == 0 {
-        // 空请求列表：不 spawn 不 suspend，提前返回
-        return Ok(0);
+        // 空请求列表：与 XHMulti/XHThreadPool executeEach 行为一致，抛异常而非返回 Ok(0)
+        return Err("XHCurl::each 没有待执行请求".to_string());
     }
 
     // 1. 获取当前 Fiber

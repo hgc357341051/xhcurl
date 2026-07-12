@@ -6,6 +6,49 @@
 ## [Unreleased]
 
 
+## [1.0.8] - 2026-07-12
+
+本版本聚焦**响应数组字段集在所有路径（HTTP 成功/失败、xhrun 成功/失败、单请求/批量/协程）的最终统一**
+与**入口参数 fail-fast 校验**，并清理死代码。包含 1 项破坏性变更。
+
+### 修复
+- **xhrun 成功路径补 `error_type`/`error`/`command` 字段**：原 xhrun 成功路径仅返回
+  8 个字段（`success`/`exit_code`/`stdout`/`stderr`/`elapsed_ms`/`pid`/`timed_out`/`truncated`），
+  失败路径有 11 个（多 `error`/`command`/`error_type`），字段集不一致。
+  现成功路径插入空 `error_type=""`、空 `error=""` 与 `command`，使成功/失败字段集完全一致，
+  与 HTTP API（`execute()`/`XHMulti`/`XHThreadPool`/协程 `gather`/`each`）字段集统一的风格对齐。
+  修正源码错误注释（原声称"成功路径不插入 error_type（与 execute() 一致）"实际不一致）。
+- **`fiber_each` 空请求抛异常**：原 `XHCurl::each([], $cb)` 返回 `Ok(0)`，与
+  `XHMulti::executeEach`/`XHThreadPool::executeEach` 空请求抛异常行为不一致。
+  现抛出 `"XHCurl::each 没有待执行请求"` 异常，三种执行模式空请求行为对齐 **BREAKING**。
+- **`createRequest('')`/`new XHRequest('')` 空字符串 URL 抛异常**：原空字符串 URL 延迟到
+  `execute()` 才报错（fail-late），现 `createRequest` 与 `XHRequest::__construct` 入口即校验
+  （fail-fast），错误信息含"url"与"空"，避免用户构造了无效请求后链式调用多个 setter 才发现问题。
+
+### 重构
+- **删除 `XhResponse::to_info_map` 死代码**：该方法仅被其自身的单元测试调用，
+  生产代码无任何引用。删除方法及其测试 `test_to_info_map`。
+
+### 文档
+- **README `error_type` 说明修正**：原称"成功路径不含此字段"，实际第四轮已改为插入空字符串。
+  现更新为"成功时为空字符串（字段始终存在）"，并补充 `error` 字段"成功时为空字符串"说明。
+- **README xhrun 字段表同步**：更新 `error`/`error_type`/`command` 三字段说明，
+  标注"始终存在，成功/失败路径字段集一致"，并补充 `denied` 错误类型枚举值。
+
+### 测试
+- 新增 `php_unify_xhrun_fields_and_upgrade_test.php`（10 项），覆盖：
+  xhrun 成功路径含 `error_type=""`/`error=""`/`command`、xhrun 失败路径字段集与成功一致、
+  `XHCurl::each` 空请求抛异常、`XHCurl::createRequest('')` 与 `new XHRequest('')` 抛异常。
+- 更新 `php_each_test.php` 中 `test_each_empty_returns_0` → `test_each_empty_throws`
+  （断言改为 expect throws，与新行为一致）。
+
+### 破坏性变更与迁移
+- **`XHCurl::each([], $cb)` 现抛异常**：原返回 `0`，现抛 `"XHCurl::each 没有待执行请求"` 异常。
+  迁移：调用前 `if (count($requests) > 0)` 检查，或用 `try/catch` 捕获。
+- 其余变更（xhrun 成功路径补字段、`createRequest('')` 抛异常）为字段集/校验时机的向后兼容增强，
+  不影响已通过 `isset($r['error_type'])` 判断的代码（字段从无到有，`isset` 仍返回 `true`）。
+
+
 ## [1.0.7] - 2026-07-11
 
 本版本为三种执行模式（协程 `each` / `XHMulti::executeEach` / `XHThreadPool::executeEach`）的

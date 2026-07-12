@@ -577,8 +577,8 @@ XHCurl::setConfig([
 | `elapsed_ms` | int | 请求耗时（毫秒） |
 | `remote_addr` | string | 远程服务器地址（可选） |
 | `version` | string | HTTP 协议版本（可选，如 `HTTP/1.1`） |
-| `error` | string | 错误信息（失败时，可选） |
-| `error_type` | string | 错误类型枚举（失败时，可选；详见下文「失败路径字段说明」） |
+| `error` | string | 错误信息（失败时为错误描述，成功时为空字符串） |
+| `error_type` | string | 错误类型枚举（失败时为 `dns`/`timeout`/`ssl`/`connection`/`unknown`，成功时为空字符串；详见下文「失败路径字段说明」） |
 | `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()`/`userData()` 时） |
 
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
@@ -600,7 +600,7 @@ XHCurl::setConfig([
 | `remote_addr` | 可能为空或缺失 | 未建立连接时无远程地址 |
 | `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
-| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功路径不含此字段 |
+| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功时为空字符串（字段始终存在，与成功路径字段集一致） |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
 | `user_data` | 设置了 `setUserData()`/`userData()` 时存在 | 与成功路径一致 |
 
@@ -925,9 +925,9 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `pid` | int | 子进程 PID |
 | `timed_out` | bool | 是否因超时被终止 |
 | `truncated` | bool | 输出是否因超过 max_output 被截断 |
-| `error` | string | 错误信息（启动失败、超限等，可选） |
-| `error_type` | string | 错误类型枚举（失败时，可选；`timeout`/`output_too_large`/`exit_error`，详见下文） |
-| `command` | string | 失败时的命令名（白名单/黑名单拒绝、超时、截断等错误路径返回，可选） |
+| `error` | string | 错误信息（失败时为错误描述，成功时为空字符串） |
+| `error_type` | string | 错误类型枚举（失败时为 `timeout`/`output_too_large`/`exit_error`/`denied`，成功时为空字符串） |
+| `command` | string | 命令名（始终存在，成功/失败路径字段集一致） |
 
 ### 示例
 

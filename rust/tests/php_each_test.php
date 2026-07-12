@@ -73,13 +73,21 @@ check("each 回调可通过 id 关联提交顺序", count($ids) === 5 && in_arra
 
 echo "\n=== 空请求列表 ===\n";
 
-// 3. 空请求列表返回 0
-$emptyCount = XHCurl::run(function() {
-    return XHCurl::each(array(), function($result) {
-        // 不应执行
+// 3. 空请求列表抛异常（1.0.8 BREAKING：与 XHMulti/XHThreadPool executeEach 一致）
+$emptyThrew = false;
+$emptyMessage = '';
+try {
+    XHCurl::run(function() {
+        return XHCurl::each(array(), function($result) {
+            // 不应执行
+        });
     });
-});
-check("each 空列表返回 0", $emptyCount === 0);
+} catch (\Throwable $e) {
+    $emptyThrew = true;
+    $emptyMessage = $e->getMessage();
+}
+check("each 空列表抛异常", $emptyThrew);
+check("each 空列表异常 message 含'没有待执行请求'", strpos($emptyMessage, '没有待执行请求') !== false);
 
 echo "\n=== 单个请求 ===\n";
 

@@ -1,0 +1,14 @@
+- [x] P2-1: xhrun 成功路径插入 `error_type=""`/`error=""`/`command` 字段（字段集一致）
+- [x] P2-2: README 中 `error_type` 说明更新（"成功时为空字符串"非"不含此字段"）
+- [x] P3-1: `fiber_each` 空请求抛异常（与 XHMulti/XHThreadPool executeEach 一致）**BREAKING**
+- [x] P3-2: 删除 `to_info_map` 死代码及其测试
+- [x] P3-3: `create_request` 空字符串 URL 抛异常（fail-fast）
+- [x] 版本升级 1.0.7 → 1.0.8（Cargo.toml + CHANGELOG）
+- [x] 新测试文件覆盖所有新增行为
+- [x] 现有测试中受 BREAKING 影响的用例已更新断言（fiber_each 空请求）
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-targets --features php -- -D warnings` 通过
+- [x] `cargo test --lib --features php` 通过（98 个单元测试通过）
+- [x] 扩展编译成功并同步到 PHP 扩展目录
+- [x] 全部 PHP 测试文件串行运行全通过（19 个文件 / 441 用例 / 0 失败）
+- [x] 合理性评估报告输出

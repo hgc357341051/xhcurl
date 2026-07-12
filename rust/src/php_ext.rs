@@ -455,6 +455,9 @@ impl PhpXhCurl {
     /// # PHP 签名
     /// public static XHCurl::createRequest(string $url): XHRequest
     pub fn create_request(url: String) -> Result<PhpXhRequest, String> {
+        if url.is_empty() {
+            return Err("url 不能为空字符串".to_string());
+        }
         Ok(PhpXhRequest {
             request: XhRequest::new(url),
         })
@@ -537,10 +540,13 @@ impl PhpXhRequest {
     ///
     /// # PHP 签名
     /// public XHRequest::__construct(string $url)
-    pub fn __construct(url: String) -> Self {
-        Self {
-            request: XhRequest::new(url),
+    pub fn __construct(url: String) -> Result<Self, String> {
+        if url.is_empty() {
+            return Err("url 不能为空字符串".to_string());
         }
+        Ok(Self {
+            request: XhRequest::new(url),
+        })
     }
 
     /// 获取 HTTP 基本认证凭据
@@ -3645,8 +3651,13 @@ pub fn xhrun(
         let _ = result.insert("error_type", "exit_error");
         let _ = result.insert("error", format!("命令退出码非 0: {}", exit_code));
         let _ = result.insert("command", command);
+    } else {
+        // 成功路径：插入空 error_type/error 与 command，使成功/失败字段集一致
+        // （与 execute() 成功路径插入空 error_type 行为对齐）
+        let _ = result.insert("error", "");
+        let _ = result.insert("command", command);
+        let _ = result.insert("error_type", "");
     }
-    // 成功路径不插入 error_type（与 execute() 一致）
 
     Ok(result)
 }

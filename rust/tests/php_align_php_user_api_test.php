@@ -281,16 +281,16 @@ function test_xhrun_exit_error_error_type(): bool
 }
 check("xhrun 退出码非0 error_type=exit_error", test_xhrun_exit_error_error_type());
 
-function test_xhrun_success_no_error_type(): bool
+function test_xhrun_success_has_error_type(): bool
 {
-    // 成功路径不含 error_type 字段
+    // 1.0.8: 成功路径含 error_type 空字符串（字段集与失败路径一致）
     $r = xhrun('echo', ['hello']);
     if ($r['success'] !== true) {
         return false;
     }
-    return !array_key_exists('error_type', $r);
+    return array_key_exists('error_type', $r) && $r['error_type'] === '';
 }
-check("xhrun 成功不含 error_type", test_xhrun_success_no_error_type());
+check("xhrun 成功含 error_type 空字符串", test_xhrun_success_has_error_type());
 
 // 截断 → error_type=output_too_large
 $r = xhrun('sh', ['-c', 'yes A | head -c 1000'], ['max_output' => 100]);
