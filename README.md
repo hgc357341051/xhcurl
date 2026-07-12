@@ -516,7 +516,7 @@ XHCurl::setConfig([
 | `getId()` | `(): ?string` 获取请求 ID，未设置返回 null |
 | `getUserData()` | `(): ?string` 获取用户自定义数据（JSON 字符串），未设置返回 null |
 | `getCustomMethod()` | `(): ?string` 获取 `customMethod()` 设置的自定义方法，未设置返回 null |
-| `getBody()` | `(): ?string` 获取 `body()`/`json()`/`form()` 设置的请求体字符串，未设置返回 null |
+| `getBody()` | `(): ?string` 获取 `body()` 设置的原始字节请求体；`json()`/`form()`/`multipart()` 设置的请求体不在此返回（需自行序列化），未设置返回 null |
 
 > **timeout 类 0 值语义**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`
 > 传 `0` 表示跳过设置（使用全局默认值），而非"立即超时"；负值抛异常（见「迁移注意事项」的 BREAKING 变更）。
@@ -596,9 +596,9 @@ XHCurl::setConfig([
 | `body` | `""`（空字符串） | 无响应体 |
 | `body_size` | `0` | 无响应体 |
 | `headers` | `[]`（空数组） | 无响应头 |
-| `url` | 可能为空或缺失 | 无最终 URL 时为空字符串或不出现 |
-| `remote_addr` | 可能为空或缺失 | 未建立连接时无远程地址 |
-| `version` | 可能为空或缺失 | 无 HTTP 协议版本 |
+| `url` | 为空字符串 | 无最终 URL 时为空字符串（字段始终存在） |
+| `remote_addr` | 为空字符串 | 未建立连接时为空字符串（字段始终存在） |
+| `version` | 为空字符串 | 无 HTTP 协议版本时为空字符串（字段始终存在） |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
 | `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功时为空字符串（字段始终存在，与成功路径字段集一致） |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
@@ -668,6 +668,7 @@ try {
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行，详见下文 |
 | `count(): int` | 返回待执行请求数 |
 | `isEmpty(): bool` | 是否有待执行请求 |
+| `clear(): void` | 清空已添加的请求列表，允许复用同一 XHMulti 对象 |
 | `getMaxConcurrency(): int` | 获取配置的最大并发数（未配置返回 0） |
 | `getMaxResponseSize(): int` | 获取配置的最大响应体大小（未配置返回 0） |
 | `getTimeout(): int` | 获取配置的批量级超时秒数（未配置返回 0） |
@@ -749,6 +750,8 @@ $multi->executeEach(
 | `executeEach(callable $onResult, ?callable $onChunk = null, ?callable $onHeaders = null): int` | 流式回调执行（签名与 `XHMulti::executeEach` 一致，仅 CLI 可用） |
 | `count(): int` | 返回待执行请求数 |
 | `isEmpty(): bool` | 是否有待执行请求 |
+| `clear(): void` | 清空已添加的请求列表，允许复用同一 XHThreadPool 对象 |
+| `isRunning(): bool` | 线程池是否正在执行请求（执行期间 true，未启动/已完成 false） |
 | `getMaxConcurrency(): int` | 获取配置的最大并发数（未配置返回 0） |
 | `getMaxResponseSize(): int` | 获取配置的最大响应体大小（未配置返回 0） |
 | `getTimeout(): int` | 获取配置的批量级超时秒数（未配置返回 0） |
@@ -926,7 +929,7 @@ xhrun(string $command, array $args = [], array $options = []): array
 | `timed_out` | bool | 是否因超时被终止 |
 | `truncated` | bool | 输出是否因超过 max_output 被截断 |
 | `error` | string | 错误信息（失败时为错误描述，成功时为空字符串） |
-| `error_type` | string | 错误类型枚举（失败时为 `timeout`/`output_too_large`/`exit_error`/`denied`，成功时为空字符串） |
+| `error_type` | string | 错误类型枚举（失败时为 `timeout`/`output_too_large`/`exit_error`/`denied`/`spawn_failed`，成功时为空字符串） |
 | `command` | string | 命令名（始终存在，成功/失败路径字段集一致） |
 
 ### 示例

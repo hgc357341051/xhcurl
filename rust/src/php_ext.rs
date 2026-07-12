@@ -1009,43 +1009,55 @@ impl PhpXhRequest {
     ///
     /// 批量请求结果中通过 `id` 字段返回此值，便于 PHP 端关联请求与响应。
     /// 若未设置，结果中 `id` 默认为请求 URL。
+    /// 空字符串抛异常（与 `bearerToken` 一致），避免与"未设置"（null）不可区分。
     ///
     /// # PHP 签名
     /// public XHRequest::setId(string $id): $self_
     pub fn set_id(
         self_: &mut ZendClassObject<PhpXhRequest>,
         id: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if id.is_empty() {
+            return Err("id 不能为空字符串".to_string());
+        }
         self_.request = self_.request.clone().id(id);
-        self_
+        Ok(self_)
     }
 
     /// 设置请求 ID（`set_id` 的无前缀别名，向后兼容）
     ///
     /// 与 `setId()` 等价，结果中通过 `id` 字段返回此值。
     /// ext-php-rs 自动将 Rust snake_case `id` 映射为 PHP `id()`。
+    /// 空字符串抛异常（与 `setId()` 一致）。
     ///
     /// # PHP 签名
     /// public XHRequest::id(string $id): $self_
     pub fn id(
         self_: &mut ZendClassObject<PhpXhRequest>,
         id: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if id.is_empty() {
+            return Err("id 不能为空字符串".to_string());
+        }
         self_.request = self_.request.clone().id(id);
-        self_
+        Ok(self_)
     }
 
     /// 设置请求 URL
     /// 允许在构造后变更 URL，便于复用已配置的请求模板。
+    /// 空字符串抛异常（fail-fast，不延迟到 execute）。
     ///
     /// # PHP 签名
     /// public XHRequest::url(string $url): $self_
     pub fn url(
         self_: &mut ZendClassObject<PhpXhRequest>,
         url: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if url.is_empty() {
+            return Err("url 不能为空字符串".to_string());
+        }
         self_.request = self_.request.clone().url(url);
-        self_
+        Ok(self_)
     }
 
     /// 设置 HTTP 基本认证
@@ -1219,15 +1231,24 @@ impl PhpXhRequest {
     ///
     /// 对应 curl 的 CURLOPT_CUSTOMREQUEST。
     /// 用于非标准 HTTP 方法（CONNECT/TRACE/PROPFIND 等）。
+    /// 空字符串抛异常（与 `bearerToken` 一致）；含空格/控制字符抛异常
+    /// （RFC 7230 要求 method 为 token）。
     ///
     /// # PHP 签名
     /// public XHRequest::customMethod(string $method): $self_
     pub fn custom_method(
         self_: &mut ZendClassObject<PhpXhRequest>,
         method: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if method.is_empty() {
+            return Err("customMethod 不能为空字符串".to_string());
+        }
+        // RFC 7230: method = token，禁止空格与控制字符
+        if method.chars().any(|c| c.is_ascii_control() || c == ' ') {
+            return Err("customMethod 不能含空格或控制字符".to_string());
+        }
         self_.request = self_.request.clone().custom_method(method);
-        self_
+        Ok(self_)
     }
 
     /// 设置 Range 请求范围
@@ -2160,6 +2181,28 @@ impl PhpXhThreadPool {
     /// public XHThreadPool::isEmpty(): bool
     pub fn is_empty(&self) -> bool {
         self.requests.is_empty()
+    }
+
+    /// 清空待执行请求列表
+    ///
+    /// 清除所有已 add() 的请求，允许复用同一 XHThreadPool 对象。
+    /// 与 `XHMulti::clear()` 行为一致。
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::clear(): void
+    pub fn clear(&mut self) {
+        self.requests.clear();
+    }
+
+    /// 检查线程池是否正在执行请求
+    ///
+    /// 返回内部线程池的工作状态。`execute()`/`executeEach()` 执行期间为 true，
+    /// 执行完成或未启动时为 false。PHP 用户可在异步场景判断是否可安全修改配置。
+    ///
+    /// # PHP 签名
+    /// public XHThreadPool::isRunning(): bool
+    pub fn is_running(&self) -> bool {
+        self.pool.as_ref().map(|p| p.is_running()).unwrap_or(false)
     }
 
     /// 设置最大并发数（工作线程数量）
@@ -3332,10 +3375,13 @@ pub fn xhrun(
         return Err(format!("timeout 不能为负值，得到 {}", timeout_raw));
     }
     let timeout_secs: u64 = timeout_raw as u64;
-    // max_output = 0 表示无限制（与 timeout = 0 语义一致）
+    // max_output = 0 表示无限制（与 timeout = 0 语义一致）；负值抛异常（与 timeout 一致）
     let max_output: usize = {
         let v = opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64);
-        if v <= 0 {
+        if v < 0 {
+            return Err(format!("max_output 不能为负值，得到 {}", v));
+        }
+        if v == 0 {
             usize::MAX
         } else {
             v as usize

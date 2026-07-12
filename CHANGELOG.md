@@ -6,6 +6,57 @@
 ## [Unreleased]
 
 
+## [1.0.9] - 2026-07-12
+
+本版本聚焦**API 对称性补齐**（XHThreadPool 新增 `clear()`/`isRunning()`）、
+**fail-fast 校验扩展**（`url`/`setId`/`customMethod` 空字符串、`max_output` 负值）与
+**文档同步**。包含 2 项破坏性变更。
+
+### 新增
+- **`XHThreadPool::clear()` 方法**：与 `XHMulti::clear()` 对齐，清空已添加的请求列表，
+  允许复用同一 `XHThreadPool` 对象。此前 `XHThreadPool` 无此方法，PHP 用户无法手动清空。
+- **`XHThreadPool::isRunning()` 方法**：暴露内部线程池工作状态，
+  `execute()`/`executeEach()` 执行期间为 true，未启动/已完成时为 false。
+  PHP 用户可在异步场景判断是否可安全修改配置。
+
+### 修复
+- **`url('')`/`setId('')`/`id('')` 空字符串抛异常**：原 `url('')`/`setId('')` 接受空字符串
+  并存储为 `Some("")`，与"未设置"（`None`）不可区分。`getId()` 返回空字符串而非 null，
+  README 文档说"未设置返回 null"但实际返回空字符串。现空字符串抛异常
+  （与 `bearerToken`/`basicAuth` 一致），fail-fast **BREAKING**。
+- **`customMethod('')` 空字符串与控制字符抛异常**：原 `customMethod('')` 接受空字符串，
+  `customMethod("GET POST")` 含空格不被拒绝。现空字符串抛异常（与 `bearerToken` 一致），
+  含空格/控制字符抛异常（RFC 7230 要求 method 为 token）**BREAKING**。
+- **`xhrun` `max_output` 负值抛异常**：原 `max_output: -1` 静默变为无限制（`usize::MAX`），
+  与 `timeout` 负值抛异常不一致。现负值抛异常（与 `timeout` 一致），0 仍表示无限制 **BREAKING**。
+
+### 文档
+- **README XHMulti/XHThreadPool 方法表补全 `clear()`**：原 `XHMulti::clear()` 代码存在
+  但 README 未列出。现两个类的方法表均列出 `clear()`，`XHThreadPool` 表新增 `isRunning()`。
+- **README 失败路径字段描述修正**：原称 `url`/`remote_addr`/`version` "可能为空或缺失"，
+  但代码中这些字段无条件插入（None 时为空字符串）。现改为"为空字符串（字段始终存在）"，
+  与实际行为一致。
+- **README `getBody()` 描述修正**：原称获取 `body()`/`json()`/`form()` 设置的请求体，
+  但代码仅返回 `body()` 设置的原始字节体。现明确说明 `json()`/`form()`/`multipart()`
+  设置的请求体不在此返回。
+- **README xhrun `error_type` 补全 `spawn_failed`**：原列出 4 个枚举值，
+  缺少 `spawn_failed`（子进程 spawn 失败时返回）。现补全为 5 个值。
+
+### 测试
+- 新增 `php_unify_clear_and_validation_test.php`（12 项），覆盖：
+  `XHThreadPool::clear()` 清空请求、`XHThreadPool::isRunning()` 状态查询、
+  `url('')`/`setId('')`/`id('')`/`customMethod('')` 空字符串抛异常、
+  `customMethod("GET POST")` 含空格抛异常、`xhrun` `max_output` 负值抛异常。
+
+### 破坏性变更与迁移
+- **`url('')`/`setId('')`/`id('')`/`customMethod('')` 现抛异常**：原接受空字符串。
+  迁移：调用前检查字符串非空，或用 `try/catch` 捕获。实际场景中空字符串往往是上游 bug。
+- **`customMethod` 含空格/控制字符现抛异常**：原不校验。
+  迁移：确保传入的 method 为合法 RFC 7230 token（无空格/控制字符）。
+- **`xhrun` `max_output` 负值现抛异常**：原静默变为无限制。
+  迁移：用 `0` 表示无限制（语义不变），负值无意义应移除。
+
+
 ## [1.0.8] - 2026-07-12
 
 本版本聚焦**响应数组字段集在所有路径（HTTP 成功/失败、xhrun 成功/失败、单请求/批量/协程）的最终统一**
