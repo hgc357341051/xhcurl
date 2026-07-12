@@ -16,6 +16,7 @@
 // |   修改后返回同一对象，实现 PHP 端 $this 链式调用。                      |
 // +----------------------------------------------------------------------+
 
+use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 use ext_php_rs::boxed::ZBox;
@@ -189,6 +190,8 @@ impl PhpXhCurl {
         // 收集类型不匹配与负值的配置项名，便于向用户反馈哪些配置未生效
         let mut type_mismatches: Vec<&str> = Vec::new();
         let mut negative_errors: Vec<&str> = Vec::new();
+        // 收集值格式校验错误（如 base_uri 非法 URL、base_headers 非标量值）的详细消息
+        let mut format_errors: Vec<String> = Vec::new();
 
         // 使用闭包修改配置，避免手动管理锁
         // 采用两阶段（校验 → 应用）实现原子性：
@@ -211,6 +214,10 @@ impl PhpXhCurl {
             let mut tcp_keepalive_interval: Option<i64> = None;
             let mut max_connections: Option<i64> = None;
             let mut fiber_max_concurrency: Option<i64> = None;
+            // base_uri: None=未传, Some(None)=传 null/空串 清除, Some(Some(s))=设置基础 URI
+            let mut base_uri: Option<Option<String>> = None;
+            // base_headers: None=未传, Some(map)=设置（空 map 等同于清除）
+            let mut base_headers: Option<HashMap<String, String>> = None;
 
             // 连接超时（秒），负值非法
             if let Some(zv) = config.get("connect_timeout") {
@@ -333,8 +340,88 @@ impl PhpXhCurl {
                 }
             }
 
+            // 全局基础 URI
+            // 接受 string（设置基础 URI）或 null（清除），与 getConfig() 返回 null 对称。
+            // 空字符串等同于清除（应用时设为 None）。确保 getConfig() → setConfig($orig) 往返不报错。
+            // 非空字符串需通过 reqwest::Url::parse 校验格式，非法收集到 format_errors。
+            if let Some(zv) = config.get("base_uri") {
+                if zv.is_null() {
+                    base_uri = Some(None);
+                } else if let Some(v) = zv.string() {
+                    if v.is_empty() {
+                        base_uri = Some(None);
+                    } else if reqwest::Url::parse(&v).is_err() {
+                        format_errors.push(format!("base_uri 不是合法的 URL: {}", v));
+                    } else {
+                        base_uri = Some(Some(v));
+                    }
+                } else {
+                    type_mismatches.push("base_uri");
+                }
+            }
+
+            // 全局默认请求头
+            // 接受关联数组（string => scalar）或 null（清除）。
+            // 空数组等同于清除（应用时设为空 HashMap）。
+            // 整数键与非标量值收集到 format_errors（fail-fast，避免静默丢失 header）。
+            if let Some(zv) = config.get("base_headers") {
+                if zv.is_null() {
+                    base_headers = Some(HashMap::new());
+                } else if let Some(arr) = zv.array() {
+                    let mut headers_map: HashMap<String, String> = HashMap::new();
+                    let mut headers_errors: Vec<String> = Vec::new();
+                    // 手动迭代避免嵌套闭包对 format_errors 的双重可变借用
+                    let len = arr.len();
+                    let mut iter = arr.iter();
+                    for _ in 0..len {
+                        match iter.next() {
+                            Some((key, val)) => {
+                                if key.is_long() {
+                                    headers_errors.push(
+                                        "base_headers 不支持列表数组（整数键），请使用关联数组 ['name' => 'value'] 形式"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
+                                let k = key.to_string();
+                                // 标量值转字符串（与 query()/cookies() 一致：二进制安全优先）
+                                let val_str = if let Some(bytes) = val.binary::<u8>() {
+                                    String::from_utf8_lossy(&bytes).into_owned()
+                                } else if let Some(s) = val.string() {
+                                    s
+                                } else if let Some(l) = val.long() {
+                                    l.to_string()
+                                } else if let Some(d) = val.double() {
+                                    d.to_string()
+                                } else if let Some(b) = val.bool() {
+                                    if b { "1" } else { "0" }.to_string()
+                                } else {
+                                    headers_errors.push(format!(
+                                        "base_headers 项 '{}' 的值必须是标量（string/int/float/bool）",
+                                        k
+                                    ));
+                                    continue;
+                                };
+                                headers_map.insert(k, val_str);
+                            }
+                            None => break,
+                        }
+                    }
+                    if !headers_errors.is_empty() {
+                        format_errors.extend(headers_errors);
+                    } else {
+                        base_headers = Some(headers_map);
+                    }
+                } else {
+                    type_mismatches.push("base_headers");
+                }
+            }
+
             // 应用阶段：仅当无任何错误时才写入所有配置项（原子性）
-            if !type_mismatches.is_empty() || !negative_errors.is_empty() {
+            if !type_mismatches.is_empty()
+                || !negative_errors.is_empty()
+                || !format_errors.is_empty()
+            {
                 return;
             }
 
@@ -377,12 +464,18 @@ impl PhpXhCurl {
             if let Some(v) = fiber_max_concurrency {
                 c.fiber_max_concurrency = v as usize;
             }
+            if let Some(v) = base_uri {
+                c.base_uri = v;
+            }
+            if let Some(v) = base_headers {
+                c.base_headers = v;
+            }
         });
 
-        // 合并类型错误与负值错误，统一返回。
+        // 合并类型错误、负值错误与格式校验错误，统一返回。
         // 仅在配置实际变更（无错误）后才清空请求级 Client 缓存：
         // 有错误时未应用任何配置，缓存仍基于旧配置有效，无需清空。
-        if !type_mismatches.is_empty() || !negative_errors.is_empty() {
+        if !type_mismatches.is_empty() || !negative_errors.is_empty() || !format_errors.is_empty() {
             let mut msg = String::new();
             if !type_mismatches.is_empty() {
                 msg.push_str(&format!(
@@ -395,6 +488,15 @@ impl PhpXhCurl {
                     msg.push_str("; ");
                 }
                 msg.push_str(&format!("以下配置项为负值: {}", negative_errors.join(", ")));
+            }
+            if !format_errors.is_empty() {
+                if !msg.is_empty() {
+                    msg.push_str("; ");
+                }
+                msg.push_str(&format!(
+                    "以下配置项的值不合法: {}",
+                    format_errors.join("; ")
+                ));
             }
             return Err(msg);
         }
@@ -438,6 +540,16 @@ impl PhpXhCurl {
 
         // 代理地址（None 时为 null，与 setConfig 接受 null 对称）
         let _ = ht.insert("proxy", config.proxy.as_deref());
+
+        // 全局基础 URI（None 时为 null，与 setConfig 接受 null 对称）
+        let _ = ht.insert("base_uri", config.base_uri.as_deref());
+
+        // 全局默认请求头（HashMap 转为关联数组，空时为空数组）
+        let mut base_headers_ht = ZendHashTable::new();
+        for (k, v) in config.base_headers.iter() {
+            let _ = base_headers_ht.insert(k.as_str(), v.as_str());
+        }
+        let _ = ht.insert("base_headers", base_headers_ht);
 
         Ok(ht)
     }
@@ -1745,6 +1857,256 @@ impl PhpXhRequest {
             return Err("contentType 不能为空字符串".to_string());
         }
         self_.request = self_.request.clone().header("Content-Type", &type_);
+        Ok(self_)
+    }
+
+    /// 请求级批量设置多个选项，内部按 key 分发到对应 setter。
+    ///
+    /// 支持的 key：
+    /// - `timeout`/`timeout_ms`/`connect_timeout`/`connect_timeout_ms`: int（负值非法）
+    /// - `headers`/`query`/`json`/`form`: array
+    /// - `accept`/`content_type`/`user_agent`/`referer`/`encoding`/`range`/`proxy`: string
+    /// - `body`: string（二进制安全）
+    /// - `verify_ssl`/`follow_redirects`: bool
+    /// - `max_redirects`: int（负值非法）
+    ///
+    /// 未知 key 抛异常（fail-fast）。null 值跳过。headers 数组中 null 值跳过。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::withOptions(array $options): $this
+    pub fn with_options<'a>(
+        self_: &'a mut ZendClassObject<PhpXhRequest>,
+        options: &ZendHashTable,
+    ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
+        // 手动迭代避免嵌套闭包对 self_ 的双重可变借用（参考 base_headers 校验的实现）
+        let len = options.len();
+        let mut iter = options.iter();
+        for _ in 0..len {
+            let (key, val) = match iter.next() {
+                Some(kv) => kv,
+                None => break,
+            };
+            // null 值跳过（不设置该项）
+            if val.is_null() {
+                continue;
+            }
+            let key_str = key.to_string();
+            match key_str.as_str() {
+                "timeout" => {
+                    let v = val
+                        .long()
+                        .ok_or_else(|| "withOptions: timeout 必须为整数".to_string())?;
+                    if v < 0 {
+                        return Err(
+                            "withOptions: timeout 不能为负值，0 = 使用全局默认超时".to_string()
+                        );
+                    }
+                    self_.request = self_.request.clone().request_timeout(v as u64);
+                }
+                "timeout_ms" => {
+                    let v = val
+                        .long()
+                        .ok_or_else(|| "withOptions: timeout_ms 必须为整数".to_string())?;
+                    if v < 0 {
+                        return Err("withOptions: timeout_ms 不能为负值".to_string());
+                    }
+                    self_.request = self_.request.clone().request_timeout_ms(v as u64);
+                }
+                "connect_timeout" => {
+                    let v = val
+                        .long()
+                        .ok_or_else(|| "withOptions: connect_timeout 必须为整数".to_string())?;
+                    if v < 0 {
+                        return Err("withOptions: connect_timeout 不能为负值".to_string());
+                    }
+                    self_.request = self_.request.clone().connect_timeout(v as u64);
+                }
+                "connect_timeout_ms" => {
+                    let v = val
+                        .long()
+                        .ok_or_else(|| "withOptions: connect_timeout_ms 必须为整数".to_string())?;
+                    if v < 0 {
+                        return Err("withOptions: connect_timeout_ms 不能为负值".to_string());
+                    }
+                    self_.request = self_.request.clone().connect_timeout_ms(v as u64);
+                }
+                "headers" => {
+                    let headers_ht = val
+                        .array()
+                        .ok_or_else(|| "withOptions: headers 必须为数组".to_string())?;
+                    // 先收集并校验全部键值对（与 headers() 一致），全部通过后再存储
+                    let mut pairs: Vec<(String, String)> = Vec::new();
+                    for_each_kv(headers_ht, |h_key, h_val| {
+                        // null 值跳过
+                        if h_val.is_null() {
+                            return Ok(());
+                        }
+                        if h_key.is_long() {
+                            return Err(
+                                "withOptions headers: 不支持列表数组（整数键），请使用关联数组"
+                                    .to_string(),
+                            );
+                        }
+                        let name = h_key.to_string();
+                        let value = scalar_to_string(h_val).ok_or_else(|| {
+                            format!("withOptions headers: header '{}' 的值不是标量", name)
+                        })?;
+                        validate_header(&name, &value)?;
+                        pairs.push((name, value));
+                        Ok(())
+                    })?;
+                    for (name, value) in pairs {
+                        self_.request = self_.request.clone().header(&name, &value);
+                    }
+                }
+                "query" => {
+                    let query_ht = val
+                        .array()
+                        .ok_or_else(|| "withOptions: query 必须为数组".to_string())?;
+                    let mut query_params: Vec<(String, String)> = Vec::new();
+                    let mut idx: usize = 0;
+                    for_each_kv(query_ht, |q_key, q_val| {
+                        idx += 1;
+                        // null 值跳过
+                        if q_val.is_null() {
+                            return Ok(());
+                        }
+                        let q_key_str = q_key.to_string();
+                        let q_val_str = scalar_to_string(q_val).ok_or_else(|| {
+                            format!(
+                                "withOptions query: 第 {} 个元素值必须是标量（字段 '{}'）",
+                                idx, q_key_str
+                            )
+                        })?;
+                        query_params.push((q_key_str, q_val_str));
+                        Ok(())
+                    })?;
+                    self_.request = self_.request.clone().query(query_params);
+                }
+                "accept" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: accept 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: accept 不能为空字符串".to_string());
+                    }
+                    self_.request = self_.request.clone().header("Accept", &v);
+                }
+                "content_type" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: content_type 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: content_type 不能为空字符串".to_string());
+                    }
+                    self_.request = self_.request.clone().header("Content-Type", &v);
+                }
+                "body" => {
+                    let bytes = if let Some(b) = val.binary::<u8>() {
+                        b
+                    } else if let Some(s) = val.string() {
+                        s.into_bytes()
+                    } else {
+                        return Err("withOptions: body 必须为字符串或二进制数据".to_string());
+                    };
+                    self_.request = self_.request.clone().body_bytes(bytes);
+                }
+                "json" => {
+                    let json_ht = val
+                        .array()
+                        .ok_or_else(|| "withOptions: json 必须为数组".to_string())?;
+                    let json_str = php_array_to_json(json_ht)
+                        .map_err(|e| format!("withOptions: JSON 序列化失败: {}", e))?;
+                    self_.request = self_
+                        .request
+                        .clone()
+                        .body_json_str(&json_str)
+                        .map_err(|e| format!("withOptions: 设置 JSON body 失败: {}", e))?;
+                }
+                "form" => {
+                    let form_ht = val
+                        .array()
+                        .ok_or_else(|| "withOptions: form 必须为数组".to_string())?;
+                    let form = php_array_to_form(form_ht)?;
+                    self_.request = self_.request.clone().body_form(form);
+                }
+                "user_agent" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: user_agent 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: user_agent 不能为空字符串".to_string());
+                    }
+                    XhRequest::validate_ascii_header_value("user_agent", &v)
+                        .map_err(|e| e.to_string())?;
+                    self_.request = self_.request.clone().user_agent(v);
+                }
+                "referer" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: referer 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: referer 不能为空字符串".to_string());
+                    }
+                    XhRequest::validate_ascii_header_value("referer", &v)
+                        .map_err(|e| e.to_string())?;
+                    self_.request = self_.request.clone().referer(v);
+                }
+                "encoding" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: encoding 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: encoding 不能为空字符串".to_string());
+                    }
+                    XhRequest::validate_ascii_header_value("encoding", &v)
+                        .map_err(|e| e.to_string())?;
+                    self_.request = self_.request.clone().encoding(v);
+                }
+                "range" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: range 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: range 不能为空字符串".to_string());
+                    }
+                    XhRequest::validate_ascii_header_value("range", &v)
+                        .map_err(|e| e.to_string())?;
+                    self_.request = self_.request.clone().range(v);
+                }
+                "proxy" => {
+                    let v = val
+                        .string()
+                        .ok_or_else(|| "withOptions: proxy 必须为字符串".to_string())?;
+                    if v.is_empty() {
+                        return Err("withOptions: proxy 不能为空字符串".to_string());
+                    }
+                    self_.request = self_.request.clone().proxy(v);
+                }
+                "verify_ssl" => {
+                    let v = val
+                        .bool()
+                        .ok_or_else(|| "withOptions: verify_ssl 必须为布尔值".to_string())?;
+                    self_.request = self_.request.clone().verify_ssl(v);
+                }
+                "follow_redirects" => {
+                    let v = val
+                        .bool()
+                        .ok_or_else(|| "withOptions: follow_redirects 必须为布尔值".to_string())?;
+                    self_.request = self_.request.clone().follow_redirects(v);
+                }
+                "max_redirects" => {
+                    let v = val
+                        .long()
+                        .ok_or_else(|| "withOptions: max_redirects 必须为整数".to_string())?;
+                    if v < 0 {
+                        return Err("withOptions: max_redirects 不能为负值".to_string());
+                    }
+                    self_.request = self_.request.clone().max_redirects(v as u32);
+                }
+                _ => return Err(format!("withOptions: 不支持的选项 key: {}", key_str)),
+            }
+        }
         Ok(self_)
     }
 
@@ -3559,6 +3921,24 @@ fn php_array_to_form(ht: &ZendHashTable) -> Result<Vec<(String, String)>, String
     })?;
 
     Ok(form)
+}
+
+/// 将 Zval 标量值转换为字符串（二进制安全优先）。
+///
+/// 支持 string/int/float/bool/binary 类型。null 与非标量（数组/对象/资源）返回 None，
+/// 由调用方决定如何处理（跳过或报错）。与 query()/form()/cookies() 的标量转换逻辑一致。
+fn scalar_to_string(val: &Zval) -> Option<String> {
+    if let Some(bytes) = val.binary::<u8>() {
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    } else if let Some(s) = val.string() {
+        Some(s)
+    } else if let Some(l) = val.long() {
+        Some(l.to_string())
+    } else if let Some(d) = val.double() {
+        Some(d.to_string())
+    } else {
+        val.bool().map(|b| if b { "1" } else { "0" }.to_string())
+    }
 }
 
 /// 校验 HTTP 请求头名称与值的合法性（fail-fast）。

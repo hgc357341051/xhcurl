@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use crate::curl::XhCurlManager;
 use crate::error::{XhCurlError, XhCurlResult};
 use crate::header::HeaderManager;
 
@@ -798,11 +799,30 @@ impl XhRequest {
     /// # 返回
     /// 配置好的 reqwest::RequestBuilder
     pub fn to_reqwest(&self, client: &reqwest::Client) -> XhCurlResult<reqwest::RequestBuilder> {
+        // 读取全局配置快照（base_uri/base_headers 等），与 execute() 读取 max_response_size 一致
+        let global_config = XhCurlManager::global().config();
+
+        // 全局基础 URI 拼接：
+        // 当请求 URL 为相对路径（以 / 开头）且全局设置了 base_uri 时，拼接为完整 URL。
+        // 绝对 URL（http://、https://）不拼接。拼接时去掉 base_uri 末尾的 / 避免双斜杠。
+        let is_absolute = self.url.starts_with("http://") || self.url.starts_with("https://");
+        let effective_url = if !is_absolute && self.url.starts_with('/') {
+            if let Some(base) = &global_config.base_uri {
+                let base_trimmed = base.trim_end_matches('/');
+                format!("{}{}", base_trimmed, self.url)
+            } else {
+                self.url.clone()
+            }
+        } else {
+            self.url.clone()
+        };
+
         // 早期 URL 校验：reqwest::Client::get 等方法将 URL 解析错误延迟到
         // send() 才暴露。此处提前用 Url::parse 校验，给出更清晰的错误信息，
         // 并在异步执行前即可发现空/非法 URL（fail-fast，PHP 边界输入校验）。
-        reqwest::Url::parse(&self.url)
-            .map_err(|e| XhCurlError::Generic(format!("无效的请求 URL {:?}: {}", self.url, e)))?;
+        reqwest::Url::parse(&effective_url).map_err(|e| {
+            XhCurlError::Generic(format!("无效的请求 URL {:?}: {}", effective_url, e))
+        })?;
 
         // 请求级 Client 配置覆盖：reqwest 的部分配置（重定向策略、SSL 验证、
         // 代理、连接超时）只能在 ClientBuilder 上设置，无法通过 RequestBuilder
@@ -817,7 +837,7 @@ impl XhRequest {
         // 合并 query() 设置的查询参数（与已有 URL 查询参数合并，非覆盖）
         // base URL 已通过上方 Url::parse 校验为合法，此处解析必然成功；
         // query_pairs_mut().append_pair() 会对 value 做 URL 编码。
-        let mut final_url = self.url.clone();
+        let mut final_url = effective_url;
         if !self.query_params.is_empty() {
             let mut url = reqwest::Url::parse(&final_url)
                 .map_err(|e| XhCurlError::Generic(format!("URL 解析失败: {}", e)))?;
@@ -850,8 +870,28 @@ impl XhRequest {
             }
         };
 
-        // 设置请求头
-        let mut header_map = self.headers.to_header_map()?;
+        // 设置请求头：先合并全局 base_headers（默认值），再合并请求级 headers（覆盖全局同名）。
+        // encoding/range/user_agent/referer 等专用方法设置的 header 在后续步骤插入，
+        // 优先级最高（覆盖 base_headers 与请求级 headers 中的同名项）。
+        let mut header_map = reqwest::header::HeaderMap::new();
+
+        // 先插入全局 base_headers（默认值，含校验，非法立即报错避免静默丢失）
+        for (name, value) in global_config.base_headers.iter() {
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                    XhCurlError::InvalidArgument(format!("无效的全局请求头名 {:?}: {}", name, e))
+                })?;
+            let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                XhCurlError::InvalidArgument(format!("无效的全局请求头值 {:?}: {}", value, e))
+            })?;
+            header_map.insert(header_name, header_value);
+        }
+
+        // 再插入请求级 headers（覆盖全局 base_headers 同名项）
+        let request_header_map = self.headers.to_header_map()?;
+        for (name, value) in request_header_map.iter() {
+            header_map.insert(name.clone(), value.clone());
+        }
 
         // Accept-Encoding（CURLOPT_ENCODING）
         // 非法值（含非 ASCII 字节或控制字符）必须报错而非静默丢弃，避免用户设置的编码被忽略

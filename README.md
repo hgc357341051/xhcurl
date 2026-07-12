@@ -413,6 +413,8 @@ XHCurl::setConfig([
     'tcp_keepalive_interval' => 60,      // keep-alive 探测间隔（秒）
     'max_connections'        => 100,     // 连接池上限
     'fiber_max_concurrency'  => 64,      // gather/each 协程并发上限（0=不限）
+    'base_uri'               => null,    // 全局基础 URI（请求 URL 以 / 开头时自动拼接，绝对 URL 优先）
+    'base_headers'           => [],      // 全局默认 headers（所有请求自动携带，请求级同名 header 覆盖）
 ]);
 ```
 
@@ -539,6 +541,7 @@ XHCurl::setConfig([
 | `getCustomMethod()` | `(): ?string` 获取 `customMethod()` 设置的自定义方法，未设置返回 null |
 | `getBody()` | `(): ?string` 返回请求体字符串：body() 设置的原始字节体、json() 序列化后的 JSON 字符串、form() 的 k=v&k=v 格式字符串。multipart() 返回 null（含二进制，无法安全序列化）。未设置请求体返回 null |
 | `getMultipart(): ?array` | 返回已设置的 multipart 字段数组（含 name/value/filename/content_type），未设置返回 null |
+| `withOptions(array $options): $this` | 请求级批量设置多个选项，内部按 key 分发到对应 setter（支持 18 个 key，见下文「批量设置选项 withOptions()」小节）。未知 key 抛异常（fail-fast，避免拼写错误静默忽略），null 值跳过（不调用对应 setter），headers 数组中 null 值跳过。多次调用累加（后调用覆盖同名选项），与链式 setter 混用正常工作 |
 
 > **query() 合并语义**：`query()` 采用**增量追加**而非覆盖语义——已有 URL 查询参数保留，
 > 新参数追加合并。多次调用 `query()` 累加参数。值支持 int/float/bool/null 标量类型
@@ -559,6 +562,119 @@ XHCurl::setConfig([
 > `maxRedirects()` 都是请求级覆盖，会基于全局配置构建新 Client 应用这些参数。
 > 注意这会牺牲连接池复用（新 Client 有独立连接池），仅在显式设置时才触发。
 > 无效代理地址会明确报错，而非静默忽略。
+
+#### 批量设置选项 `withOptions()`
+
+`withOptions(array $options): $this` 一次性设置多个请求选项，内部按 key 分发到对应 setter。
+未知 key 抛异常（fail-fast，避免拼写错误静默忽略）；选项值为 `null` 时跳过（不调用对应 setter）；
+`headers` 数组中 header 值为 `null` 时跳过该 header。多次调用累加（后调用覆盖同名选项），
+与链式 setter 混用正常工作（withOptions 之后的 setter 覆盖 withOptions 设置的值）。
+
+**支持的选项 key：**
+
+| key | 类型 | 对应 setter | 说明 |
+|-----|------|-------------|------|
+| `timeout` | int | `timeout()` | 请求总超时（秒） |
+| `timeout_ms` | int | `timeoutMs()` | 请求总超时（毫秒） |
+| `connect_timeout` | int | `connectTimeout()` | 连接超时（秒） |
+| `headers` | array | 多次 `header()` | 关联数组，key=header 名，value=header 值（null 值跳过） |
+| `query` | array | `query()` | URL 查询参数（增量追加） |
+| `accept` | string | `accept()` | Accept header |
+| `content_type` | string | `contentType()` | Content-Type header |
+| `body` | string | `body()` | 原始请求体（二进制安全） |
+| `json` | array | `json()` | JSON 请求体（自动序列化） |
+| `form` | array | `form()` | 表单请求体 |
+| `user_agent` | string | `userAgent()` | User-Agent header |
+| `referer` | string | `referer()` | Referer header |
+| `encoding` | string | `encoding()` | Accept-Encoding header |
+| `range` | string | `range()` | Range header |
+| `proxy` | string | `proxy()` | 代理地址 |
+| `verify_ssl` | bool | `verifySsl()` | SSL 证书验证 |
+| `follow_redirects` | bool | `followRedirects()` | 跟随重定向 |
+| `max_redirects` | int | `maxRedirects()` | 最大重定向次数 |
+
+```php
+// 批量设置请求选项（等价于链式调用多个 setter）
+$request = XHCurl::createRequest('https://api.example.com/data')
+    ->get()
+    ->withOptions([
+        'timeout' => 30,
+        'connect_timeout' => 5,
+        'headers' => ['X-Trace-Id' => generate_trace_id()],
+        'query' => ['page' => 1, 'limit' => 20],
+        'accept' => 'application/json',
+    ]);
+// 等价于：->get()->timeout(30)->connectTimeout(5)
+//          ->header('X-Trace-Id', ...)->query([...])->accept('application/json')
+
+// 未知 key 抛异常（fail-fast，避免拼写错误静默忽略）
+$req->withOptions(['timedout' => 30]);  // 抛异常："不支持的选项 key: timedout"
+
+// null 值跳过（不调用对应 setter，保持原值）
+$req->withOptions(['timeout' => 30, 'proxy' => null]);  // 仅设置 timeout，proxy 保持原值
+```
+
+#### 微服务场景示例
+
+微服务架构下，通过全局 `base_uri` 与 `base_headers` 避免每个请求重复写 host 与公共 header，
+环境切换只需修改一处配置。`base_uri` 自动拼接相对 URL，`base_headers` 自动携带公共 header，
+`withOptions()` 批量设置请求级选项，三者组合显著简化微服务调用代码：
+
+```php
+// 微服务场景：设置全局 base_uri 与公共 headers
+XHCurl::setConfig([
+    'base_uri' => 'https://user-svc.internal',
+    'base_headers' => [
+        'Authorization' => 'Bearer ' . $token,
+        'X-Service' => 'order-svc',
+    ],
+]);
+
+// 相对 URL 自动拼接为完整 URL
+$request = XHCurl::createRequest('/users/123')->get();
+// 实际请求：https://user-svc.internal/users/123
+// 请求头包含 Authorization + X-Service
+
+// 请求级 header 覆盖全局 base_headers
+$request2 = XHCurl::createRequest('/admin')
+    ->header('Authorization', 'Bearer admin-token')
+    ->get();
+// Authorization 为 admin-token，X-Service 仍为全局值
+
+// 批量设置请求选项
+$request3 = XHCurl::createRequest('/api/data')
+    ->get()
+    ->withOptions([
+        'timeout' => 30,
+        'connect_timeout' => 5,
+        'headers' => ['X-Trace-Id' => generate_trace_id()],
+        'query' => ['page' => 1, 'limit' => 20],
+        'accept' => 'application/json',
+    ]);
+```
+
+**`base_uri` URL 拼接规则：**
+
+| 请求 URL | base_uri | 实际请求 URL | 说明 |
+|----------|----------|-------------|------|
+| `/users/123` | `https://user-svc.internal` | `https://user-svc.internal/users/123` | 相对 URL（以 `/` 开头）拼接 |
+| `/users/123` | `https://user-svc.internal/` | `https://user-svc.internal/users/123` | base_uri 末尾斜杠自动处理（无双斜杠） |
+| `https://other.com/api` | `https://user-svc.internal` | `https://other.com/api` | 绝对 URL（http/https 开头）优先，不拼接 |
+
+> **base_uri 拼接规则说明**：
+> - 请求 URL 以 `/` 开头时（相对路径），与 `base_uri` 拼接为完整 URL
+> - 请求 URL 以 `http://` 或 `https://` 开头时（绝对 URL），忽略 `base_uri`，使用原 URL
+> - `base_uri` 末尾的 `/` 自动处理（避免拼接出双斜杠 `//`）
+> - `base_uri` 为空字符串或 `null` 时清除（不设置 `base_uri`）
+> - `base_uri` 非法（如 `://invalid`）在 `setConfig` 阶段抛异常（fail-fast）
+>
+> **base_headers 合并规则**：
+> - 所有请求自动携带 `base_headers` 中的 header
+> - 请求级同名 header 覆盖全局 `base_headers`（请求级优先）
+> - `base_headers` 值为 `null` 时跳过该 header
+> - `base_headers` 为空数组或 `null` 时清除
+> - `base_headers` 非标量值（嵌套数组/对象）在 `setConfig` 阶段抛异常（fail-fast）
+> - `base_uri`/`base_headers` 变更触发 Client 重建（与 `proxy`/`verify_ssl` 等配置一致）
 
 ### 结果数组字段
 

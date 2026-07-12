@@ -5,6 +5,7 @@
 // | 使用 Arc<RwLock<>> 共享可变配置                                        |
 // +----------------------------------------------------------------------+
 
+use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
@@ -67,6 +68,17 @@ pub struct GlobalConfig {
     /// 0 = 不限制（所有请求同时执行）；默认 64。
     /// 可通过 `XHCurl::setConfig(['fiber_max_concurrency' => N])` 调整。
     pub fiber_max_concurrency: usize,
+
+    /// 全局基础 URI。
+    /// 当请求 URL 为相对路径（以 `/` 开头）时，自动拼接为完整 URL。
+    /// None 表示未设置，绝对 URL（http://、https://）不受影响。
+    /// 变更后通过配置指纹比对触发 reqwest::Client 重建（影响 to_reqwest 的 URL 解析）。
+    pub base_uri: Option<String>,
+
+    /// 全局默认请求头。
+    /// 在 to_reqwest() 中先合并全局 base_headers，再合并请求级 headers
+    /// （请求级同名 header 覆盖全局）。变更后通过配置指纹比对触发 Client 重建。
+    pub base_headers: HashMap<String, String>,
 }
 
 impl Default for GlobalConfig {
@@ -100,6 +112,10 @@ impl Default for GlobalConfig {
             max_connections: 100,
             // 协程 gather/each 默认并发上限 64（兼顾吞吐与资源占用）
             fiber_max_concurrency: 64,
+            // 默认无全局基础 URI
+            base_uri: None,
+            // 默认无全局默认请求头
+            base_headers: HashMap::new(),
         }
     }
 }

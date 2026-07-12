@@ -6,6 +6,36 @@
 ## [Unreleased]
 
 
+## [1.5.0] - 2026-07-12
+
+本版本为**次版本号升级**（非 BREAKING），聚焦**提升微服务与多环境部署的配置灵活性**：
+新增请求级批量设置方法 `withOptions()`、全局基础 URI `base_uri` 与全局默认 headers `base_headers`。
+
+### 新增
+- **`withOptions(array $options): $this`**：请求级批量设置多个选项，内部按 key 分发到对应 setter。
+  支持 18 个常见选项 key（timeout/timeout_ms/connect_timeout/headers/query/accept/content_type/
+  body/json/form/user_agent/referer/encoding/range/proxy/verify_ssl/follow_redirects/max_redirects）。
+  未知 key 抛异常（fail-fast，避免拼写错误静默忽略）。null 值跳过（不调用对应 setter）。
+  headers 数组中 null 值跳过。多次调用累加（后调用覆盖同名选项）。与链式 setter 混用正常工作。
+- **全局 `base_uri` 配置**：`setConfig(['base_uri' => 'https://user-svc.internal'])`，
+  请求 URL 以 `/` 开头时自动拼接为完整 URL。绝对 URL（http/https 开头）优先，不拼接。
+  base_uri 末尾斜杠自动处理（避免双斜杠）。变更触发 Client 重建。
+  微服务场景下避免每个请求重复写 host，环境切换只需修改一处。
+- **全局 `base_headers` 配置**：`setConfig(['base_headers' => ['Authorization' => 'Bearer xxx']])`，
+  所有请求自动携带这些公共 header。请求级同名 header 覆盖全局（请求级优先）。
+  非标量值抛异常（fail-fast）。变更触发 Client 重建。
+  解决认证 Token、TraceID 等公共 header 无法全局默认的问题。
+- **mock_server 新增 `/base-test` 端点**：返回 200 + JSON `{"url": REQUEST_URI, "headers": getallheaders()}`，
+  回显实际请求 URL 与请求头，用于测试 base_uri 拼接与 base_headers 合并。
+
+### 测试
+- 新增 `php_add_withoptions_and_base_config_test.php`（约 14 项），覆盖：
+  withOptions() 批量设置/未知 key 抛异常/null 值跳过/与链式 setter 混用/headers 中 null 值跳过/多次调用累加、
+  base_uri 相对 URL 拼接/绝对 URL 优先/末尾斜杠处理/null 清除、
+  base_headers 自动携带/请求级覆盖/null 清除、
+  base_uri + base_headers 组合使用。
+
+
 ## [1.4.0] - 2026-07-12
 
 本版本为**次版本号升级**（非 BREAKING），聚焦**补齐现代 HTTP 客户端标准便捷方法**，

@@ -130,6 +130,13 @@ if ($path === '/text') {
     return;
 }
 
+if ($path === '/base-test') {
+    // 回显实际请求 URL 与请求头，用于测试 base_uri URL 拼接与 base_headers 自动合并
+    header('Content-Type: application/json');
+    echo json_encode(['url' => $_SERVER['REQUEST_URI'], 'headers' => getallheaders()]);
+    return;
+}
+
 // 默认：404
 http_response_code(404);
 echo json_encode(['error' => 'not found', 'path' => $path]);
