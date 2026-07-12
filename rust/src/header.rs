@@ -17,13 +17,28 @@ use crate::error::{XhCurlError, XhCurlResult};
 /// - RwLock 允许多个读操作并行，写操作独占
 /// - Arc 允许跨线程共享所有权
 /// - 对应 C 版本的 xhcurl_header_t 结构体
-#[derive(Debug, Clone)]
+///
+/// # Clone 语义
+/// 手动实现深拷贝（非 derive Clone 的浅拷贝）：
+/// `Arc<RwLock<HashMap>>` 的 derive Clone 仅增加 Arc 引用计数，
+/// 两个 HeaderManager 共享同一 HashMap，修改一个会影响另一个。
+/// 手动 Clone 克隆内部 HashMap，确保 `clone $req` 后两个请求的 headers 独立。
+#[derive(Debug)]
 pub struct HeaderManager {
     /// 头部存储（内部可变性通过 RwLock 实现）
     /// 使用 Arc 包装以便跨线程共享
     ///
     /// 注意：HTTP/2 要求头部名称小写，我们在插入时统一转为小写
     headers: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl Clone for HeaderManager {
+    fn clone(&self) -> Self {
+        let headers = self.headers.read().unwrap_or_else(|e| e.into_inner());
+        Self {
+            headers: Arc::new(RwLock::new(headers.clone())),
+        }
+    }
 }
 
 impl HeaderManager {

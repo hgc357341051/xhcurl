@@ -635,6 +635,7 @@ impl PhpXhCurl {
 /// PHP XHRequest 类的 Rust 表示
 #[php_class]
 #[php(name = "XHRequest")]
+#[derive(Clone)]
 pub struct PhpXhRequest {
     /// 内部请求构建器（pub 供 fiber 模块访问）
     pub request: XhRequest,
@@ -660,6 +661,16 @@ impl PhpXhRequest {
             request: XhRequest::new(url),
         })
     }
+
+    /// 克隆魔术方法
+    ///
+    /// 实际的 Rust 端克隆由 `#[derive(Clone)]` 自动生成的 `clone_obj` 处理
+    ///（PHP 执行 `clone $obj` 时调用）。`__clone` 在克隆完成后被 PHP 调用，
+    /// 用于在新对象上做后处理；此处无需额外操作，保留空实现满足约定。
+    ///
+    /// 注意：ext-php-rs 0.15.15 约定 `__clone`/`__destruct` 不能声明返回类型
+    ///（PHP 禁止魔术方法返回类型声明），因此本方法无返回值。
+    pub fn __clone(&mut self) {}
 
     /// 获取 HTTP 基本认证凭据
     /// 返回 "user:pass" 格式字符串或 null（未设置时）。
@@ -1779,6 +1790,17 @@ impl PhpXhRequest {
         self.request.get_user_data().map(|s| s.to_string())
     }
 
+    /// 获取重试配置（关联数组）
+    ///
+    /// 返回 ['times' => int, 'delay_ms' => int]。
+    /// times=0 表示不重试；delay_ms=0 表示立即重试。
+    pub fn get_retry(&self) -> Result<ZBox<ZendHashTable>, String> {
+        let mut ht = ZendHashTable::new();
+        let _ = ht.insert("times", self.request.get_retry_times() as i64);
+        let _ = ht.insert("delay_ms", self.request.get_retry_delay_ms() as i64);
+        Ok(ht)
+    }
+
     /// 增量追加 URL 查询参数
     ///
     /// 数组键值自动转为字符串并追加到 URL 查询参数。与已有 URL 查询参数
@@ -1825,6 +1847,30 @@ impl PhpXhRequest {
         Ok(self_)
     }
 
+    /// 设置失败重试策略
+    ///
+    /// 仅对网络层错误（DNS/连接/超时/SSL）重试；HTTP 4xx/5xx 视为成功响应不重试。
+    /// - `times`: 重试次数（0 = 不重试，负值抛异常）
+    /// - `delay_ms`: 重试间隔毫秒（0 = 立即重试，负值抛异常）
+    ///
+    /// # PHP 签名
+    /// public XHRequest::retry(int $times, int $delay_ms = 0): $this
+    pub fn retry(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        times: i64,
+        delay_ms: Option<i64>,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if times < 0 {
+            return Err("times 不能为负值（0 = 不重试）".to_string());
+        }
+        let delay_ms = delay_ms.unwrap_or(0);
+        if delay_ms < 0 {
+            return Err("delay_ms 不能为负值（0 = 立即重试）".to_string());
+        }
+        self_.request = self_.request.clone().retry(times as u32, delay_ms as u64);
+        Ok(self_)
+    }
+
     /// 设置 Accept header（header('Accept', $type) 的语义化别名）
     ///
     /// 空字符串抛异常（fail-fast，与 userAgent('') 一致）。多次调用覆盖。
@@ -1865,6 +1911,7 @@ impl PhpXhRequest {
     /// 支持的 key：
     /// - `timeout`/`timeout_ms`/`connect_timeout`/`connect_timeout_ms`: int（负值非法）
     /// - `headers`/`query`/`json`/`form`: array
+    /// - `retry`: array（`['times' => int, 'delay_ms' => int]`，times 必填，delay_ms 可选默认 0）
     /// - `accept`/`content_type`/`user_agent`/`referer`/`encoding`/`range`/`proxy`: string
     /// - `body`: string（二进制安全）
     /// - `verify_ssl`/`follow_redirects`: bool
@@ -2104,6 +2151,54 @@ impl PhpXhRequest {
                     }
                     self_.request = self_.request.clone().max_redirects(v as u32);
                 }
+                "retry" => {
+                    // 值为关联数组 ['times' => int, 'delay_ms' => int]
+                    // 手动迭代收集（参考 headers 分支，避免嵌套闭包双重可变借用）
+                    let retry_ht = val
+                        .array()
+                        .ok_or_else(|| "withOptions retry: 值必须是数组".to_string())?;
+                    let mut times_opt: Option<i64> = None;
+                    let mut delay_ms: i64 = 0;
+                    for_each_kv(retry_ht, |r_key, r_val| {
+                        let k = r_key.to_string();
+                        match k.as_str() {
+                            "times" => {
+                                // int/float 均接受（float 截断为 int）
+                                let v = r_val
+                                    .long()
+                                    .or_else(|| r_val.double().map(|d| d as i64))
+                                    .ok_or_else(|| {
+                                    format!("withOptions retry: times 必须为整数（字段 '{}'）", k)
+                                })?;
+                                times_opt = Some(v);
+                            }
+                            "delay_ms" => {
+                                let v = r_val
+                                    .long()
+                                    .or_else(|| r_val.double().map(|d| d as i64))
+                                    .ok_or_else(|| {
+                                    format!(
+                                        "withOptions retry: delay_ms 必须为整数（字段 '{}'）",
+                                        k
+                                    )
+                                })?;
+                                delay_ms = v;
+                            }
+                            _ => {} // 忽略未知 key（向前兼容）
+                        }
+                        Ok(())
+                    })?;
+                    // times 必须存在
+                    let times = times_opt
+                        .ok_or_else(|| "withOptions retry: 缺少 times 字段".to_string())?;
+                    if times < 0 {
+                        return Err("withOptions retry: times 不能为负值".to_string());
+                    }
+                    if delay_ms < 0 {
+                        return Err("withOptions retry: delay_ms 不能为负值".to_string());
+                    }
+                    self_.request = self_.request.clone().retry(times as u32, delay_ms as u64);
+                }
                 _ => return Err(format!("withOptions: 不支持的选项 key: {}", key_str)),
             }
         }
@@ -2114,6 +2209,9 @@ impl PhpXhRequest {
     ///
     /// 适用于用户已知响应数据不大的场景，无需创建 XHMulti/XHThreadPool，
     /// 直接在当前请求对象上调用 execute() 即可获得完整响应。
+    ///
+    /// 支持失败重试：通过 retry() 配置重试次数与间隔，仅对网络层错误
+    ///（DNS/连接/超时/SSL）重试，HTTP 4xx/5xx 视为成功响应不重试。
     ///
     /// 返回的数组包含全部字段：
     ///   - success: bool       是否成功（2xx 且无错误）
@@ -2126,6 +2224,7 @@ impl PhpXhRequest {
     ///   - remote_addr: ?string 远程服务器地址（IP:Port）
     ///   - version: ?string    HTTP 协议版本（如 "HTTP/1.1"）
     ///   - error: ?string      错误信息（请求成功时为 null）
+    ///   - attempts: int       总尝试次数（≥1，含首次与重试）
     ///
     /// # PHP 签名
     /// public XHRequest::execute(): array
@@ -2139,46 +2238,84 @@ impl PhpXhRequest {
     /// }
     pub fn execute(&mut self) -> Result<ZBox<ZendHashTable>, String> {
         let client = global_client()?;
-        let request = self.request.clone();
+        // 请求模板：每次重试都从此 clone 一份，避免相互污染
+        let request_template = self.request.clone();
         let max_response_size = XhCurlManager::global().config().max_response_size;
 
         // 记录请求开始时间，失败路径也返回真实耗时（与成功路径一致）
         let start = std::time::Instant::now();
 
-        // 预取 id 和 user_data（request 会被 move 进 async 块）
-        let id = request
+        // 预取 id 和 user_data（request_template 会被 move 进 async 块作为模板）
+        let id = request_template
             .get_id()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| request.get_url().to_string());
-        let user_data = request.get_user_data().map(|s| s.to_string());
+            .unwrap_or_else(|| request_template.get_url().to_string());
+        let user_data = request_template.get_user_data().map(|s| s.to_string());
+        // 预取重试配置（在 async 块内复用，避免每次循环都访问模板）
+        let retry_times = request_template.get_retry_times();
+        let retry_delay_ms = request_template.get_retry_delay_ms();
 
         let id_for_task = id.clone();
         // 统一错误处理：网络/DNS/TLS 错误包装为 success=false 结果数组，
         // 不抛异常（与 XHMulti/fiber 路径一致）
         let result_array = global_runtime()?.block_on(async move {
-            match XhMulti::execute_single(client, request, id_for_task, None, max_response_size)
-                .await
-            {
-                Ok(resp) => {
-                    // 成功：构造完整结果数组
-                    let mut ht = response_to_php_array(&resp);
-                    let _ = ht.insert("id", id);
-                    if let Some(ud) = user_data {
-                        let _ = ht.insert("user_data", ud);
+            let mut attempts: u32 = 0;
+            loop {
+                attempts += 1;
+                // 每次尝试 clone 一份请求模板（连接/超时等配置随模板复制）
+                let request = request_template.clone();
+                let id_clone = id_for_task.clone();
+                // client.clone() 是廉价的（reqwest::Client 内部 Arc 共享连接池）
+                let result = XhMulti::execute_single(
+                    client.clone(),
+                    request,
+                    id_clone,
+                    None,
+                    max_response_size,
+                )
+                .await;
+                match result {
+                    Ok(resp) => {
+                        // 成功：构造完整结果数组
+                        let mut ht = response_to_php_array(&resp);
+                        let _ = ht.insert("id", id.clone());
+                        if let Some(ud) = &user_data {
+                            let _ = ht.insert("user_data", ud.clone());
+                        }
+                        // attempts 字段覆盖 response_to_php_array 的默认值 1
+                        let _ = ht.insert("attempts", attempts as i64);
+                        return ht;
                     }
-                    ht
-                }
-                Err(e) => {
-                    // 失败：构造 success=false 结果数组（与 result_to_php_array 失败路径一致）
-                    // 使用 format_request_error_message 而非 e.to_string()，
-                    // 使超时错误包含 "timed out" 关键词，便于 classify_error_type 正确分类
-                    let result = crate::multi::RequestResult::error(
-                        id,
-                        user_data,
-                        format_request_error_message(&e),
-                        start.elapsed(),
-                    );
-                    crate::php_ext::result_to_php_array(&result)
+                    Err(e) => {
+                        // 重试条件：retry_times > 0 && attempts <= retry_times
+                        // attempts 从 1 开始：retry_times=2 时
+                        //   attempts=1 (1<=2) 重试，attempts=2 (2<=2) 重试，
+                        //   attempts=3 (3>2) 不重试 → 总尝试 3 次 = retry_times+1
+                        // execute_single 仅在网络层错误（DNS/连接/超时/SSL）时返回 Err，
+                        // HTTP 4xx/5xx 是 Ok(resp) 不会触发此分支，故"HTTP 错误不重试"自然满足
+                        if retry_times > 0 && attempts <= retry_times {
+                            if retry_delay_ms > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    retry_delay_ms,
+                                ))
+                                .await;
+                            }
+                            continue; // 重试
+                        }
+                        // 不重试：构造失败结果数组
+                        // 使用 format_request_error_message 而非 e.to_string()，
+                        // 使超时错误包含 "timed out" 关键词，便于 classify_error_type 正确分类
+                        let result = crate::multi::RequestResult::error(
+                            id.clone(),
+                            user_data.clone(),
+                            format_request_error_message(&e),
+                            start.elapsed(),
+                        );
+                        let mut ht = crate::php_ext::result_to_php_array(&result);
+                        // attempts 字段覆盖 result_to_php_array 的默认值 1
+                        let _ = ht.insert("attempts", attempts as i64);
+                        return ht;
+                    }
                 }
             }
         });
@@ -2207,13 +2344,15 @@ impl PhpXhRequest {
             .ok_or_else(|| "executeJson: 响应缺少 success 字段".to_string())?;
         if !success {
             let status = result.get("status").and_then(|v| v.long()).unwrap_or(0);
+            // 透传 attempts 字段（重试场景下便于排查实际尝试次数）
+            let attempts = result.get("attempts").and_then(|v| v.long()).unwrap_or(1);
             let error = result
                 .get("error")
                 .and_then(|v| v.string())
                 .unwrap_or_default();
             return Err(format!(
-                "executeJson: 请求失败（HTTP {}）: {}",
-                status, error
+                "executeJson: 请求失败（HTTP {}，尝试 {} 次）: {}",
+                status, attempts, error
             ));
         }
 
@@ -3591,6 +3730,9 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         let truncated = error_type == "response_too_large";
         let _ = response_ht.insert("truncated", truncated);
     }
+    // attempts 字段：默认 1（非重试场景），重试时由 execute() 覆盖为实际尝试次数
+    // 确保批量/协程/线程池路径与单请求 execute() 字段集完全一致（12 字段）
+    let _ = response_ht.insert("attempts", 1_i64);
     response_ht
 }
 
@@ -3716,6 +3858,9 @@ fn response_to_php_array(response: &XhResponse) -> ZBox<ZendHashTable> {
     let _ = ht.insert("error_type", "");
     // 成功路径不会出现响应体超限（超限在 executor 即返回 Err），故 truncated 恒为 false
     let _ = ht.insert("truncated", false);
+    // attempts 字段：默认 1（非重试场景），重试时由 execute() 覆盖为实际尝试次数
+    // 确保 response_to_php_array 与 result_to_php_array 字段集完全一致（12 字段）
+    let _ = ht.insert("attempts", 1_i64);
     ht
 }
 

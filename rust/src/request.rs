@@ -294,6 +294,13 @@ pub struct XhRequest {
     /// 通过 query() 增量追加，在 to_reqwest() 中与已有 URL 查询参数合并（非覆盖）。
     /// 值在合并时由 url::Url::query_pairs_mut() 自动 URL 编码。
     query_params: Vec<(String, String)>,
+
+    /// 重试次数（0 = 不重试）
+    /// 仅对网络层错误（DNS/连接/超时/SSL）重试，HTTP 4xx/5xx 视为成功响应不重试。
+    retry_times: u32,
+
+    /// 重试间隔（毫秒，0 = 立即重试）
+    retry_delay_ms: u64,
 }
 
 impl XhRequest {
@@ -329,6 +336,8 @@ impl XhRequest {
             range: None,
             referer: None,
             query_params: Vec::new(),
+            retry_times: 0,
+            retry_delay_ms: 0,
         }
     }
 
@@ -634,6 +643,17 @@ impl XhRequest {
         self
     }
 
+    /// 设置失败重试策略（Builder 模式）
+    ///
+    /// 仅对网络层错误（DNS/连接/超时/SSL）重试，HTTP 4xx/5xx 视为成功响应不重试。
+    /// - `times`: 重试次数（0 = 不重试）
+    /// - `delay_ms`: 重试间隔毫秒（0 = 立即重试）
+    pub fn retry(mut self, times: u32, delay_ms: u64) -> Self {
+        self.retry_times = times;
+        self.retry_delay_ms = delay_ms;
+        self
+    }
+
     // ===== Getter 方法 =====
 
     /// 获取请求 URL
@@ -644,6 +664,16 @@ impl XhRequest {
     /// 返回 query() 设置的查询参数列表。
     pub fn get_query_params(&self) -> &[(String, String)] {
         &self.query_params
+    }
+
+    /// 获取重试次数（0 = 不重试）
+    pub fn get_retry_times(&self) -> u32 {
+        self.retry_times
+    }
+
+    /// 获取重试间隔（毫秒，0 = 立即重试）
+    pub fn get_retry_delay_ms(&self) -> u64 {
+        self.retry_delay_ms
     }
 
     /// 获取 HTTP 方法

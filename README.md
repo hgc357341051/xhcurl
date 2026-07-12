@@ -542,6 +542,8 @@ XHCurl::setConfig([
 | `getBody()` | `(): ?string` 返回请求体字符串：body() 设置的原始字节体、json() 序列化后的 JSON 字符串、form() 的 k=v&k=v 格式字符串。multipart() 返回 null（含二进制，无法安全序列化）。未设置请求体返回 null |
 | `getMultipart(): ?array` | 返回已设置的 multipart 字段数组（含 name/value/filename/content_type），未设置返回 null |
 | `withOptions(array $options): $this` | 请求级批量设置多个选项，内部按 key 分发到对应 setter（支持 18 个 key，见下文「批量设置选项 withOptions()」小节）。未知 key 抛异常（fail-fast，避免拼写错误静默忽略），null 值跳过（不调用对应 setter），headers 数组中 null 值跳过。多次调用累加（后调用覆盖同名选项），与链式 setter 混用正常工作 |
+| `retry(int $times, int $delay_ms = 0): $this` | 设置失败重试次数与重试间隔。times=0 不重试（默认），times>0 失败时最多重试 N 次。delay_ms 重试间隔（毫秒），0=立即重试。负值抛异常。仅重试网络错误（DNS/连接/超时/SSL），HTTP 错误（4xx/5xx）不重试（服务器已响应）。影响 execute() 与 executeJson()，结果数组含 attempts 字段 |
+| `getRetry(): array` | 返回 `['times' => int, 'delay_ms' => int]` |
 
 > **query() 合并语义**：`query()` 采用**增量追加**而非覆盖语义——已有 URL 查询参数保留，
 > 新参数追加合并。多次调用 `query()` 累加参数。值支持 int/float/bool/null 标量类型
@@ -592,6 +594,7 @@ XHCurl::setConfig([
 | `verify_ssl` | bool | `verifySsl()` | SSL 证书验证 |
 | `follow_redirects` | bool | `followRedirects()` | 跟随重定向 |
 | `max_redirects` | int | `maxRedirects()` | 最大重定向次数 |
+| `retry` | array | `retry()` | 关联数组 `['times' => int, 'delay_ms' => int]`，times 必填非负，delay_ms 可选默认 0 |
 
 ```php
 // 批量设置请求选项（等价于链式调用多个 setter）
@@ -676,6 +679,63 @@ $request3 = XHCurl::createRequest('/api/data')
 > - `base_headers` 非标量值（嵌套数组/对象）在 `setConfig` 阶段抛异常（fail-fast）
 > - `base_uri`/`base_headers` 变更触发 Client 重建（与 `proxy`/`verify_ssl` 等配置一致）
 
+#### 请求重试 retry()
+
+生产环境调用第三方 API 时，偶发性网络抖动（DNS 失败、连接拒绝、超时）常见。
+`retry()` 允许请求失败时自动重试，避免在 PHP 层手写 `for` 循环 + `try/catch` + `usleep`。
+
+- **重试条件**：仅重试**网络错误**（请求未到达服务器：DNS/连接/超时/SSL）。
+  HTTP 错误（4xx/5xx）不重试（服务器已响应，属业务逻辑），与 Guzzle 默认行为一致。
+- **重试次数**：`times` = 重试次数（非总尝试次数）。`retry(2)` = 最多重试 2 次，总尝试 3 次。
+- **重试间隔**：`delay_ms` = 间隔毫秒数，0 = 立即重试。
+- **attempts 字段**：结果数组含 `attempts` 字段（1 = 首次未重试，2 = 重试 1 次）。
+- **影响范围**：`execute()` 与 `executeJson()`。不影响 `XHMulti`/`XHThreadPool`/协程路径。
+
+```php
+// 网络错误时自动重试 2 次，每次间隔 100ms
+$resp = XHCurl::createRequest('https://api.example.com/users')
+    ->get()
+    ->retry(2, 100)
+    ->execute();
+
+echo $resp['attempts'];  // 1 = 首次成功，2 = 重试 1 次后成功，3 = 重试 2 次后仍失败
+
+// retry(0) 默认不重试（与 v1.5.0 行为一致）
+$resp = XHCurl::createRequest('...')->get()->execute();
+// attempts = 1
+
+// 负值抛异常（fail-fast）
+$req->retry(-1);  // 抛异常："times 不能为负值"
+$req->retry(1, -100);  // 抛异常："delay_ms 不能为负值"
+```
+
+> **重试与 HTTP 错误**：服务器返回 4xx/5xx 时 `success=false` 但 `attempts=1`（不重试）。
+> 如需重试 5xx，请在 PHP 层用 `execute()` 循环 + `if ($resp['status'] >= 500)` 判断。
+
+#### 请求克隆 clone
+
+支持 PHP 原生 `clone $req` 语法安全深拷贝 XHRequest 对象，保留所有配置（headers/body/timeout/retry/query 等）。
+典型场景：批量调用不同 URL，配置相同 → `clone $req` 后仅改 URL。
+
+```php
+// 模板请求：配置公共 headers/timeout/retry
+$template = XHCurl::createRequest('/api/v1/users')
+    ->get()
+    ->header('Authorization', 'Bearer ' . $token)
+    ->timeout(30)
+    ->retry(2, 100);
+
+// 克隆后修改 URL，配置保留
+$resp1 = (clone $template)->url('/api/v1/users/1')->execute();
+$resp2 = (clone $template)->url('/api/v1/users/2')->execute();
+$resp3 = (clone $template)->url('/api/v1/users/3')->execute();
+
+// 克隆对象与原对象独立，修改克隆不影响原对象
+$clone = clone $template;
+$clone->header('X-Custom', 'value');
+// $template 不受影响
+```
+
 ### 结果数组字段
 
 `execute()`（XHRequest）/ `XHMulti::execute()` / `XHThreadPool::execute()` /
@@ -725,6 +785,7 @@ $request3 = XHCurl::createRequest('/api/data')
 | `error_type` | string | 错误类型枚举（失败时为 `dns`/`timeout`/`ssl`/`connection`/`response_too_large`/`unknown`，成功时为空字符串；`response_too_large` 标识响应体超过 `max_response_size` 的超限场景。详见下文「失败路径字段说明」） |
 | `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()`/`userData()` 时） |
 | `truncated` | bool | 是否因响应体超过 max_response_size 而被截断（true 表示超限失败，false 表示正常） |
+| attempts | int | 实际尝试次数。1 = 首次未重试，2 = 重试 1 次，依此类推。retry() 未设置时固定为 1 |
 
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
 > 超出会在执行前拒绝（避免先克隆再拒绝导致 OOM）。

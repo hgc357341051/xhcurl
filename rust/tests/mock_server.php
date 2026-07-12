@@ -137,6 +137,37 @@ if ($path === '/base-test') {
     return;
 }
 
+if ($path === '/flaky') {
+    // 间歇性失败端点：前 N 次返回 503，第 N+1 次返回 200
+    // 用于测试 retry() 重试机制。每个 fail 参数维护独立计数器文件，
+    // 避免不同 N 值的测试用例互相干扰。
+    $fail = isset($_GET['fail']) ? (int)$_GET['fail'] : 0;
+    $countFile = "/tmp/xhcurl_flaky_{$fail}.count";
+    // 读取当前计数（文件不存在则 0）
+    $count = file_exists($countFile) ? (int)file_get_contents($countFile) : 0;
+    $count++;
+    file_put_contents($countFile, $count);
+
+    if ($count <= $fail) {
+        // 前 N 次返回 503
+        http_response_code(503);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'service unavailable', 'attempt' => $count]);
+        return;
+    }
+    // 第 N+1 次返回 200
+    header('Content-Type: application/json');
+    echo json_encode(['ok' => true, 'attempt' => $count]);
+    return;
+}
+
+if ($path === '/echo-attempts') {
+    // 回显请求 headers（含可能的 X-Attempt 调试 header），便于验证重试行为
+    header('Content-Type: application/json');
+    echo json_encode(['headers' => getallheaders()]);
+    return;
+}
+
 // 默认：404
 http_response_code(404);
 echo json_encode(['error' => 'not found', 'path' => $path]);

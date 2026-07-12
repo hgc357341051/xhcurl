@@ -6,6 +6,41 @@
 ## [Unreleased]
 
 
+## [1.6.0] - 2026-07-12
+
+本版本为**次版本号升级**（非 BREAKING），聚焦**补齐生产环境网络抖动场景的重试能力**
+与**批量场景下的请求克隆能力**。新增 `retry()` 方法与 `__clone()` 魔术方法，
+结果数组新增 `attempts` 字段。
+
+### 新增
+- **`retry(int $times, int $delay_ms = 0): $this`**：设置失败重试次数与重试间隔。
+  times=0 不重试（默认），times>0 失败时最多重试 N 次（总尝试 N+1）。
+  delay_ms 重试间隔（毫秒），0=立即重试；负值抛异常（fail-fast）。
+  **重试条件**：仅重试网络错误（请求未到达服务器：DNS/连接/超时/SSL），
+  HTTP 错误（4xx/5xx）不重试（服务器已响应，属业务逻辑），与 Guzzle 默认行为一致。
+  影响 execute() 与 executeJson()，不影响 XHMulti/XHThreadPool/协程路径。
+- **`__clone()` 魔术方法**：支持 PHP `clone $req` 安全深拷贝 XHRequest 对象。
+  保留所有配置（headers/body/timeout/retry/query 等）。典型场景：批量调用不同 URL，配置相同。
+- **`getRetry(): array`**：返回 `['times' => int, 'delay_ms' => int]`。
+- **结果数组 `attempts` 字段**：实际尝试次数（1 = 首次未重试，2 = 重试 1 次）。
+  所有 HTTP 响应路径（execute/XHMulti/XHThreadPool/协程）均含此字段。
+  非重试场景固定为 1。字段集从 11 扩展到 12。
+- **withOptions 支持 `retry` key**：`withOptions(['retry' => ['times' => 2, 'delay_ms' => 100]])`
+  等价于 `retry(2, 100)`。times 必填非负，delay_ms 可选默认 0。
+- **mock_server 新增 `/flaky?fail=N` 端点**：前 N 次返回 503，第 N+1 次返回 200，
+  用文件计数器模拟间歇性失败，用于测试「HTTP 错误不重试」场景。
+- **mock_server 新增 `/echo-attempts` 端点**：回显请求 headers，便于验证重试行为。
+
+### 测试
+- 新增 `php_add_retry_and_clone_test.php`（约 14 项），覆盖：
+  retry(0) 默认不重试、retry(2) + 网络错误重试后仍失败 attempts=3、
+  retry(2) + 正常请求 attempts=1、retry(3) + /flaky?fail=2 (503) 不重试 attempts=1、
+  retry(-1) 抛异常、retry(1, -100) 抛异常、retry(1, 50) + 正常请求 delay 不影响成功路径、
+  executeJson() + retry(2) attempts=1、
+  clone $req 独立修改不影响原对象、clone 保留所有配置、clone 后链式调用、
+  withOptions(['retry' => [...]]) 等价 retry()、withOptions retry 非数组抛异常。
+
+
 ## [1.5.0] - 2026-07-12
 
 本版本为**次版本号升级**（非 BREAKING），聚焦**提升微服务与多环境部署的配置灵活性**：
