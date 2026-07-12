@@ -290,29 +290,43 @@ XHCurl::setConfig(array('max_response_size' => 10485760));
 
 // =========== 负数校验测试 ===========
 
-function test_negative_timeout_clamped(): bool
+function test_negative_timeout_throws(): bool
 {
     $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
-    $req->timeout(-1);
-    $cfg = XHCurl::getConfig();
-    // 负值被 clamp 为 0，不应产生巨大数值
-    return $cfg['request_timeout'] < PHP_INT_MAX;
+    // P2-1 BREAKING: 负值现在抛异常（之前静默跳过）
+    try {
+        $req->timeout(-1);
+        return false; // 应抛异常
+    } catch (\Throwable $e) {
+        return strpos($e->getMessage(), 'timeout') !== false
+            && strpos($e->getMessage(), '负值') !== false;
+    }
 }
 
-function test_negative_connect_timeout_clamped(): bool
+function test_negative_connect_timeout_throws(): bool
 {
     $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
-    $req->connectTimeout(-5);
-    $cfg = XHCurl::getConfig();
-    return $cfg['connect_timeout'] < PHP_INT_MAX;
+    // P2-1 BREAKING: 负值现在抛异常（之前静默跳过）
+    try {
+        $req->connectTimeout(-5);
+        return false; // 应抛异常
+    } catch (\Throwable $e) {
+        return strpos($e->getMessage(), 'connectTimeout') !== false
+            && strpos($e->getMessage(), '负值') !== false;
+    }
 }
 
-function test_negative_max_redirects_clamped(): bool
+function test_negative_max_redirects_throws(): bool
 {
     $req = XHCurl::createRequest('http://127.0.0.1:18399/get');
-    $req->maxRedirects(-3);
-    $cfg = XHCurl::getConfig();
-    return $cfg['max_redirects'] < PHP_INT_MAX;
+    // P2-1 BREAKING: 负值现在抛异常（之前静默跳过）
+    try {
+        $req->maxRedirects(-3);
+        return false; // 应抛异常
+    } catch (\Throwable $e) {
+        return strpos($e->getMessage(), 'maxRedirects') !== false
+            && strpos($e->getMessage(), '负值') !== false;
+    }
 }
 
 function test_multi_negative_concurrency_clamped(): bool
@@ -376,9 +390,9 @@ function test_set_config_negative_skipped(): bool
 }
 
 echo "\n=== 负数校验测试 ===\n";
-check("负数 timeout 被 clamp", test_negative_timeout_clamped());
-check("负数 connect_timeout 被 clamp", test_negative_connect_timeout_clamped());
-check("负数 max_redirects 被 clamp", test_negative_max_redirects_clamped());
+check("负数 timeout 抛异常", test_negative_timeout_throws());
+check("负数 connect_timeout 抛异常", test_negative_connect_timeout_throws());
+check("负数 max_redirects 抛异常", test_negative_max_redirects_throws());
 check("XHMulti 负数 maxConcurrency 被 clamp", test_multi_negative_concurrency_clamped());
 check("XHMulti 负数 maxResponseSize 被 clamp", test_multi_negative_response_size_clamped());
 check("XHThreadPool 负数 workers 抛异常", test_threadpool_negative_workers_throws());

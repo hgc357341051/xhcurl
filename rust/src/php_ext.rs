@@ -536,6 +536,15 @@ impl PhpXhRequest {
         self.request.get_range().map(|s| s.to_string())
     }
 
+    /// 获取自定义请求方法
+    /// 返回自定义方法字符串或 null（未设置时）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getCustomMethod(): ?string
+    pub fn get_custom_method(&self) -> Option<String> {
+        self.request.get_custom_method().map(|s| s.to_string())
+    }
+
     /// 设置 HTTP 方法
     ///
     /// # PHP 签名
@@ -725,16 +734,17 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::timeout(int $seconds): $self_
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认超时。
     pub fn timeout(
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
-        if seconds >= 0 {
-            self_.request = self_.request.clone().request_timeout(seconds as u64);
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        // 负值抛异常，避免 i64→u64 转换产生巨大数值
+        if seconds < 0 {
+            return Err("timeout 不能为负值，0 = 使用全局默认超时".to_string());
         }
-        self_
+        self_.request = self_.request.clone().request_timeout(seconds as u64);
+        Ok(self_)
     }
 
     /// 设置请求超时（毫秒）
@@ -743,16 +753,17 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::timeoutMs(int $ms): $self_
     ///
-    /// 负值跳过设置（保留原值），与 `timeout()` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认超时。
     pub fn timeout_ms(
         self_: &mut ZendClassObject<PhpXhRequest>,
         ms: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
-        if ms >= 0 {
-            self_.request = self_.request.clone().request_timeout_ms(ms as u64);
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        // 负值抛异常，避免 i64→u64 转换产生巨大数值
+        if ms < 0 {
+            return Err("timeoutMs 不能为负值，0 = 使用全局默认超时".to_string());
         }
-        self_
+        self_.request = self_.request.clone().request_timeout_ms(ms as u64);
+        Ok(self_)
     }
 
     /// 设置连接超时（秒）
@@ -761,16 +772,17 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::connectTimeout(int $seconds): $self_
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认超时。
     pub fn connect_timeout(
         self_: &mut ZendClassObject<PhpXhRequest>,
         seconds: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值跳过（保留原值）
-        if seconds >= 0 {
-            self_.request = self_.request.clone().connect_timeout(seconds as u64);
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        // 负值抛异常
+        if seconds < 0 {
+            return Err("connectTimeout 不能为负值，0 = 使用全局默认超时".to_string());
         }
-        self_
+        self_.request = self_.request.clone().connect_timeout(seconds as u64);
+        Ok(self_)
     }
 
     /// 设置连接超时（毫秒）
@@ -779,16 +791,17 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::connectTimeoutMs(int $ms): $self_
     ///
-    /// 负值跳过设置（保留原值），与 `connectTimeout()` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）；0 = 使用全局默认超时。
     pub fn connect_timeout_ms(
         self_: &mut ZendClassObject<PhpXhRequest>,
         ms: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值跳过（保留原值），避免 i64→u64 转换产生巨大数值
-        if ms >= 0 {
-            self_.request = self_.request.clone().connect_timeout_ms(ms as u64);
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        // 负值抛异常，避免 i64→u64 转换产生巨大数值
+        if ms < 0 {
+            return Err("connectTimeoutMs 不能为负值，0 = 使用全局默认超时".to_string());
         }
-        self_
+        self_.request = self_.request.clone().connect_timeout_ms(ms as u64);
+        Ok(self_)
     }
 
     /// 设置是否验证 SSL 证书
@@ -804,15 +817,27 @@ impl PhpXhRequest {
     }
 
     /// 设置 User-Agent
+    /// 传 null 清除请求级 User-Agent 覆盖（恢复使用全局默认）。
     ///
     /// # PHP 签名
-    /// public XHRequest::userAgent(string $ua): $self_
+    /// public XHRequest::userAgent(?string $ua): $self_
     pub fn user_agent(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        ua: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().user_agent(ua);
-        self_
+        ua: Option<String>,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        match ua {
+            Some(ua_str) => {
+                // ASCII 校验前置（与 to_reqwest 双保险），拒绝含非 ASCII 字节的 UA
+                XhRequest::validate_ascii_header_value("userAgent", &ua_str)
+                    .map_err(|e| e.to_string())?;
+                self_.request = self_.request.clone().user_agent(ua_str);
+            }
+            None => {
+                // null 清除请求级 User-Agent 覆盖
+                self_.request = self_.request.clone().clear_user_agent();
+            }
+        }
+        Ok(self_)
     }
 
     /// 设置代理地址
@@ -859,16 +884,17 @@ impl PhpXhRequest {
     /// # PHP 签名
     /// public XHRequest::maxRedirects(int $max): $self_
     ///
-    /// 负值跳过设置（保留原值），与 `setConfig` 的"负值跳过"行为一致。
+    /// 负值抛出异常（不静默跳过）。
     pub fn max_redirects(
         self_: &mut ZendClassObject<PhpXhRequest>,
         max: i64,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        // 负值跳过（保留原值）
-        if max >= 0 {
-            self_.request = self_.request.clone().max_redirects(max as u32);
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        // 负值抛异常
+        if max < 0 {
+            return Err("maxRedirects 不能为负值".to_string());
         }
-        self_
+        self_.request = self_.request.clone().max_redirects(max as u32);
+        Ok(self_)
     }
 
     /// 设置用户自定义数据
@@ -942,6 +968,19 @@ impl PhpXhRequest {
         self_
     }
 
+    /// 设置请求 URL
+    /// 允许在构造后变更 URL，便于复用已配置的请求模板。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::url(string $url): $self_
+    pub fn url(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        url: String,
+    ) -> &mut ZendClassObject<PhpXhRequest> {
+        self_.request = self_.request.clone().url(url);
+        self_
+    }
+
     /// 设置 HTTP 基本认证
     ///
     /// 对应 curl 的 CURLOPT_USERPWD。
@@ -949,18 +988,27 @@ impl PhpXhRequest {
     ///
     /// 空字符串或不含冒号 ':' 分隔符的凭据视为格式错误，立即抛异常，
     /// 避免后续 to_reqwest 拆分凭据时静默退化为「用户名+空密码」导致认证失败难排查。
+    /// 传 null 清除已设置的基本认证。
     ///
     /// # PHP 签名
-    /// public XHRequest::basicAuth(string $credentials): $self_
+    /// public XHRequest::basicAuth(?string $credentials): $self_
     pub fn basic_auth(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        credentials: String,
+        credentials: Option<String>,
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
-        self_.request = self_
-            .request
-            .clone()
-            .basic_auth(credentials)
-            .map_err(|e| e.to_string())?;
+        match credentials {
+            Some(creds) => {
+                self_.request = self_
+                    .request
+                    .clone()
+                    .basic_auth(creds)
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                // null 清除 HTTP 基本认证
+                self_.request = self_.request.clone().clear_basic_auth();
+            }
+        }
         Ok(self_)
     }
 
@@ -971,17 +1019,26 @@ impl PhpXhRequest {
     ///
     /// 空字符串抛异常（与 `basicAuth` 空值校验一致）——空 token 必然导致 401，
     /// 提前抛异常更友好。
+    /// 传 null 清除已设置的 Bearer Token（与空字符串抛异常共存：null 清除，空串报错）。
     ///
     /// # PHP 签名
-    /// public XHRequest::bearerToken(string $token): $self_
+    /// public XHRequest::bearerToken(?string $token): $self_
     pub fn bearer_token(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        token: String,
+        token: Option<String>,
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
-        if token.is_empty() {
-            return Err("bearerToken 不能为空字符串".to_string());
+        match token {
+            Some(t) => {
+                if t.is_empty() {
+                    return Err("bearerToken 不能为空字符串".to_string());
+                }
+                self_.request = self_.request.clone().bearer_token(t);
+            }
+            None => {
+                // null 清除 Bearer Token
+                self_.request = self_.request.clone().clear_bearer_token();
+            }
         }
-        self_.request = self_.request.clone().bearer_token(token);
         Ok(self_)
     }
 
@@ -994,60 +1051,73 @@ impl PhpXhRequest {
     ///
     /// 数组形式遇到整数键（列表数组）抛异常，与 `headers()` 行为一致
     /// （cookie 需 name=value，整数键无意义；传错形式时显式报错而非静默丢项）。
+    /// 传 null 清除已设置的 Cookie。
     ///
     /// # PHP 签名
-    /// public XHRequest::cookies(string|array $cookies): $self_
+    /// public XHRequest::cookies(string|array|null $cookies): $self_
     pub fn cookies<'a>(
         self_: &'a mut ZendClassObject<PhpXhRequest>,
-        cookies: &Zval,
+        cookies: Option<&Zval>,
     ) -> Result<&'a mut ZendClassObject<PhpXhRequest>, String> {
-        let cookie_str = if let Some(arr) = cookies.array() {
-            // 数组形式：['name' => 'value', ...] → "name=value; name2=value2"
-            // 值类型转换与 form() 对齐：标量（string/int/float/bool）转字符串，
-            // 数组/对象/资源抛异常（避免 cookie 项静默丢失）。
-            let mut parts: Vec<String> = Vec::new();
-            for_each_kv(arr, |key, val| {
-                // 整数键（列表数组）不支持，与 headers() 行为一致：抛异常
-                if key.is_long() {
-                    return Err(
-                        "cookies() 不支持列表数组（整数键），请使用关联数组 ['name' => 'value'] 形式"
-                            .to_string(),
-                    );
-                }
-                let k = key.to_string();
-                // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
-                // Zval::string() 遇到非 UTF-8 字节会返回 None 导致 cookie 项被静默丢弃，
-                // 优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
-                let v = if let Some(bytes) = val.binary::<u8>() {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                } else if let Some(s) = val.string() {
+        let cookie_str = match cookies {
+            Some(zv) if !zv.is_null() => {
+                if let Some(arr) = zv.array() {
+                    // 数组形式：['name' => 'value', ...] → "name=value; name2=value2"
+                    // 值类型转换与 form() 对齐：标量（string/int/float/bool）转字符串，
+                    // 数组/对象/资源抛异常（避免 cookie 项静默丢失）。
+                    let mut parts: Vec<String> = Vec::new();
+                    for_each_kv(arr, |key, val| {
+                        // 整数键（列表数组）不支持，与 headers() 行为一致：抛异常
+                        if key.is_long() {
+                            return Err(
+                                "cookies() 不支持列表数组（整数键），请使用关联数组 ['name' => 'value'] 形式"
+                                    .to_string(),
+                            );
+                        }
+                        let k = key.to_string();
+                        // 二进制安全读取：PHP 字符串本质是字节序列，可能含非 UTF-8 字节。
+                        // Zval::string() 遇到非 UTF-8 字节会返回 None 导致 cookie 项被静默丢弃，
+                        // 优先用 binary::<u8>() 取原始字节，再用 lossy 转为字符串。
+                        let v = if let Some(bytes) = val.binary::<u8>() {
+                            String::from_utf8_lossy(&bytes).into_owned()
+                        } else if let Some(s) = val.string() {
+                            s
+                        } else if let Some(l) = val.long() {
+                            l.to_string()
+                        } else if let Some(d) = val.double() {
+                            d.to_string()
+                        } else if let Some(b) = val.bool() {
+                            if b { "1" } else { "0" }.to_string()
+                        } else {
+                            return Err(format!(
+                                "cookies 数组值必须是标量（字段 '{}'），数组/对象/资源请用其他方式传递",
+                                k
+                            ));
+                        };
+                        // 对 value 做 URL 编码，防止含 ;/= 的 value 破坏 Cookie 格式或注入伪造 cookie
+                        // 与 PHP setcookie() 默认行为对齐。key 不编码（cookie name 通常为字母数字）。
+                        let encoded_v: String = form_urlencoded::byte_serialize(v.as_bytes()).collect();
+                        parts.push(format!("{}={}", k, encoded_v));
+                        Ok(())
+                    })
+                    .map_err(|e| format!("cookies 数组处理失败: {}", e))?;
+                    parts.join("; ")
+                } else if let Some(s) = zv.string() {
+                    // 字符串形式（向后兼容）
                     s
-                } else if let Some(l) = val.long() {
-                    l.to_string()
-                } else if let Some(d) = val.double() {
-                    d.to_string()
-                } else if let Some(b) = val.bool() {
-                    if b { "1" } else { "0" }.to_string()
                 } else {
-                    return Err(format!(
-                        "cookies 数组值必须是标量（字段 '{}'），数组/对象/资源请用其他方式传递",
-                        k
-                    ));
-                };
-                // 对 value 做 URL 编码，防止含 ;/= 的 value 破坏 Cookie 格式或注入伪造 cookie
-                // 与 PHP setcookie() 默认行为对齐。key 不编码（cookie name 通常为字母数字）。
-                let encoded_v: String = form_urlencoded::byte_serialize(v.as_bytes()).collect();
-                parts.push(format!("{}={}", k, encoded_v));
-                Ok(())
-            })
-            .map_err(|e| format!("cookies 数组处理失败: {}", e))?;
-            parts.join("; ")
-        } else if let Some(s) = cookies.string() {
-            // 字符串形式（向后兼容）
-            s
-        } else {
-            return Err("cookies 参数必须是字符串或数组".to_string());
+                    return Err("cookies 参数必须是字符串或数组".to_string());
+                }
+            }
+            _ => {
+                // null 清除 Cookie
+                self_.request = self_.request.clone().clear_cookies();
+                return Ok(self_);
+            }
         };
+        // ASCII 校验前置（与 to_reqwest 双保险），拒绝含非 ASCII 字节的 cookie
+        XhRequest::validate_ascii_header_value("cookies", &cookie_str)
+            .map_err(|e| e.to_string())?;
         self_.request = self_.request.clone().cookies(cookie_str);
         Ok(self_)
     }
@@ -1055,16 +1125,27 @@ impl PhpXhRequest {
     /// 设置 Accept-Encoding
     ///
     /// 对应 curl 的 CURLOPT_ENCODING。
-    /// 如 "gzip, deflate, br"
+    /// 如 "gzip, deflate, br"。传 null 清除 Accept-Encoding（恢复使用全局默认）。
     ///
     /// # PHP 签名
-    /// public XHRequest::encoding(string $encoding): $self_
+    /// public XHRequest::encoding(?string $encoding): $self_
     pub fn encoding(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        encoding: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().encoding(encoding);
-        self_
+        encoding: Option<String>,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        match encoding {
+            Some(enc) => {
+                // ASCII 校验前置（与 to_reqwest 双保险）
+                XhRequest::validate_ascii_header_value("encoding", &enc)
+                    .map_err(|e| e.to_string())?;
+                self_.request = self_.request.clone().encoding(enc);
+            }
+            None => {
+                // null 清除 Accept-Encoding
+                self_.request = self_.request.clone().clear_encoding();
+            }
+        }
+        Ok(self_)
     }
 
     /// 设置自定义请求方法
@@ -1085,16 +1166,26 @@ impl PhpXhRequest {
     /// 设置 Range 请求范围
     ///
     /// 对应 curl 的 CURLOPT_RANGE。
-    /// 格式: "0-1023" 或 "0-" 或 "-1023"
+    /// 格式: "0-1023" 或 "0-" 或 "-1023"。传 null 清除 Range 请求范围。
     ///
     /// # PHP 签名
-    /// public XHRequest::range(string $range): $self_
+    /// public XHRequest::range(?string $range): $self_
     pub fn range(
         self_: &mut ZendClassObject<PhpXhRequest>,
-        range: String,
-    ) -> &mut ZendClassObject<PhpXhRequest> {
-        self_.request = self_.request.clone().range(range);
-        self_
+        range: Option<String>,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        match range {
+            Some(r) => {
+                // ASCII 校验前置（与 to_reqwest 双保险）
+                XhRequest::validate_ascii_header_value("range", &r).map_err(|e| e.to_string())?;
+                self_.request = self_.request.clone().range(r);
+            }
+            None => {
+                // null 清除 Range 请求范围
+                self_.request = self_.request.clone().clear_range();
+            }
+        }
+        Ok(self_)
     }
 
     /// 设置多部分表单数据（支持文件上传）
@@ -1224,8 +1315,25 @@ impl PhpXhRequest {
     }
 
     /// 获取 HTTP 方法
+    /// 若设置了自定义方法（customMethod），优先返回自定义方法字符串；
+    /// 否则返回标准 HTTP 方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS）。
     pub fn get_method(&self) -> String {
+        if let Some(custom) = self.request.get_custom_method() {
+            return custom.to_string();
+        }
         self.request.get_method().to_string()
+    }
+
+    /// 获取请求体
+    /// 返回 body() 设置的原始字符串或 null（未设置时）。
+    /// 仅返回通过 `body()` 设置的原始字节体（Bytes）；JSON/表单/multipart 体不在此返回。
+    /// 非有效 UTF-8 字节以替换字符（U+FFFD）还原，与 PHP 字符串字节序列语义一致。
+    pub fn get_body(&self) -> Option<String> {
+        use crate::request::BodyType;
+        match self.request.get_body() {
+            BodyType::Bytes(data) => Some(String::from_utf8_lossy(data).into_owned()),
+            _ => None,
+        }
     }
 
     /// 获取请求超时（秒）
@@ -1482,7 +1590,7 @@ impl PhpXhMulti {
 
     /// 设置批量级超时（秒）
     /// 超时后 abort 未完成的任务并返回错误。
-    /// 0 = 无超时（默认）。
+    /// 0 = 无批量超时（默认）。
     /// 注意：此超时是整个批量请求的总时限，
     /// 单请求超时由 XHRequest::timeout() 单独控制。
     ///
@@ -2015,7 +2123,7 @@ impl PhpXhThreadPool {
 
     /// 设置批量级超时（秒）
     /// 超时后 abort 未完成的任务并返回错误。
-    /// 0 = 无超时（默认）。
+    /// 0 = 无批量超时（默认）。
     /// 注意：此超时是整个批量请求的总时限，
     /// 单请求超时由 XHRequest::timeout() 单独控制。
     ///

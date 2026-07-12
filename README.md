@@ -473,10 +473,10 @@ XHCurl::setConfig([
 |------|-----------|------|
 | `header(string $name, string $value)` | - | 设置请求头 |
 | `headers(array $headers): $this` | - | 批量设置请求头，先校验全部再存储；任一 header 名/值非法时整体抛异常（fail-fast） |
-| `cookies(string\|array $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，value 会做 URL 编码（与 PHP `setcookie()` 默认行为一致，防止含 `;`/`=` 的 value 破坏 Cookie 格式或注入伪造 cookie；key 不编码），字符串形式向后兼容直接设置原始 cookie 字符串 |
-| `basicAuth(string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`） |
-| `bearerToken(string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证 |
-| `encoding(string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`） |
+| `cookies(string\|array\|null $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，value 会做 URL 编码（与 PHP `setcookie()` 默认行为一致，防止含 `;`/`=` 的 value 破坏 Cookie 格式或注入伪造 cookie；key 不编码），字符串形式向后兼容直接设置原始 cookie 字符串；传 `null` 清除已设值（与 `proxy(null)` 一致） |
+| `basicAuth(?string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
+| `bearerToken(?string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证；传 `null` 清除已设值（与 `proxy(null)` 一致） |
+| `encoding(?string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 
 #### TLS/SSL
 
@@ -494,15 +494,16 @@ XHCurl::setConfig([
 | `timeout(int $seconds)` | 请求超时（秒） |
 | `timeoutMs(int $ms): $this` | 请求超时（毫秒精度）。`timeout()` 保持秒级不变（向后兼容）；同时设置时优先级：`timeoutMs` > `timeout`（以毫秒级为准） |
 | `connectTimeout(int $seconds)` | 连接超时（秒） |
-| `connectTimeoutMs(int $ms): $this` | 连接超时（毫秒精度），与 `connectTimeout(int $seconds)` 对称。0 或负值忽略 |
-| `userAgent(string $ua)` | User-Agent |
+| `connectTimeoutMs(int $ms): $this` | 连接超时（毫秒精度），与 `connectTimeout(int $seconds)` 对称。0 = 使用全局默认值，负值抛异常 |
+| `userAgent(?string $ua)` | User-Agent；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `proxy(?string $proxy): $this` | 代理地址（支持 http/https/socks5）；传 `null` 清除请求级代理覆盖（与 `setConfig(['proxy' => null])` 对称） |
 | `followRedirects(bool $follow)` | 跟随重定向 |
 | `maxRedirects(int $max)` | 最大重定向次数 |
-| `range(string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`） |
+| `range(?string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `setId(string $id)` / `id(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
 | `setUserData(array $data)` / `userData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
-| `getUrl()` / `getMethod()` | 获取 URL / 方法 |
+| `url(string $url): $this` | 链式 setter，允许在构造后变更请求 URL |
+| `getUrl()` / `getMethod()` | 获取 URL / 方法；`getMethod()` 在设置了 `customMethod()` 时返回自定义方法名（与实际请求使用的方法一致） |
 | `getTimeout()` | `(): ?int` 获取请求级超时（秒），未设置返回 null |
 | `getConnectTimeout()` | `(): ?int` 获取连接超时（秒），未设置返回 null |
 | `getTimeoutMs()` | `(): ?int` 获取请求级超时（毫秒），未设置返回 null |
@@ -514,9 +515,18 @@ XHCurl::setConfig([
 | `getUserAgent()` | `(): ?string` 获取 User-Agent，未设置返回 null |
 | `getId()` | `(): ?string` 获取请求 ID，未设置返回 null |
 | `getUserData()` | `(): ?string` 获取用户自定义数据（JSON 字符串），未设置返回 null |
+| `getCustomMethod()` | `(): ?string` 获取 `customMethod()` 设置的自定义方法，未设置返回 null |
+| `getBody()` | `(): ?string` 获取 `body()`/`json()`/`form()` 设置的请求体字符串，未设置返回 null |
 
 > **timeout 类 0 值语义**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`
-> 传 `0` 或负值表示跳过设置（使用全局默认值），而非"立即超时"。
+> 传 `0` 表示跳过设置（使用全局默认值），而非"立即超时"；负值抛异常（见「迁移注意事项」的 BREAKING 变更）。
+
+> **两类 `timeout(0)` 语义差异（设计差异）**：
+> - **`XHRequest::timeout(0)`（单请求级）**：0 = 使用全局默认超时（不覆盖全局配置）
+> - **`XHMulti::timeout(0)` / `XHThreadPool::timeout(0)`（批量级）**：0 = 无批量超时（不限制批量总时长）
+>
+> 这是设计差异：单请求的 0 是"不覆盖全局"，批量的 0 是"不限制批量"。两者独立配置，
+> `XHRequest::timeout()` 控制单个请求超时，`XHMulti/XHThreadPool::timeout()` 控制整批总执行时长。
 
 > **请求级配置覆盖**：`verifySsl()`/`proxy()`/`connectTimeout()`/`followRedirects()`/
 > `maxRedirects()` 都是请求级覆盖，会基于全局配置构建新 Client 应用这些参数。
@@ -543,12 +553,13 @@ XHCurl::setConfig([
 > - `form()`：含数组/对象/资源值时抛异常（提示用 `multipart()` 或 `json()`）
 > - `basicAuth()`：空字符串或无冒号分隔符时抛异常（提示格式 `user:pass`）
 > - `maxConcurrency()`/`maxResponseSize()`/`timeout()`（XHMulti/XHThreadPool）：负值抛异常（0 = 无限制/使用默认，合法）
+> - `timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`/`maxRedirects()`（XHRequest）：负值抛异常（0 = 使用全局默认值，合法）
+> - `userAgent()`/`encoding()`/`range()`/`cookies()`：含非 ASCII 字节时在 setter 时抛异常（fail-fast，之前延迟到 `execute()`）
 >
 > **请求级失败（返回 `success=false` 数组）**——属于"网络/服务端层面失败"，不抛异常：
 > - HTTP 请求失败（超时、DNS、SSL、连接拒绝）
 > - 返回非 2xx 状态码（如果配置了）
 > - 响应体超限
-> - `cookies()`/`encoding()`/`range()`/`userAgent()`：含非 ASCII 字节时在 `execute()` 阶段返回 `success=false` 结果（`error` 字段含字段名和原始值）
 >
 > 所有 API（`execute()`/`XHMulti::execute()`/`XHThreadPool::execute()`/
 > `await()`/`gather()`/`each()`）在请求级失败时**统一返回 `success=false` 的结果数组**，
@@ -1008,7 +1019,9 @@ $r = xhrun('pwd', [], ['cwd' => '/tmp']);
 
 ### timeout 0 值语义
 - **curl**：`CURLOPT_TIMEOUT, 0` 在某些版本表示"无超时"，另一些版本表示"立即超时"（行为不一致）
-- **XHCurl**：`timeout(0)`/`timeoutMs(0)`/`connectTimeout(0)`/`connectTimeoutMs(0)` 统一表示"跳过设置（使用全局默认值）"，而非立即超时
+- **XHCurl（单请求级）**：`XHRequest::timeout(0)`/`timeoutMs(0)`/`connectTimeout(0)`/`connectTimeoutMs(0)` 表示"跳过设置（使用全局默认值）"，而非立即超时（0 = 不覆盖全局）
+- **XHCurl（批量级）**：`XHMulti::timeout(0)`/`XHThreadPool::timeout(0)` 表示"无批量超时（不限制批量总时长）"，与单请求级的 0 语义不同（设计差异）
+- **XHCurl（负值）**：两类 `timeout()` 的负值均抛异常（不再静默跳过，见下方 BREAKING 变更）
 
 ### 响应头键名小写
 - **curl**：`curl_getinfo()` 或 `$curlinfo` 保留原始大小写
@@ -1022,6 +1035,51 @@ $r = xhrun('pwd', [], ['cwd' => '/tmp']);
 ### 批量配置与单请求配置分离
 - **Guzzle**：`TransferOption::TIMEOUT` 同时控制单请求和批量
 - **XHCurl**：单请求超时用 `XHRequest::timeout()`，批量级总超时用 `XHMulti::timeout()`/`XHThreadPool::timeout()`（两者独立）
+
+### BREAKING 变更（版本升级注意事项）
+
+以下两项为不兼容变更，从旧版本升级时需检查代码：
+
+#### 1. XHRequest 数值 setter 负值现在抛异常
+
+**影响方法**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`/`maxRedirects()`
+
+- **旧行为**：传入负值时静默跳过（保留原值，不报错）
+- **新行为**：传入负值时立即抛 PHP 异常（fail-fast）
+- **迁移**：将负值改为 `0`（使用全局默认值/不覆盖）或正数。如需"不设置"，传 `0` 而非负值。
+
+```php
+// ❌ 旧行为：负值被静默跳过（现在会抛异常）
+$req->timeout(-1);          // BREAKING：抛异常
+$req->maxRedirects(-1);      // BREAKING：抛异常
+
+// ✅ 新行为：传 0 表示"使用全局默认值"
+$req->timeout(0);            // OK：使用全局默认超时
+$req->maxRedirects(0);       // OK：使用全局默认重定向次数
+```
+
+> `XHMulti`/`XHThreadPool` 的 `maxConcurrency()`/`maxResponseSize()`/`timeout()` 原本就拒绝负值，本次变更让 `XHRequest` 的数值 setter 行为与之一致。
+
+#### 2. userAgent/encoding/range/cookies 非 ASCII 现在在 setter 时抛异常
+
+**影响方法**：`userAgent()`/`encoding()`/`range()`/`cookies()`
+
+- **旧行为**：传入含非 ASCII 字节的值时，延迟到 `execute()` 阶段返回 `success=false` 结果（`error` 字段含字段名和原始值）
+- **新行为**：在 setter 调用时立即抛 PHP 异常（fail-fast）
+- **迁移**：确保传入 ASCII 字符串。这些字段的值应为 ASCII（HTTP header/Cookie 规范要求），如需传输非 ASCII 内容请放在请求体中。
+
+```php
+// ❌ 旧行为：延迟到 execute() 返回 success=false（现在会在 setter 抛异常）
+$req->userAgent("MyAgent\xFF");    // BREAKING：setter 抛异常
+$req->cookies("name=值");          // BREAKING：setter 抛异常
+
+// ✅ 新行为：传入 ASCII 字符串
+$req->userAgent("MyAgent/1.0");     // OK
+$req->cookies("name=ascii_value"); // OK
+```
+
+> 这两项变更将错误检测点前移到调用处（fail-fast），避免等到 `execute()` 才发现配置问题，便于定位。
+> 配置类错误需用 `try`/`catch` 捕获（详见「结果数组字段」的错误处理分两类说明）。
 
 ---
 

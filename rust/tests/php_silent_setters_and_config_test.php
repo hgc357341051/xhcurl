@@ -4,7 +4,7 @@
 // |                                                                        |
 // | 验证 fix-silent-setters-and-config-lifecycle spec 的 Task 1-10 修复：     |
 // |   Task 1: setConfig 配置指纹比对，全局 Client 重建（无覆盖请求立即生效）  |
-// |   Task 2: cookies/encoding/range/userAgent 非法值抛异常（execute 时）     |
+// |   Task 2: cookies/encoding/range/userAgent 非法值抛异常（setter 时）     |
 // |   Task 4: form() 含数组/对象值抛异常（setter 时）                        |
 // |   Task 5: header() 非法值立即抛异常（fail-fast，非 execute 时）           |
 // |   Task 6: connectTimeoutMs(int $ms) 毫秒级连接超时                       |
@@ -173,53 +173,61 @@ try {
 check("form() 合法标量值不抛异常", $validFormOk);
 
 // ==================================================================
-// Task 2: cookies/encoding/range/userAgent 非法值抛异常（execute 时）
-//    request.rs to_reqwest 中 HeaderValue::from_str 失败返回 Err。
-//    这些 setter 不在调用时校验，而在 execute → to_reqwest 时校验。
-//    execute() 统一将 to_reqwest 错误包装为 success=false 结果数组
-//    （与 XHMulti/fiber 路径一致，不抛异常），error 字段含字段名。
+// Task 2: cookies/encoding/range/userAgent 非法值抛异常（setter 时）
+//    P2-3 BREAKING: 非 ASCII 值现在在 setter 时立即抛异常（之前延迟到
+//    execute 返回 success=false）。php_ext.rs 各 setter 调用
+//    XhRequest::validate_ascii_header_value 前置校验，与 to_reqwest
+//    内的校验形成双保险。错误信息含字段名和「非 ASCII」关键词。
 // ==================================================================
-echo "\n=== Task 2: cookies/encoding/range/userAgent 非法值 execute 失败 ===\n";
+echo "\n=== Task 2: cookies/encoding/range/userAgent 非法值 setter 抛异常 ===\n";
 
-// cookies 含中文（非 ASCII）→ execute 返回 success=false
-$result = XHCurl::createRequest($BASE . '/get')
-    ->get()
-    ->cookies('session=中文')
-    ->timeout(10)
-    ->execute();
-$err = $result['error'] ?? '';
-check("cookies() 含中文 execute 失败", $result['success'] === false);
-check("cookies() 错误信息含字段名", strpos($err, 'cookies') !== false);
+// cookies 含中文（非 ASCII）→ setter 抛异常
+$caughtCookiesNonAscii = false;
+try {
+    XHCurl::createRequest($BASE . '/get')
+        ->get()
+        ->cookies('session=中文');
+} catch (\Throwable $e) {
+    $caughtCookiesNonAscii = strpos($e->getMessage(), 'cookies') !== false
+                          && strpos($e->getMessage(), '非 ASCII') !== false;
+}
+check("cookies() 含非 ASCII setter 抛异常", $caughtCookiesNonAscii);
 
-// userAgent 含 emoji（非 ASCII）→ execute 返回 success=false
-$result = XHCurl::createRequest($BASE . '/get')
-    ->get()
-    ->userAgent('MyClient 😀')
-    ->timeout(10)
-    ->execute();
-$err = $result['error'] ?? '';
-check("userAgent() 含 emoji execute 失败", $result['success'] === false);
-check("userAgent() 错误信息含字段名", strpos($err, 'user_agent') !== false);
+// userAgent 含 emoji（非 ASCII）→ setter 抛异常
+$caughtUaNonAscii = false;
+try {
+    XHCurl::createRequest($BASE . '/get')
+        ->get()
+        ->userAgent('MyClient 😀');
+} catch (\Throwable $e) {
+    $caughtUaNonAscii = strpos($e->getMessage(), 'userAgent') !== false
+                     && strpos($e->getMessage(), '非 ASCII') !== false;
+}
+check("userAgent() 含非 ASCII setter 抛异常", $caughtUaNonAscii);
 
-// range 含非 ASCII → execute 返回 success=false
-$result = XHCurl::createRequest($BASE . '/get')
-    ->get()
-    ->range('0-中文')
-    ->timeout(10)
-    ->execute();
-$err = $result['error'] ?? '';
-check("range() 含非 ASCII execute 失败", $result['success'] === false);
-check("range() 错误信息含字段名", strpos($err, 'range') !== false);
+// range 含非 ASCII → setter 抛异常
+$caughtRangeNonAscii = false;
+try {
+    XHCurl::createRequest($BASE . '/get')
+        ->get()
+        ->range('0-中文');
+} catch (\Throwable $e) {
+    $caughtRangeNonAscii = strpos($e->getMessage(), 'range') !== false
+                        && strpos($e->getMessage(), '非 ASCII') !== false;
+}
+check("range() 含非 ASCII setter 抛异常", $caughtRangeNonAscii);
 
-// encoding 含非 ASCII → execute 返回 success=false
-$result = XHCurl::createRequest($BASE . '/get')
-    ->get()
-    ->encoding('gzip, 中文')
-    ->timeout(10)
-    ->execute();
-$err = $result['error'] ?? '';
-check("encoding() 含非 ASCII execute 失败", $result['success'] === false);
-check("encoding() 错误信息含字段名", strpos($err, 'encoding') !== false);
+// encoding 含非 ASCII → setter 抛异常
+$caughtEncodingNonAscii = false;
+try {
+    XHCurl::createRequest($BASE . '/get')
+        ->get()
+        ->encoding('gzip, 中文');
+} catch (\Throwable $e) {
+    $caughtEncodingNonAscii = strpos($e->getMessage(), 'encoding') !== false
+                           && strpos($e->getMessage(), '非 ASCII') !== false;
+}
+check("encoding() 含非 ASCII setter 抛异常", $caughtEncodingNonAscii);
 
 // ==================================================================
 // Task 9: HEAD 请求跳过 body 读取

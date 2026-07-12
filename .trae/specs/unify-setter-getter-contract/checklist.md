@@ -1,0 +1,16 @@
+- [x] P1-1: `getMethod()` 在 customMethod 设置后返回自定义方法名（与 to_reqwest 实际行为一致）
+- [x] P1-1: 新增 `getCustomMethod(): ?string` getter
+- [x] P2-1: XHRequest 的 `timeout`/`timeoutMs`/`connectTimeout`/`connectTimeoutMs`/`maxRedirects` 负值抛异常
+- [x] P2-2: README 与 PHP doc 注明 XHRequest.timeout(0) 与 XHMulti/XHThreadPool.timeout(0) 语义差异
+- [x] P2-3: `cookies`/`encoding`/`range`/`userAgent` 的非 ASCII 校验前置到 setter
+- [x] P3-1: `basicAuth`/`bearerToken`/`userAgent`/`encoding`/`range`/`cookies` 支持 null 参数清除
+- [x] P3-2: 暴露 `getBody(): ?string` getter
+- [x] P3-3: 暴露 `url(string $url): $self_` setter
+- [x] 新测试文件 `rust/tests/php_unify_setter_getter_test.php` 覆盖所有新增行为（23 个用例）
+- [x] 现有测试中受 BREAKING 影响的用例已更新断言（负值/延迟 ASCII 校验）
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-targets --features php -- -D warnings` 通过
+- [x] `cargo test --lib --features php` 通过（99 个单元测试通过）
+- [x] 扩展编译成功并同步到 PHP 扩展目录
+- [x] 全部 PHP 测试文件串行运行全通过（16 个文件 / 433 用例 / 0 失败）
+- [x] 合理性评估报告输出（每项 P1/P2/P3 修复前/修复后/PHP 用户受益 + 破坏性变更清单与迁移建议）

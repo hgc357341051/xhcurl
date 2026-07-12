@@ -461,6 +461,42 @@ impl XhRequest {
         self
     }
 
+    /// 清除 HTTP 基本认证凭据（恢复无认证）
+    pub fn clear_basic_auth(mut self) -> Self {
+        self.auth = None;
+        self
+    }
+
+    /// 清除 Bearer Token（恢复无认证）
+    pub fn clear_bearer_token(mut self) -> Self {
+        self.bearer_token = None;
+        self
+    }
+
+    /// 清除请求级 User-Agent 覆盖（恢复使用全局默认）
+    pub fn clear_user_agent(mut self) -> Self {
+        self.user_agent = None;
+        self
+    }
+
+    /// 清除 Accept-Encoding（恢复使用全局默认）
+    pub fn clear_encoding(mut self) -> Self {
+        self.encoding = None;
+        self
+    }
+
+    /// 清除 Range 请求范围
+    pub fn clear_range(mut self) -> Self {
+        self.range = None;
+        self
+    }
+
+    /// 清除 Cookie 字符串
+    pub fn clear_cookies(mut self) -> Self {
+        self.cookies = None;
+        self
+    }
+
     /// 设置是否跟随重定向
     pub fn follow_redirects(mut self, follow: bool) -> Self {
         self.follow_redirects = Some(follow);
@@ -672,7 +708,10 @@ impl XhRequest {
     /// emoji）常被服务端/代理误处理，需显式拒绝并提示 urlencode。
     /// 此函数在 `HeaderValue::from_str` 之前先做 `is_ascii()` 检查，
     /// 拒绝非 ASCII 值；再由 `HeaderValue::from_str` 拒绝控制字符。
-    fn validate_ascii_header_value(
+    ///
+    /// 公开（pub）以便 php_ext.rs 的 PHP setter 在设置值前提前校验（fail-fast），
+    /// 与 `to_reqwest` 内的校验形成双保险。
+    pub fn validate_ascii_header_value(
         field_label: &str,
         value: &str,
     ) -> XhCurlResult<reqwest::header::HeaderValue> {
