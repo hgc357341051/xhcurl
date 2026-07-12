@@ -6,6 +6,58 @@
 ## [Unreleased]
 
 
+## [1.2.0] - 2026-07-12
+
+本版本为**次版本号升级**（含 BREAKING 变更），完成**空字符串 fail-fast 校验扩展**
+（userAgent/encoding/range/cookies 与第七轮 proxy 对齐）、**错误消息格式统一**
+（bearerToken/maxRedirects/xhrun）、**新增 3 个便捷 setter 与 4 个 getter**
+（referer/cookie/jsonStr + getHeader/getMultipart/getReferer/getBody 扩展）、
+**maxRedirects(0) 文档化**与测试覆盖补齐。
+
+### BREAKING：空字符串 fail-fast 校验扩展
+- **`userAgent('')` 抛异常**：与第七轮 `proxy('')` 一致，空字符串不再静默接受。
+  错误消息含"传 null 清除 User-Agent 覆盖"。
+- **`encoding('')` 抛异常**：同上，错误消息含"传 null 清除 Accept-Encoding 覆盖"。
+- **`range('')` 抛异常**：同上，错误消息含"传 null 清除 Range 覆盖"。
+- **`cookies('')` 字符串路径抛异常**：同上，错误消息含"传 null 清除 Cookie 覆盖"。
+  （数组路径不受影响，因数组形式无空字符串歧义）
+- **迁移**：清除请求级覆盖请用 `null`（如 `->userAgent(null)`），不要传空字符串。
+
+### 新增：3 个便捷 setter
+- **`referer(?string $referer): $this`**：设置 Referer header（CURLOPT_REFERER 等价）。
+  null 清除，空字符串抛异常，ASCII 校验。补齐 PHP cURL 用户的习惯用法。
+- **`cookie(string $name, string $value): $this`**：增量添加单个 cookie，不覆盖已有 cookies。
+  与 `cookies()` 的"整体覆盖"语义不同，`cookie()` 追加到现有 Cookie 字符串末尾。
+  value 自动 URL 编码（防注入）。name/value 空字符串抛异常。
+- **`jsonStr(string $json): $this`**：传入预序列化的 JSON 字符串作为请求体。
+  与 `json()` 不同：`json()` 接受 PHP 数组并内部序列化；`jsonStr()` 直接使用字符串，
+  避免双重序列化。自动设置 Content-Type: application/json。无效 JSON 抛异常。
+
+### 新增：4 个 getter
+- **`getHeader(string $name): ?string`**：大小写不敏感查询单个 header 值。
+- **`getMultipart(): ?array`**：返回已设置的 multipart 字段数组（含 name/value/filename/content_type 四键）。
+- **`getReferer(): ?string`**：返回 referer() 设置的值。
+- **扩展 `getBody(): ?string`**：对 `json()` 返回序列化 JSON 字符串，对 `form()` 返回 `k=v&k=v` 格式字符串。
+  `body()` 行为不变；`multipart()` 返回 null（含二进制文件内容，无法安全序列化）。
+
+### 改进：错误消息格式统一
+- **`bearerToken('')` 错误消息追加"传 null 清除 Bearer Token"**：与 `proxy('')` 风格对齐。
+- **`maxRedirects` 负值错误消息追加"0 = 不跟随重定向"**：与其他数值 setter 的"0 = ..."提示一致。
+- **`xhrun` 的 `timeout`/`max_output` 负值错误消息改为"0 = ..."格式**：去掉冗余的"得到 {}"值回显，
+  与其他 setter 错误消息风格统一。
+
+### 文档
+- README 新增 `referer()`/`cookie()`/`jsonStr()` 方法表行
+- README 新增 `getHeader()`/`getMultipart()`/`getReferer()` 方法表行
+- README 修改 `getBody()` 说明为返回 body/json/form 序列化字符串
+- README 明确说明 `maxRedirects(0)` 等价于 `followRedirects(false)`
+
+### 测试
+- 新增 `php_unify_empty_and_helpers_test.php`（约 30 用例），覆盖：
+  4 个 setter 空字符串抛异常、错误消息格式验证、3 个新 setter 正常工作与边界、
+  4 个新 getter 返回值验证、maxRedirects(0) 行为验证。
+
+
 ## [1.1.0] - 2026-07-12
 
 本版本为**次版本号升级**（含 BREAKING 变更），聚焦**响应字段集最终统一**

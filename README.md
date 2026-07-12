@@ -450,13 +450,14 @@ XHCurl::setConfig([
 | 方法 | 说明 |
 |------|------|
 | `json(array $data)` | JSON 请求体（自动设置 Content-Type: application/json） |
+| `jsonStr(string $json)` | 传入预序列化的 JSON 字符串作为请求体（与 `json()` 不同，避免双重序列化）；无效 JSON 抛异常 |
 | `form(array $data)` | 表单请求体（application/x-www-form-urlencoded） |
 | `body(string $data)` | 原始请求体（**二进制安全**，可传任意字节）。空字符串设置空 body（合法，如 POST 空 body）；非字符串抛异常 |
 | `multipart(array $fields)` | 文件上传（multipart/form-data，**字段值二进制安全**） |
 
-> **`getBody()` 返回范围**：仅返回通过 `body()` 设置的原始字节请求体；
-> `json()`/`form()`/`multipart()` 设置的请求体不在此返回（需自行序列化），
-> 未设置时返回 `null`。
+> **`getBody()` 返回范围**：返回 `body()` 设置的原始字节体、`json()` 序列化后的
+> JSON 字符串、`form()` 的 `k=v&k=v` 格式字符串；`multipart()` 返回 null
+> （含二进制文件内容，无法安全序列化），未设置时返回 `null`。
 
 > **二进制安全说明**：`body()` 与 `multipart()` 的字段值通过二进制安全接口读取
 > PHP 字符串（PHP 字符串本质是字节序列），不会因含非 UTF-8 字节而丢失或损坏，
@@ -479,8 +480,10 @@ XHCurl::setConfig([
 | `headers(array $headers): $this` | - | 批量设置请求头，先校验全部再存储；任一 header 名/值非法时整体抛异常（fail-fast） |
 | `cookies(string\|array\|null $cookies): $this` | CURLOPT_COOKIE | Cookie，接受字符串或数组；数组形式 `['name' => 'value', ...]` 自动拼接为 `"name=value; name2=value2"`，value 会做 URL 编码（与 PHP `setcookie()` 默认行为一致，防止含 `;`/`=` 的 value 破坏 Cookie 格式或注入伪造 cookie；key 不编码），字符串形式向后兼容直接设置原始 cookie 字符串；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `basicAuth(?string $credentials)` | CURLOPT_USERPWD | HTTP 基本认证（`user:pass`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
+| `cookie(string $name, string $value)` | - | 增量添加单个 cookie（追加到现有 Cookie 字符串，不覆盖已有 cookies）；value 自动 URL 编码（防注入）；name/value 空字符串抛异常 |
 | `bearerToken(?string $token)` | CURLOPT_XOAUTH2_BEARER | Bearer Token 认证；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `encoding(?string $encoding)` | CURLOPT_ENCODING | Accept-Encoding（如 `gzip, deflate`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
+| `referer(?string $referer)` | CURLOPT_REFERER | 设置 Referer header（CURLOPT_REFERER 等价），传 null 清除，空字符串抛异常 |
 
 #### TLS/SSL
 
@@ -502,7 +505,7 @@ XHCurl::setConfig([
 | `userAgent(?string $ua)` | User-Agent；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `proxy(?string $proxy): $this` | 代理地址（支持 http/https/socks5）；传 `null` 清除请求级代理覆盖（与 `setConfig(['proxy' => null])` 对称） |
 | `followRedirects(bool $follow)` | 跟随重定向 |
-| `maxRedirects(int $max)` | 最大重定向次数 |
+| `maxRedirects(int $max)` | 最大重定向次数；0 = 不跟随重定向（等价于 `followRedirects(false)`），负值抛异常 |
 | `range(?string $range)` | Range 请求（CURLOPT_RANGE，如 `0-1023`）；传 `null` 清除已设值（与 `proxy(null)` 一致） |
 | `setId(string $id)` / `id(string $id)` | 设置请求 ID（用于批量请求时标识结果） |
 | `setUserData(array $data)` / `userData(array $data)` | 用户自定义数据（随结果回传，JSON 字符串） |
@@ -513,6 +516,8 @@ XHCurl::setConfig([
 | `getTimeoutMs()` | `(): ?int` 获取请求级超时（毫秒），未设置返回 null |
 | `getConnectTimeoutMs()` | `(): ?int` 获取连接超时（毫秒），未设置返回 null |
 | `getHeaders()` | `(): array` 获取已设置的请求头（键名小写） |
+| `getHeader(string $name): ?string` | 大小写不敏感查询单个 header 值，未设置返回 null |
+| `getReferer(): ?string` | 返回 referer() 设置的值，未设置返回 null |
 | `getCookies()` | `(): ?string` 获取 cookie 字符串，未设置返回 null |
 | `getProxy()` | `(): ?string` 获取请求级代理，未设置返回 null |
 | `getVerifySsl()` | `(): ?bool` 获取 SSL 验证设置，未设置返回 null |
@@ -520,7 +525,8 @@ XHCurl::setConfig([
 | `getId()` | `(): ?string` 获取请求 ID，未设置返回 null |
 | `getUserData()` | `(): ?string` 获取用户自定义数据（JSON 字符串），未设置返回 null |
 | `getCustomMethod()` | `(): ?string` 获取 `customMethod()` 设置的自定义方法，未设置返回 null |
-| `getBody()` | `(): ?string` 获取 `body()` 设置的原始字节请求体；`json()`/`form()`/`multipart()` 设置的请求体不在此返回（需自行序列化），未设置返回 null |
+| `getBody()` | `(): ?string` 返回请求体字符串：body() 设置的原始字节体、json() 序列化后的 JSON 字符串、form() 的 k=v&k=v 格式字符串。multipart() 返回 null（含二进制，无法安全序列化）。未设置请求体返回 null |
+| `getMultipart(): ?array` | 返回已设置的 multipart 字段数组（含 name/value/filename/content_type），未设置返回 null |
 
 > **timeout 类 0 值语义**：`timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`
 > 传 `0` 表示跳过设置（使用全局默认值），而非"立即超时"；负值抛异常（见「迁移注意事项」的 BREAKING 变更）。
@@ -558,7 +564,8 @@ XHCurl::setConfig([
 > - `basicAuth()`：空字符串或无冒号分隔符时抛异常（提示格式 `user:pass`）
 > - `maxConcurrency()`/`maxResponseSize()`/`timeout()`（XHMulti/XHThreadPool）：负值抛异常（0 = 无限制/使用默认，合法）
 > - `timeout()`/`timeoutMs()`/`connectTimeout()`/`connectTimeoutMs()`/`maxRedirects()`（XHRequest）：负值抛异常（0 = 使用全局默认值，合法）
-> - `userAgent()`/`encoding()`/`range()`/`cookies()`：含非 ASCII 字节时在 setter 时抛异常（fail-fast，之前延迟到 `execute()`）
+> - `userAgent()`/`encoding()`/`range()`/`cookies()`/`referer()`：含非 ASCII 字节时在 setter 时抛异常（fail-fast，之前延迟到 `execute()`）
+> - `userAgent()`/`encoding()`/`range()`/`cookies()`/`referer()`：空字符串抛异常（传 `null` 清除请求级覆盖，与 `proxy('')` 一致）；`cookies()` 仅字符串路径抛异常，数组形式无空字符串歧义
 >
 > **请求级失败（返回 `success=false` 数组）**——属于"网络/服务端层面失败"，不抛异常：
 > - HTTP 请求失败（超时、DNS、SSL、连接拒绝）

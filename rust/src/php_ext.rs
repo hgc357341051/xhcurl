@@ -755,6 +755,31 @@ impl PhpXhRequest {
         Ok(self_)
     }
 
+    /// 设置 JSON 字符串请求体
+    ///
+    /// 与 json() 不同：json() 接受 PHP 数组并内部序列化为 JSON；
+    /// jsonStr() 接受预序列化的 JSON 字符串，避免双重序列化。
+    /// 自动设置 Content-Type: application/json。
+    ///
+    /// 无效 JSON 抛异常（fail-fast，避免 execute() 时才报错）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::jsonStr(string $json): $self_
+    pub fn json_str(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        json: String,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if json.is_empty() {
+            return Err("jsonStr 不能为空字符串".to_string());
+        }
+        self_.request = self_
+            .request
+            .clone()
+            .body_json_str(&json)
+            .map_err(|e| format!("jsonStr 无效 JSON: {}", e))?;
+        Ok(self_)
+    }
+
     /// 设置表单数据
     ///
     /// # PHP 签名
@@ -894,6 +919,11 @@ impl PhpXhRequest {
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
         match ua {
             Some(ua_str) => {
+                if ua_str.is_empty() {
+                    return Err(
+                        "userAgent 不能为空字符串，传 null 清除 User-Agent 覆盖".to_string()
+                    );
+                }
                 // ASCII 校验前置（与 to_reqwest 双保险），拒绝含非 ASCII 字节的 UA
                 XhRequest::validate_ascii_header_value("userAgent", &ua_str)
                     .map_err(|e| e.to_string())?;
@@ -961,7 +991,7 @@ impl PhpXhRequest {
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
         // 负值抛异常
         if max < 0 {
-            return Err("maxRedirects 不能为负值".to_string());
+            return Err("maxRedirects 不能为负值，0 = 不跟随重定向".to_string());
         }
         self_.request = self_.request.clone().max_redirects(max as u32);
         Ok(self_)
@@ -1112,7 +1142,7 @@ impl PhpXhRequest {
         match token {
             Some(t) => {
                 if t.is_empty() {
-                    return Err("bearerToken 不能为空字符串".to_string());
+                    return Err("bearerToken 不能为空字符串，传 null 清除 Bearer Token".to_string());
                 }
                 self_.request = self_.request.clone().bearer_token(t);
             }
@@ -1197,10 +1227,44 @@ impl PhpXhRequest {
                 return Ok(self_);
             }
         };
+        if cookie_str.is_empty() {
+            return Err("cookies 不能为空字符串，传 null 清除 Cookie 覆盖".to_string());
+        }
         // ASCII 校验前置（与 to_reqwest 双保险），拒绝含非 ASCII 字节的 cookie
         XhRequest::validate_ascii_header_value("cookies", &cookie_str)
             .map_err(|e| e.to_string())?;
         self_.request = self_.request.clone().cookies(cookie_str);
+        Ok(self_)
+    }
+
+    /// 增量添加单个 cookie（不覆盖已有 cookies）
+    ///
+    /// 与 cookies() 不同：cookies() 每次调用会覆盖整个 Cookie 字符串；
+    /// cookie() 追加到现有 Cookie 字符串末尾，用 "; " 分隔。
+    ///
+    /// 对应 PHP curl 的 curl_setopt($ch, CURLOPT_COOKIE, ...) 增量场景。
+    /// value 会被 URL 编码（防注入，与 cookies() 数组分支一致）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::cookie(string $name, string $value): $self_
+    pub fn cookie(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        name: String,
+        value: String,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        if name.is_empty() {
+            return Err("cookie name 不能为空字符串".to_string());
+        }
+        if value.is_empty() {
+            return Err("cookie value 不能为空字符串".to_string());
+        }
+        // name 与 value 的 ASCII 校验（与 cookies() 一致，拒绝含非 ASCII 字节的输入）
+        XhRequest::validate_ascii_header_value("cookie name", &name).map_err(|e| e.to_string())?;
+        XhRequest::validate_ascii_header_value("cookie value", &value)
+            .map_err(|e| e.to_string())?;
+        // value 做 URL 编码（防注入，与 cookies() 数组分支一致）
+        let encoded_v: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
+        self_.request = self_.request.clone().add_cookie_pair(&name, &encoded_v);
         Ok(self_)
     }
 
@@ -1217,6 +1281,11 @@ impl PhpXhRequest {
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
         match encoding {
             Some(enc) => {
+                if enc.is_empty() {
+                    return Err(
+                        "encoding 不能为空字符串，传 null 清除 Accept-Encoding 覆盖".to_string()
+                    );
+                }
                 // ASCII 校验前置（与 to_reqwest 双保险）
                 XhRequest::validate_ascii_header_value("encoding", &enc)
                     .map_err(|e| e.to_string())?;
@@ -1267,6 +1336,9 @@ impl PhpXhRequest {
     ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
         match range {
             Some(r) => {
+                if r.is_empty() {
+                    return Err("range 不能为空字符串，传 null 清除 Range 覆盖".to_string());
+                }
                 // ASCII 校验前置（与 to_reqwest 双保险）
                 XhRequest::validate_ascii_header_value("range", &r).map_err(|e| e.to_string())?;
                 self_.request = self_.request.clone().range(r);
@@ -1274,6 +1346,31 @@ impl PhpXhRequest {
             None => {
                 // null 清除 Range 请求范围
                 self_.request = self_.request.clone().clear_range();
+            }
+        }
+        Ok(self_)
+    }
+
+    /// 设置 Referer header
+    /// 对应 curl 的 CURLOPT_REFERER。
+    /// 传 null 清除 Referer 覆盖（恢复使用全局默认）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::referer(?string $referer): $self_
+    pub fn referer(
+        self_: &mut ZendClassObject<PhpXhRequest>,
+        referer: Option<String>,
+    ) -> Result<&mut ZendClassObject<PhpXhRequest>, String> {
+        match referer {
+            Some(r) => {
+                if r.is_empty() {
+                    return Err("referer 不能为空字符串，传 null 清除 Referer 覆盖".to_string());
+                }
+                XhRequest::validate_ascii_header_value("referer", &r).map_err(|e| e.to_string())?;
+                self_.request = self_.request.clone().referer(r);
+            }
+            None => {
+                self_.request = self_.request.clone().clear_referer();
             }
         }
         Ok(self_)
@@ -1400,6 +1497,37 @@ impl PhpXhRequest {
         Ok(self_)
     }
 
+    /// 获取已设置的 multipart 字段数组
+    ///
+    /// 返回数组，每个元素含 name/value/filename/content_type 四键。
+    /// 未设置 multipart 或 body 类型非 Multipart 时返回 null。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getMultipart(): ?array
+    pub fn get_multipart(&self) -> Option<ZBox<ZendHashTable>> {
+        match self.request.get_multipart() {
+            Some(fields) => {
+                let mut ht = ZendHashTable::new();
+                for (idx, field) in fields.iter().enumerate() {
+                    let mut field_ht = ZendHashTable::new();
+                    let _ = field_ht.insert("name", field.name.as_str());
+                    // value 是 Vec<u8>，作为二进制安全字符串返回
+                    let value_str = String::from_utf8_lossy(&field.value).into_owned();
+                    let _ = field_ht.insert("value", value_str.as_str());
+                    if let Some(ref fname) = field.filename {
+                        let _ = field_ht.insert("filename", fname.as_str());
+                    }
+                    if let Some(ref ctype) = field.content_type {
+                        let _ = field_ht.insert("content_type", ctype.as_str());
+                    }
+                    let _ = ht.insert_at_index(idx as i64, field_ht);
+                }
+                Some(ht)
+            }
+            None => None,
+        }
+    }
+
     /// 获取请求 URL
     pub fn get_url(&self) -> String {
         self.request.get_url().to_string()
@@ -1415,15 +1543,38 @@ impl PhpXhRequest {
         self.request.get_method().to_string()
     }
 
-    /// 获取请求体
-    /// 返回 body() 设置的原始字符串或 null（未设置时）。
-    /// 仅返回通过 `body()` 设置的原始字节体（Bytes）；JSON/表单/multipart 体不在此返回。
-    /// 非有效 UTF-8 字节以替换字符（U+FFFD）还原，与 PHP 字符串字节序列语义一致。
+    /// 获取请求体内容
+    ///
+    /// 返回规则：
+    /// - body(): 返回原始字节体的字符串形式（非有效 UTF-8 以 U+FFFD 替换）
+    /// - json(): 返回序列化后的 JSON 字符串
+    /// - form(): 返回 k1=v1&k2=v2 格式字符串（form_urlencoded 编码）
+    /// - multipart(): 返回 null（含二进制文件内容，无法安全序列化）
+    /// - 未设置请求体：返回 null
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getBody(): ?string
     pub fn get_body(&self) -> Option<String> {
         use crate::request::BodyType;
         match self.request.get_body() {
             BodyType::Bytes(data) => Some(String::from_utf8_lossy(data).into_owned()),
-            _ => None,
+            BodyType::Json(value) => serde_json::to_string(value).ok(),
+            BodyType::Form(pairs) => {
+                let s: String = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let encoded_k: String =
+                            form_urlencoded::byte_serialize(k.as_bytes()).collect();
+                        let encoded_v: String =
+                            form_urlencoded::byte_serialize(v.as_bytes()).collect();
+                        format!("{}={}", encoded_k, encoded_v)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&");
+                Some(s)
+            }
+            BodyType::Multipart(_) => None,
+            BodyType::None => None,
         }
     }
 
@@ -1465,6 +1616,18 @@ impl PhpXhRequest {
         ht
     }
 
+    /// 获取单个请求头的值（大小写不敏感）
+    ///
+    /// 与 getHeaders() 不同：getHeaders() 返回所有 header 的关联数组；
+    /// getHeader(name) 返回单个 header 的值，未设置时返回 null。
+    /// header 名大小写不敏感（HeaderManager 内部统一小写存储，查询时自动转小写）。
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getHeader(string $name): ?string
+    pub fn get_header(&self, name: String) -> Option<String> {
+        self.request.get_headers().get(&name)
+    }
+
     /// 获取 Cookie 字符串
     /// 返回 "name=value; name2=value2" 格式或 null。
     pub fn get_cookies(&self) -> Option<String> {
@@ -1484,6 +1647,14 @@ impl PhpXhRequest {
     /// 获取 User-Agent
     pub fn get_user_agent(&self) -> Option<String> {
         self.request.get_user_agent().map(|s| s.to_string())
+    }
+
+    /// 获取 Referer header 覆盖
+    ///
+    /// # PHP 签名
+    /// public XHRequest::getReferer(): ?string
+    pub fn get_referer(&self) -> Option<String> {
+        self.request.get_referer().map(|s| s.to_string())
     }
 
     /// 获取请求 ID
@@ -3383,14 +3554,14 @@ pub fn xhrun(
     // ===== 2. 解析 options =====
     let timeout_raw = opt_long(options, "timeout", XHRUN_DEFAULT_TIMEOUT_SECS as i64);
     if timeout_raw < 0 {
-        return Err(format!("timeout 不能为负值，得到 {}", timeout_raw));
+        return Err("xhrun timeout 不能为负值，0 = 无超时".to_string());
     }
     let timeout_secs: u64 = timeout_raw as u64;
     // max_output = 0 表示无限制（与 timeout = 0 语义一致）；负值抛异常（与 timeout 一致）
     let max_output: usize = {
         let v = opt_long(options, "max_output", XHRUN_DEFAULT_MAX_OUTPUT as i64);
         if v < 0 {
-            return Err(format!("max_output 不能为负值，得到 {}", v));
+            return Err("xhrun max_output 不能为负值，0 = 无限制".to_string());
         }
         if v == 0 {
             usize::MAX

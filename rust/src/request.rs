@@ -285,6 +285,9 @@ pub struct XhRequest {
     /// Range 请求范围（CURLOPT_RANGE）
     /// 格式: "0-1023" 表示请求前 1024 字节
     range: Option<String>,
+
+    /// Referer header 覆盖（None=使用全局/默认，Some=请求级覆盖）
+    referer: Option<String>,
 }
 
 impl XhRequest {
@@ -318,6 +321,7 @@ impl XhRequest {
             encoding: None,
             custom_method: None,
             range: None,
+            referer: None,
         }
     }
 
@@ -491,6 +495,12 @@ impl XhRequest {
         self
     }
 
+    /// 清除请求级 Referer 覆盖
+    pub fn clear_referer(mut self) -> Self {
+        self.referer = None;
+        self
+    }
+
     /// 清除 Cookie 字符串
     pub fn clear_cookies(mut self) -> Self {
         self.cookies = None;
@@ -547,6 +557,19 @@ impl XhRequest {
         self
     }
 
+    /// 增量追加一个 cookie 对到 cookies 字符串
+    ///
+    /// 若已有 cookies，追加 "; name=value"；否则新建 "name=value"。
+    /// 调用方负责对 value 做 URL 编码与 name 合法性校验。
+    pub fn add_cookie_pair(mut self, name: &str, value: &str) -> Self {
+        let pair = format!("{}={}", name, value);
+        self.cookies = Some(match self.cookies.take() {
+            Some(existing) if !existing.is_empty() => format!("{}; {}", existing, pair),
+            _ => pair,
+        });
+        self
+    }
+
     /// 设置 HTTP 基本认证凭据（CURLOPT_USERPWD）
     /// 格式: "username:password"
     ///
@@ -591,6 +614,12 @@ impl XhRequest {
         self
     }
 
+    /// 设置 Referer header（请求级覆盖）
+    pub fn referer(mut self, referer: impl Into<String>) -> Self {
+        self.referer = Some(referer.into());
+        self
+    }
+
     // ===== Getter 方法 =====
 
     /// 获取请求 URL
@@ -626,6 +655,14 @@ impl XhRequest {
     /// 获取 Cookie 字符串
     pub fn get_cookies(&self) -> Option<&str> {
         self.cookies.as_deref()
+    }
+
+    /// 获取 multipart 字段列表（仅当 body 为 Multipart 时返回 Some）
+    pub fn get_multipart(&self) -> Option<&Vec<MultipartField>> {
+        match &self.body {
+            BodyType::Multipart(fields) => Some(fields),
+            _ => None,
+        }
     }
 
     /// 获取 HTTP 基本认证凭据
@@ -693,6 +730,11 @@ impl XhRequest {
     /// 获取 User-Agent
     pub fn get_user_agent(&self) -> Option<&str> {
         self.user_agent.as_deref()
+    }
+
+    /// 获取 Referer header 覆盖
+    pub fn get_referer(&self) -> Option<&str> {
+        self.referer.as_deref()
     }
 
     /// 获取代理地址
@@ -863,6 +905,12 @@ impl XhRequest {
         if let Some(ua) = &self.user_agent {
             let v = Self::validate_ascii_header_value("user_agent", ua)?;
             builder = builder.header(reqwest::header::USER_AGENT, v);
+        }
+
+        // Referer（请求级覆盖，与 user_agent 一致：双保险 ASCII 校验）
+        if let Some(referer) = &self.referer {
+            let v = Self::validate_ascii_header_value("referer", referer)?;
+            builder = builder.header(reqwest::header::REFERER, v);
         }
 
         Ok(builder)
