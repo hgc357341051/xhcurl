@@ -85,6 +85,30 @@ if ($path === '/stream') {
     return;
 }
 
+if ($path === '/redirect') {
+    // 重定向测试端点：n>0 时 302 到 /redirect?n=n-1，n=0 时返回 200 JSON
+    $n = isset($_GET['n']) ? (int)$_GET['n'] : 1;
+    if ($n > 0) {
+        http_response_code(302);
+        header('Location: /redirect?n=' . ($n - 1));
+        return;
+    }
+    header('Content-Type: application/json');
+    echo json_encode(['redirected' => true, 'final_n' => 0]);
+    return;
+}
+
+if ($path === '/large') {
+    // 大响应体端点：返回指定字节数的 'a' 字符，上限 10MB 防止 mock_server OOM
+    $size = isset($_GET['size']) ? (int)$_GET['size'] : 1024;
+    if ($size > 10485760) {
+        $size = 10485760;
+    }
+    header('Content-Type: text/plain');
+    echo str_repeat('a', $size);
+    return;
+}
+
 // 默认：404
 http_response_code(404);
 echo json_encode(['error' => 'not found', 'path' => $path]);

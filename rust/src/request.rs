@@ -991,24 +991,20 @@ impl XhRequest {
         }
 
         // 请求级重定向策略（覆盖全局默认）
-        match self.follow_redirects {
-            Some(false) => {
-                builder = builder.redirect(reqwest::redirect::Policy::none());
-            }
-            Some(true) => {
-                if let Some(max) = self.max_redirects {
-                    builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
-                } else {
-                    builder = builder.redirect(reqwest::redirect::Policy::default());
-                }
-            }
-            None => {
-                // follow_redirects 未设置但 max_redirects 设置了：限制重定向次数
-                if let Some(max) = self.max_redirects {
-                    builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
-                }
-            }
+        // maxRedirects(0) 等价于 followRedirects(false)：不跟随重定向。
+        // 使用 Policy::none() 而非 Policy::limited(0)，后者在遇到重定向时
+        // 返回 "too many redirects" 错误而非返回 3xx 响应（reqwest 行为差异）。
+        let no_redirect = self.follow_redirects == Some(false) || self.max_redirects == Some(0);
+        if no_redirect {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        } else if let Some(max) = self.max_redirects {
+            // max_redirects > 0：限制重定向次数
+            builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
+        } else if self.follow_redirects == Some(true) {
+            // followRedirects(true) 但未设 maxRedirects：使用默认策略
+            builder = builder.redirect(reqwest::redirect::Policy::default());
         }
+        // else: follow_redirects=None, max_redirects=None → 不设置策略（使用 builder 默认）
 
         let client = builder.build().map_err(XhCurlError::from)?;
         // 存入缓存供后续同类请求复用。若已存在同名键（理论不会，因 OverrideKey

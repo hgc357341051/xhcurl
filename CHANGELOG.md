@@ -6,6 +6,55 @@
 ## [Unreleased]
 
 
+## [1.3.0] - 2026-07-12
+
+本版本为**次版本号升级**（非 BREAKING），聚焦**修正 P1 文档错误**
+（README 截断行为描述与实现不符）、**HTTP 响应超限专属 error_type 分类**
+（与 xhrun 的 output_too_large 对齐）、**HTTP 结果数组新增 truncated 字段**
+（与 xhrun 字段集对齐）、**扩展 mock_server 测试基础设施**
+（新增 /redirect 与 /large 端点）、**补齐重定向与超限测试覆盖**。
+
+### 修复
+- **README 截断行为描述与实现矛盾**：原描述"截断时 `success` 仍为 `true`，
+  但 `body` 不完整"与实现不符。实际行为：响应体超过 `max_response_size` 时，
+  请求被视为失败（`success=false`、`body=""`、`body_size=0`、
+  `error` 含"超过最大限制"、`error_type="response_too_large"`、`truncated=true`）。
+  部分读取的响应体不返回给 PHP（实现上返回 Err，部分 body 被丢弃）。
+  README 已修正为准确描述。
+- **`maxRedirects(0)` 返回错误而非 3xx 响应**：原实现使用
+  `reqwest::redirect::Policy::limited(0)`，该策略在遇到重定向时返回
+  "too many redirects" 错误（status=0），而非返回 3xx 响应。
+  修正为 `Policy::none()`（与 `followRedirects(false)` 等价），
+  正确返回 302 响应体。影响 `maxRedirects(0)` 和
+  `followRedirects(true)->maxRedirects(0)` 两种调用路径。
+  README 中"maxRedirects(0) 等价于 followRedirects(false)"的描述现真正成立。
+
+### 新增
+- **HTTP 响应超限专属 error_type**：`classify_error_type` 增加对"超过最大限制"或
+  "响应体"关键词的识别，返回 `"response_too_large"`。与 `xhrun` 的
+  `"output_too_large"` 风格对齐。error_type 值集扩展为
+  `dns/timeout/ssl/connection/response_too_large/unknown`，成功路径仍为 `""`。
+- **HTTP 结果数组 truncated 字段**：所有 HTTP 响应构建路径
+  （execute/XHMulti/XHThreadPool/fiber_await/gather/each）新增 `truncated` 布尔字段，
+  默认 `false`。仅当响应体超限时设为 `true`。与 `xhrun` 的 `truncated` 字段对齐。
+  HTTP 结果数组字段集从 10 扩展到 11。
+- **mock_server 新增 /redirect?n=N 端点**：n>0 返回 302 + Location: /redirect?n=N-1，
+  n=0 返回 200 + JSON `{"redirected":true}`。解锁 maxRedirects/followRedirects 测试。
+- **mock_server 新增 /large?size=N 端点**：返回 200 + 指定字节数响应体
+  （上限 10MB 防止 mock_server OOM）。解锁 HTTP 响应超限测试。
+
+### 测试
+- 新增 `php_unify_truncation_and_redirect_test.php`（16 项），覆盖：
+  HTTP 响应超限（success=false/body=""/error_type="response_too_large"/truncated=true）、
+  成功路径 truncated=false、maxRedirects(0)/maxRedirects(5)/followRedirects(false)/
+  followRedirects(true) 对 /redirect 端点的行为、
+  error_type 值集（dns/timeout/connection/response_too_large/""）、
+  body_size 与 strlen(body) 一致性。
+  注意：`maxResponseSize()` 仅存在于 XHMulti/XHThreadPool，XHRequest 通过全局
+  `setConfig(['max_response_size' => N])` 设置；DNS 测试兼容沙箱代理环境
+  （代理可能拦截 DNS 失败返回 502 而非真正的 DNS 错误）。
+
+
 ## [1.2.0] - 2026-07-12
 
 本版本为**次版本号升级**（含 BREAKING 变更），完成**空字符串 fail-fast 校验扩展**

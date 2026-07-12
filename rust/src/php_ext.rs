@@ -3019,6 +3019,8 @@ fn classify_error_type(error: &str) -> &'static str {
         || lower.contains("error sending")
     {
         "connection"
+    } else if lower.contains("超过最大限制") || lower.contains("响应体") {
+        "response_too_large"
     } else {
         "unknown"
     }
@@ -3051,6 +3053,8 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
         fill_response_fields(&mut response_ht, resp);
         // 成功路径无错误类型，插入空字符串保持字段集与失败路径一致
         let _ = response_ht.insert("error_type", "");
+        // 成功路径不会出现响应体超限（超限在 executor 即返回 Err），故 truncated 恒为 false
+        let _ = response_ht.insert("truncated", false);
     } else {
         // 无响应（请求失败）时，补充 status/body/headers/body_size/url 等，
         // 确保失败路径字段集与成功路径（fill_response_fields）完全一致
@@ -3074,6 +3078,9 @@ pub(crate) fn result_to_php_array(result: &crate::multi::RequestResult) -> ZBox<
             None => "unknown",
         };
         let _ = response_ht.insert("error_type", error_type);
+        // 仅响应体超限错误才标记 truncated=true，其余失败类型未发生截断
+        let truncated = error_type == "response_too_large";
+        let _ = response_ht.insert("truncated", truncated);
     }
     response_ht
 }
@@ -3198,6 +3205,8 @@ fn response_to_php_array(response: &XhResponse) -> ZBox<ZendHashTable> {
     // （与 result_to_php_array 成功路径处理对齐，确保 execute() 单请求
     // 与 XHMulti/XHThreadPool/fiber 路径返回的字段集完全一致）
     let _ = ht.insert("error_type", "");
+    // 成功路径不会出现响应体超限（超限在 executor 即返回 Err），故 truncated 恒为 false
+    let _ = ht.insert("truncated", false);
     ht
 }
 

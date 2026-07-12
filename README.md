@@ -589,8 +589,9 @@ XHCurl::setConfig([
 | `remote_addr` | string | 远程服务器地址（可选） |
 | `version` | string | HTTP 协议版本（可选，如 `HTTP/1.1`） |
 | `error` | string | 错误信息（失败时为错误描述，成功时为空字符串） |
-| `error_type` | string | 错误类型枚举（失败时为 `dns`/`timeout`/`ssl`/`connection`/`unknown`，成功时为空字符串；详见下文「失败路径字段说明」） |
+| `error_type` | string | 错误类型枚举（失败时为 `dns`/`timeout`/`ssl`/`connection`/`response_too_large`/`unknown`，成功时为空字符串；`response_too_large` 标识响应体超过 `max_response_size` 的超限场景。详见下文「失败路径字段说明」） |
 | `user_data` | string | 用户自定义数据（JSON 字符串，设置了 `setUserData()`/`userData()` 时） |
+| `truncated` | bool | 是否因响应体超过 max_response_size 而被截断（true 表示超限失败，false 表示正常） |
 
 > 所有 API 均直接返回上述关联数组，不返回对象。批量上限 `MAX_REQUESTS_PER_BATCH = 10000`，
 > 超出会在执行前拒绝（避免先克隆再拒绝导致 OOM）。
@@ -611,7 +612,7 @@ XHCurl::setConfig([
 | `remote_addr` | 为空字符串 | 未建立连接时为空字符串（字段始终存在） |
 | `version` | 为空字符串 | 无 HTTP 协议版本时为空字符串（字段始终存在） |
 | `error` | 错误信息字符串 | **失败路径的核心字段**，包含错误原因 |
-| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。成功时为空字符串（字段始终存在，与成功路径字段集一致） |
+| `error_type` | 错误类型枚举字符串 | 可能值：`dns`/`timeout`/`ssl`/`connection`/`response_too_large`/`unknown`；用于程序化区分错误类型，而非解析 `error` 字符串。其中 `response_too_large` 标识响应体超过 `max_response_size` 的超限场景。成功时为空字符串（字段始终存在，与成功路径字段集一致） |
 | `elapsed_ms` | 始终存在 | 已耗时（毫秒），即使失败也会返回 |
 | `user_data` | 设置了 `setUserData()`/`userData()` 时存在 | 与成功路径一致 |
 
@@ -1205,7 +1206,10 @@ $result = $request->execute();
 **排查**：
 - 默认限制 10MB（`setConfig(['max_response_size' => 10_000_000])`）
 - 大文件下载需调高限制：`setConfig(['max_response_size' => 100_000_000])`（100MB）
-- 截断时 `success` 仍为 true，但 `body` 不完整；检查 `body_size` 与预期是否匹配
+- 响应体超过 max_response_size 时，请求被视为失败：success=false、body=""、
+  body_size=0、error 含"超过最大限制"、error_type="response_too_large"、truncated=true。
+  部分读取的响应体不会返回给 PHP（实现上返回 Err，部分 body 被丢弃）。
+  如需获取部分响应体，请调大 max_response_size 或使用流式回调 onChunk 自行处理。
 
 ### 流式回调不触发
 
