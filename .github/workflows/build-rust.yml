@@ -11,18 +11,11 @@
 name: Build XHCurl Rust Extension
 
 # 触发条件：
-#   1. push 到 main 分支
-#   2. 创建 v* tag 时触发
-#   3. PR 到 main 分支（仅 rust/ 目录变更时）
+#   仅创建 / 推送 v* tag 时触发
+#   不监听 main 分支 push / PR，避免消耗 GitHub Actions 分钟额度
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'rust/**'
-      - '.github/workflows/build-rust.yml'
 
 # 全局环境变量
 env:
